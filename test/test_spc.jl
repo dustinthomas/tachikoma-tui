@@ -139,15 +139,17 @@ end
         pa = m.plot_area
         @test pa.width > 5 && pa.height > 3
 
-        # Click (press) near middle of plot -> sets selected (and hovered)
+        # Click: press then release at same spot -> commits selected via snap (uses release x for nearest point)
         cx = pa.x + (pa.width ÷ 2)
         cy = pa.y + (pa.height ÷ 2)
         T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_press, false, false, false))
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_release, false, false, false))
         @test m.selected !== nothing
         si = m.selected
         @test si >= m.viewport.x0 && si <= m.viewport.x1
 
-        # Move mouse to different point (changes hovered, selected persists) to verify full ┃ without crosshair overwrite at top
+        # Move mouse (plain hover) to different point (changes hovered, selected persists)
+        # to verify full ┃ remains (drawn independently) without being cleared by hover move.
         cx2 = pa.x + (pa.width ÷ 3)
         cy2 = pa.y + (pa.height ÷ 3)
         T.update!(
@@ -155,7 +157,7 @@ end
             T.MouseEvent(cx2, cy2, T.mouse_none, T.mouse_move, false, false, false),
         )
         @test m.hovered != si   # hover moved
-        @test m.selected == si  # selected unchanged
+        @test m.selected == si  # selected unchanged (and ┃ will be drawn)
 
         # Re-render after update (mandatory per tachikoma-ui-testing.md)
         tb = render_spc_visual(m; w = 70, h = 18)

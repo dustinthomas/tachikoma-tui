@@ -6,7 +6,7 @@
 # side panel, StatusBar footer.
 #
 # Keys: q/esc quit, p pause, r/z reset viewport, arrows pan
-# Mouse: hover for details + crosshair, click for persistent ┃ vertical (selected), left-drag pan, wheel zoom
+# Mouse: hover for details + crosshair + exact │ line, click for persistent ┃ vertical (snaps to nearest), left-drag pan, wheel zoom
 # ═══════════════════════════════════════════════════════════════════════
 
 using Tachikoma
@@ -41,6 +41,7 @@ end
     viewport::Viewport = Viewport()
     hovered::Union{Nothing, Int} = nothing
     selected::Union{Nothing, Int} = nothing
+    hover_x::Union{Nothing, Int} = nothing  # raw mouse x for vertical line to follow mouse exactly
     paused::Bool = false
     plot_area::Rect = Rect(0, 0, 0, 0)
     side_area::Rect = Rect(0, 0, 0, 0)
@@ -170,6 +171,32 @@ function compute_hovered_index(
     for i in vp.x0:vp.x1
         (i < 1 || i > length(d.values)) && continue
         dd = abs(i - target_idx)
+        if dd < best_d
+            best_d = dd
+            best_i = i
+        end
+    end
+    best_i
+end
+
+# Snap target: find data index whose *rendered cell x* is nearest the given mouse cell x.
+# This ensures on release the vertical snaps to the visually closest point (by screen position)
+# rather than by data-index fractional distance (which can pick a point whose rounded cell is farther).
+function nearest_point_index_to_cell_x(
+    cell_x::Int,
+    pa::Rect,
+    vp::Viewport,
+    d::SPCData,
+)::Union{Nothing, Int}
+    if vp.x1 == vp.x0
+        return vp.x0
+    end
+    best_i = vp.x0
+    best_d = Inf
+    for i in vp.x0:vp.x1
+        (i < 1 || i > length(d.values)) && continue
+        ci = data_index_to_cell(i, pa, vp)
+        dd = abs(ci - cell_x)
         if dd < best_d
             best_d = dd
             best_i = i
@@ -320,6 +347,7 @@ function update!(m::SPCModel, evt::KeyEvent)
             clamp_viewport!(m.viewport, n)
             m.hovered = nothing
             m.selected = nothing
+            m.hover_x = nothing
             m.drag_start = nothing
             m.last_event = "reset"
         end
@@ -342,11 +370,19 @@ end
 # PR2: Mouse interactions (hover, drag pan, wheel zoom)
 function update!(m::SPCModel, evt::MouseEvent)
     m.last_event = string(evt.action, " ", evt.button)
+
+    # Track raw mouse position for the vertical line to follow the mouse exactly.
+    if evt.action == mouse_move || evt.action == mouse_press || evt.action == mouse_drag
+        m.hover_x = evt.x
+    end
+
     pa = m.plot_area
     if !contains(pa, evt.x, evt.y)
         if evt.action == mouse_release
             m.drag_start = nothing
         end
+        m.hover_x = nothing
+        m.hovered = nothing
         return
     end
 
@@ -362,7 +398,7 @@ function update!(m::SPCModel, evt::MouseEvent)
     if evt.action == mouse_press && evt.button == mouse_left
         m.drag_start = (x = evt.x, y = evt.y, vp = deepcopy(m.viewport))
         m.hovered = compute_hovered_index(evt.x, evt.y, pa, m.data, m.viewport)
-        m.selected = m.hovered  # persistent ┃ vertical (distinct from transient hover)
+        m.selected = nothing
         return
     end
 
@@ -375,12 +411,22 @@ function update!(m::SPCModel, evt::MouseEvent)
 
     if evt.action == mouse_release
         m.drag_start = nothing
+        # Snap using the release position (where the follow vertical currently is).
+        # Pick the point whose on-screen cell x is nearest to it. (fixes "far point" snap)
+        m.selected = nearest_point_index_to_cell_x(evt.x, pa, m.viewport, m.data)
+        if m.selected !== nothing
+            m.hovered = m.selected  # keep tooltip/horiz in sync with just-snapped selection
+        end
+        m.hover_x = nothing  # stop real-time follow; line will use selected (thick ┃)
         return
     end
 
-    if evt.action == mouse_move || evt.action == mouse_press
+    if evt.action == mouse_move
         m.hovered = compute_hovered_index(evt.x, evt.y, pa, m.data, m.viewport)
+        # Do not clear selected here: allows the persistent ┃ to remain visible
+        # while plain hover moves update the tooltip / horiz tick for other points.
     end
+    # (press path clears selected explicitly to start a fresh gesture with raw follow)
 end
 
 # ── View (static render for PR1) ───────────────────────────────────────
@@ -429,13 +475,13 @@ function view(m::SPCModel, f::Frame)
         buf,
         header.x + 1,
         header.y,
-        "SPC Chart (seed=42)  [p]pause [r/z]reset [←→]pan wheel=zoom [q]quit",
+        "SPC Chart (seed=42)  [p]pause [r/z]reset [←→]pan wheel=zoom [q]quit  (mouse line follows exactly; snaps nearest on release)",
         tstyle(:title, bold = true),
     )
 
     # Plot block + canvas
     plot_block = Block(
-        title = "Process Data (mouse: hover/click/drag/wheel)",
+        title = "Process Data (│ follows mouse exactly; ┃ snaps to nearest point on click release; hover updates tooltip+tick)",
         border_style = tstyle(:border),
         title_style = tstyle(:title),
     )
@@ -483,18 +529,37 @@ function view(m::SPCModel, f::Frame)
 
         render_canvas(c, plot_inner, f)
 
-        # Post-render overlay for selected (PR1): full-height ┃ vertical at click point.
-        # Uses data_index_to_cell (from viewport slice) so survives pan/zoom/live append.
-        # Drawn before markers/crosshair.
-        if (si = m.selected) !== nothing && si >= m.viewport.x0 && si <= m.viewport.x1
-            sx = data_index_to_cell(si, plot_inner, m.viewport)
+        # Vertical line logic:
+        # - Plain hover/move + press/drag: hover_x makes thin '│' follow mouse exactly (raw cell x).
+        # - On left-click release: clears hover_x, sets selected to the *screen-nearest* point to that x.
+        # - Selected ┃ (thick) drawn independently so it persists while hovering elsewhere (updates only tooltip/horiz).
+        # Horizontal tick always snaps to the hovered point (for the info bubble alignment).
+        # Markers sit on top at the data row.
+        if m.hover_x !== nothing
+            # Real-time follow (during mouse movement/hover): exact raw position. Good.
+            hx = clamp(m.hover_x, plot_inner.x, right(plot_inner))
             for y in (plot_inner.y + 1):(bottom(plot_inner) - 1)
-                set_char!(buf, sx, y, '┃', tstyle(:secondary, bold = true))
+                set_char!(buf, hx, y, '│', tstyle(:accent))
+            end
+        end
+        if (si = m.selected) !== nothing && si >= m.viewport.x0 && si <= m.viewport.x1
+            # Snapped persistent ┃ after release. Drawn independently so it can
+            # coexist with hover follow (│ at different x) and remains while hovering.
+            hx = data_index_to_cell(si, plot_inner, m.viewport)
+            for y in (plot_inner.y + 1):(bottom(plot_inner) - 1)
+                set_char!(buf, hx, y, '┃', tstyle(:secondary, bold=true))
             end
         end
 
+        # Horizontal tick at the hovered point's y (snaps to the info bubble point)
+        if (hi = m.hovered) !== nothing && hi >= m.viewport.x0 && hi <= m.viewport.x1
+            hy = data_val_to_cell_row(m.data.values[hi], plot_inner, m.viewport)
+            set_char!(buf, plot_inner.x + 1, hy, '─', tstyle(:accent))
+        end
+
         # Data point markers (PR2): ● OK / ◆ violation. Cell overlays after canvas (distinct from braille).
-        # After selected ┃, before hover crosshair. Uses data_index_to_cell + data_val_to_cell_row.
+        # After the hover vertical, before remaining crosshair/tooltip.
+        # Uses data_index_to_cell + data_val_to_cell_row.
         for i in m.viewport.x0:m.viewport.x1
             dx = data_index_to_cell(i, plot_inner, m.viewport)
             dy = data_val_to_cell_row(m.data.values[i], plot_inner, m.viewport)
@@ -503,16 +568,6 @@ function view(m::SPCModel, f::Frame)
                 m.data.violations[i] ? tstyle(:accent, bold = true) :
                 tstyle(:primary, bold = true)
             set_char!(buf, dx, dy, sym, sty)
-        end
-
-        # Crosshair + marker from hovered (PR2). Refined for PR3: arms only (no center ● overwrite)
-        # so data marker (●/◆) or ┃ remain visible at point; hover arms clarify row/col.
-        if (hi = m.hovered) !== nothing && hi >= m.viewport.x0 && hi <= m.viewport.x1
-            hx = data_index_to_cell(hi, plot_inner, m.viewport)
-            hy = data_val_to_cell_row(m.data.values[hi], plot_inner, m.viewport)
-            set_char!(buf, hx, plot_inner.y + 1, '│', tstyle(:accent))
-            set_char!(buf, plot_inner.x + 1, hy, '─', tstyle(:accent))
-            # center intentionally not overwritten here (marker drawn earlier, tooltip last)
         end
 
         # Hover tooltip (PR3): drawn last after markers/vertical/crosshair when hovered and !dragging.
