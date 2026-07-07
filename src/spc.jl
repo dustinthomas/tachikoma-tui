@@ -42,9 +42,10 @@ end
     hovered::Union{Nothing, Int} = nothing
     selected::Union{Nothing, Int} = nothing
     paused::Bool = false
-    plot_area::Rect = Rect(0,0,0,0)
-    side_area::Rect = Rect(0,0,0,0)
-    drag_start::Union{Nothing, NamedTuple{(:x,:y,:vp), Tuple{Int,Int,Viewport}}} = nothing
+    plot_area::Rect = Rect(0, 0, 0, 0)
+    side_area::Rect = Rect(0, 0, 0, 0)
+    drag_start::Union{Nothing, NamedTuple{(:x, :y, :vp), Tuple{Int, Int, Viewport}}} =
+        nothing
     last_event::String = ""
     live_max::Int = 200
     rng::MersenneTwister = Random.MersenneTwister(1234)
@@ -55,7 +56,13 @@ should_quit(m::SPCModel) = m.quit
 
 # ── Seeded generator (PR1 static data) ─────────────────────────────────
 
-function generate_spc_data(n::Int=80; seed::Int=42, μ::Float64=100.0, σ::Float64=2.5, ooc_prob::Float64=0.07)
+function generate_spc_data(
+    n::Int = 80;
+    seed::Int = 42,
+    μ::Float64 = 100.0,
+    σ::Float64 = 2.5,
+    ooc_prob::Float64 = 0.07,
+)
     rng = Random.MersenneTwister(seed)
     vals = Float64[]
     for i in 1:n
@@ -69,7 +76,7 @@ function generate_spc_data(n::Int=80; seed::Int=42, μ::Float64=100.0, σ::Float
         push!(vals, v)
     end
     μ̂ = mean(vals)
-    σ̂ = std(vals; corrected=true)
+    σ̂ = std(vals; corrected = true)
     ucl = μ̂ + 3 * σ̂
     lcl = μ̂ - 3 * σ̂
     viols = [abs(v - μ̂) > 3 * σ̂ for v in vals]
@@ -145,12 +152,18 @@ function cell_to_data_index(cell_x::Int, pa::Rect, vp::Viewport)
 end
 
 # Nearest point hover (use frac for index, find closest visible point)
-function compute_hovered_index(evt_x::Int, evt_y::Int, pa::Rect, d::SPCData, vp::Viewport)::Union{Nothing,Int}
+function compute_hovered_index(
+    evt_x::Int,
+    evt_y::Int,
+    pa::Rect,
+    d::SPCData,
+    vp::Viewport,
+)::Union{Nothing, Int}
     !contains(pa, evt_x, evt_y) && return nothing
     if vp.x1 == vp.x0
         return vp.x0
     end
-    frac_x = clamp( (evt_x - pa.x) / (pa.width - 1) , 0.0, 1.0)
+    frac_x = clamp((evt_x - pa.x) / (pa.width - 1), 0.0, 1.0)
     target_idx = vp.x0 + frac_x * (vp.x1 - vp.x0)
     best_i = vp.x0
     best_d = Inf
@@ -203,8 +216,10 @@ end
 # ── Dashed line helper (Bresenham variant) ─────────────────────────────
 
 function dashed_line!(c, x0::Int, y0::Int, x1::Int, y1::Int; dash::Int = 4)
-    dx = abs(x1 - x0); dy = abs(y1 - y0)
-    sx = x0 < x1 ? 1 : -1; sy = y0 < y1 ? 1 : -1
+    dx = abs(x1 - x0);
+    dy = abs(y1 - y0)
+    sx = x0 < x1 ? 1 : -1;
+    sy = y0 < y1 ? 1 : -1
     err = dx - dy
     step = 0
     while true
@@ -213,8 +228,16 @@ function dashed_line!(c, x0::Int, y0::Int, x1::Int, y1::Int; dash::Int = 4)
         end
         (x0 == x1 && y0 == y1) && break
         e2 = 2 * err
-        if e2 > -dy; err -= dy; x0 += sx; end
-        if e2 < dx; err += dx; y0 += sy; end
+        if e2 > -dy
+            ;
+            err -= dy;
+            x0 += sx;
+        end
+        if e2 < dx
+            ;
+            err += dx;
+            y0 += sy;
+        end
         step += 1
     end
 end
@@ -282,7 +305,7 @@ function update!(m::SPCModel, evt::MouseEvent)
     end
 
     if evt.action == mouse_press && evt.button == mouse_left
-        m.drag_start = (x=evt.x, y=evt.y, vp=deepcopy(m.viewport))
+        m.drag_start = (x = evt.x, y = evt.y, vp = deepcopy(m.viewport))
         m.hovered = compute_hovered_index(evt.x, evt.y, pa, m.data, m.viewport)
         m.selected = m.hovered  # persistent ┃ vertical (distinct from transient hover)
         return
@@ -291,7 +314,7 @@ function update!(m::SPCModel, evt::MouseEvent)
     if evt.action == mouse_drag && m.drag_start !== nothing && evt.button == mouse_left
         dx = evt.x - m.drag_start.x
         pan_viewport!(m.viewport, -dx, pa.width, n)  # sign for natural drag
-        m.drag_start = (x=evt.x, y=evt.y, vp=deepcopy(m.viewport))  # update for continued drag
+        m.drag_start = (x = evt.x, y = evt.y, vp = deepcopy(m.viewport))  # update for continued drag
         return
     end
 
@@ -347,15 +370,19 @@ function view(m::SPCModel, f::Frame)
     side_rect = cols[2]
 
     # Header
-    set_string!(buf, header.x + 1, header.y,
+    set_string!(
+        buf,
+        header.x + 1,
+        header.y,
         "SPC Chart (seed=42)  [p]pause [r/z]reset [←→]pan wheel=zoom [q]quit",
-        tstyle(:title, bold=true))
+        tstyle(:title, bold = true),
+    )
 
     # Plot block + canvas
     plot_block = Block(
         title = "Process Data (mouse: hover/click/drag/wheel)",
         border_style = tstyle(:border),
-        title_style = tstyle(:title)
+        title_style = tstyle(:title),
     )
     plot_inner = render(plot_block, plot_rect, buf)
     m.plot_area = plot_inner
@@ -403,13 +430,24 @@ function view(m::SPCModel, f::Frame)
 
         # Post-render overlay for selected (PR1): full-height ┃ vertical at click point.
         # Uses data_index_to_cell (from viewport slice) so survives pan/zoom/live append.
-        # Drawn before crosshair (hover crosshair unchanged). Marker at data row wins later PRs.
-        # Note: if selected==hovered immediately after press, crosshair may overwrite top (y+1) with '│' (see below); test decouples via move.
+        # Drawn before markers/crosshair.
         if (si = m.selected) !== nothing && si >= m.viewport.x0 && si <= m.viewport.x1
             sx = data_index_to_cell(si, plot_inner, m.viewport)
             for y in (plot_inner.y + 1):(bottom(plot_inner) - 1)
-                set_char!(buf, sx, y, '┃', tstyle(:secondary, bold=true))
+                set_char!(buf, sx, y, '┃', tstyle(:secondary, bold = true))
             end
+        end
+
+        # Data point markers (PR2): ● OK / ◆ violation. Cell overlays after canvas (distinct from braille).
+        # After selected ┃, before hover crosshair. Uses data_index_to_cell + data_val_to_cell_row.
+        for i in m.viewport.x0:m.viewport.x1
+            dx = data_index_to_cell(i, plot_inner, m.viewport)
+            dy = data_val_to_cell_row(m.data.values[i], plot_inner, m.viewport)
+            sym = m.data.violations[i] ? '◆' : '●'
+            sty =
+                m.data.violations[i] ? tstyle(:accent, bold = true) :
+                tstyle(:primary, bold = true)
+            set_char!(buf, dx, dy, sym, sty)
         end
 
         # Crosshair + marker from hovered (PR2)
@@ -418,34 +456,72 @@ function view(m::SPCModel, f::Frame)
             hy = data_val_to_cell_row(m.data.values[hi], plot_inner, m.viewport)
             set_char!(buf, hx, plot_inner.y + 1, '│', tstyle(:accent))
             set_char!(buf, plot_inner.x + 1, hy, '─', tstyle(:accent))
-            set_char!(buf, hx, hy, '●', tstyle(:accent, bold=true))
+            set_char!(buf, hx, hy, '●', tstyle(:accent, bold = true))
         end
 
         # Axis labels (minimal)
-        set_string!(buf, plot_inner.x, plot_inner.y + ch - 1, string(m.viewport.x0), tstyle(:text_dim))
-        set_string!(buf, right(plot_inner) - 3, plot_inner.y + ch - 1, string(m.viewport.x1), tstyle(:text_dim))
+        set_string!(
+            buf,
+            plot_inner.x,
+            plot_inner.y + ch - 1,
+            string(m.viewport.x0),
+            tstyle(:text_dim),
+        )
+        set_string!(
+            buf,
+            right(plot_inner) - 3,
+            plot_inner.y + ch - 1,
+            string(m.viewport.x1),
+            tstyle(:text_dim),
+        )
     end
 
     # Side panel
-    side_block = Block(title="Details", border_style=tstyle(:border))
+    side_block = Block(title = "Details", border_style = tstyle(:border))
     side_inner = render(side_block, side_rect, buf)
     m.side_area = side_inner
     x = side_inner.x
     y = side_inner.y
-    set_string!(buf, x, y, "n=$(length(m.data.values)) live", tstyle(:text)); y += 1
-    set_string!(buf, x, y, "μ=$(round(m.data.mean;digits=2)) σ=$(round(m.data.sd;digits=2))", tstyle(:text_dim)); y += 1
-    set_string!(buf, x, y, "UCL=$(round(m.data.ucl;digits=1)) LCL=$(round(m.data.lcl;digits=1))", tstyle(:text_dim)); y += 2
+    set_string!(buf, x, y, "n=$(length(m.data.values)) live", tstyle(:text));
+    y += 1
+    set_string!(
+        buf,
+        x,
+        y,
+        "μ=$(round(m.data.mean;digits=2)) σ=$(round(m.data.sd;digits=2))",
+        tstyle(:text_dim),
+    );
+    y += 1
+    set_string!(
+        buf,
+        x,
+        y,
+        "UCL=$(round(m.data.ucl;digits=1)) LCL=$(round(m.data.lcl;digits=1))",
+        tstyle(:text_dim),
+    );
+    y += 2
     if (hi = m.hovered) !== nothing && hi >= m.viewport.x0 && hi <= m.viewport.x1
-        v = m.data.values[hi]; stat = m.data.violations[hi] ? "OOC ✗" : "OK"
-        set_string!(buf, x, y, "hovered[$hi]=$(round(v;digits=2)) $stat", tstyle(:accent, bold=true)); y += 1
+        v = m.data.values[hi];
+        stat = m.data.violations[hi] ? "OOC ✗" : "OK"
+        set_string!(
+            buf,
+            x,
+            y,
+            "hovered[$hi]=$(round(v;digits=2)) $stat",
+            tstyle(:accent, bold = true),
+        );
+        y += 1
     else
-        set_string!(buf, x, y, "hover over points", tstyle(:text_dim)); y += 1
+        set_string!(buf, x, y, "hover over points", tstyle(:text_dim));
+        y += 1
     end
     y += 1
     # legend
     set_char!(buf, x, y, '■', tstyle(:primary))
-    set_string!(buf, x+1, y, " data  ", tstyle(:text_dim)); y += 1
-    set_string!(buf, x, y, " - - UCL/LCL", tstyle(:text_dim)); y += 2
+    set_string!(buf, x+1, y, " data  ●/◆ points", tstyle(:text_dim));
+    y += 1
+    set_string!(buf, x, y, " - - UCL/LCL", tstyle(:text_dim));
+    y += 2
     # controls
     set_string!(buf, x, y, "keys: p pause, r/z reset, arrows pan", tstyle(:text_dim))
 
@@ -454,7 +530,7 @@ function view(m::SPCModel, f::Frame)
     length(gcols) < 2 && return
     # Gauge 1: current value (arc scale + needle)
     g1 = gcols[1]
-    g1i = render(Block(border_style=tstyle(:border)), g1, buf)  # get inner-ish area
+    g1i = render(Block(border_style = tstyle(:border)), g1, buf)  # get inner-ish area
     if g1i.width > 4 && g1i.height > 3
         gc = create_canvas(max(1, g1i.width), max(1, g1i.height); style = tstyle(:primary))
         cx, cy = g1i.width ÷ 2, g1i.height - 1
@@ -462,7 +538,7 @@ function view(m::SPCModel, f::Frame)
         arc!(gc, cx, cy, r, 0.0, 180.0)
         # needle based on current (last) value normalized to limits
         lastv = m.data.values[end]
-        norm = clamp( (lastv - m.data.lcl) / (m.data.ucl - m.data.lcl + 1e-9), 0.0, 1.0 )
+        norm = clamp((lastv - m.data.lcl) / (m.data.ucl - m.data.lcl + 1e-9), 0.0, 1.0)
         ang = deg2rad(180 - norm * 180)
         nx = round(Int, cx + r * 0.8 * cos(ang))
         ny = round(Int, cy - r * 0.8 * sin(ang))
@@ -474,18 +550,22 @@ function view(m::SPCModel, f::Frame)
 
     # Gauge 2: simple violation indicator or % in control
     g2 = gcols[2]
-    g2i = render(Block(border_style=tstyle(:border)), g2, buf)
-    viol_count = count(m.data.violations[max(1, end-20):end])
+    g2i = render(Block(border_style = tstyle(:border)), g2, buf)
+    viol_count = count(m.data.violations[max(1, end - 20):end])
     pct = 100 - round(viol_count / min(20, length(m.data.violations)) * 100)
     if g2i.width > 4 && g2i.height > 2
         set_string!(buf, g2i.x + 1, g2i.y, "InCtrl ~$(round(Int, pct))%", tstyle(:text_dim))
     end
 
     # Footer using StatusBar (PR3 refinement)
-    render(StatusBar(
-        left = [Span(" paused=$(m.paused)  last=$(m.last_event) ", tstyle(:text_dim))],
-        right = [Span("[q]quit ", tstyle(:text_dim))]
-    ), footer, buf)
+    render(
+        StatusBar(
+            left = [Span(" paused=$(m.paused)  last=$(m.last_event) ", tstyle(:text_dim))],
+            right = [Span("[q]quit ", tstyle(:text_dim))],
+        ),
+        footer,
+        buf,
+    )
 end
 
 # ── Runners ────────────────────────────────────────────────────────────
@@ -497,12 +577,15 @@ PR1 static demo. Full data viewport, no live mutation inside view.
 Use this for initial gates and TestBackend tests.
 """
 function static_spc_demo()
-    data = generate_spc_data(80; seed=42)
+    data = generate_spc_data(80; seed = 42)
     n = length(data.values)
-    vp = Viewport(x0=1, x1=n,
-                  ylo=minimum(data.values)-1.0,
-                  yhi=maximum(data.values)+1.0)
-    m = SPCModel(data=data, viewport=vp, paused=true)
+    vp = Viewport(
+        x0 = 1,
+        x1 = n,
+        ylo = minimum(data.values)-1.0,
+        yhi = maximum(data.values)+1.0,
+    )
+    m = SPCModel(data = data, viewport = vp, paused = true)
     clamp_viewport!(m.viewport, n)
     app(m)
 end
@@ -515,12 +598,15 @@ const run_static_spc = static_spc_demo
 Main entry. For PR1 use paused=true (static).
 """
 function spc_demo(; paused::Bool = false)
-    data = generate_spc_data(80; seed=42)
+    data = generate_spc_data(80; seed = 42)
     n = length(data.values)
-    vp = Viewport(x0=1, x1=n,
-                  ylo=minimum(data.values)-1.0,
-                  yhi=maximum(data.values)+1.0)
-    m = SPCModel(data=data, viewport=vp, paused=paused)
+    vp = Viewport(
+        x0 = 1,
+        x1 = n,
+        ylo = minimum(data.values)-1.0,
+        yhi = maximum(data.values)+1.0,
+    )
+    m = SPCModel(data = data, viewport = vp, paused = paused)
     clamp_viewport!(m.viewport, n)
     app(m)
 end
