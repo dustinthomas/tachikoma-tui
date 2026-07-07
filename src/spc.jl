@@ -6,7 +6,7 @@
 # side panel, StatusBar footer.
 #
 # Keys: q/esc quit, p pause, r/z reset viewport, arrows pan
-# Mouse: hover for details + crosshair, left-drag pan, wheel zoom
+# Mouse: hover for details + crosshair, click for persistent ┃ vertical (selected), left-drag pan, wheel zoom
 # ═══════════════════════════════════════════════════════════════════════
 
 using Tachikoma
@@ -242,6 +242,7 @@ function update!(m::SPCModel, evt::KeyEvent)
             clamp_viewport!(m.viewport, n)
             m.hovered = nothing
             m.selected = nothing
+            m.drag_start = nothing
             m.last_event = "reset"
         end
     end
@@ -403,6 +404,7 @@ function view(m::SPCModel, f::Frame)
         # Post-render overlay for selected (PR1): full-height ┃ vertical at click point.
         # Uses data_index_to_cell (from viewport slice) so survives pan/zoom/live append.
         # Drawn before crosshair (hover crosshair unchanged). Marker at data row wins later PRs.
+        # Note: if selected==hovered immediately after press, crosshair may overwrite top (y+1) with '│' (see below); test decouples via move.
         if (si = m.selected) !== nothing && si >= m.viewport.x0 && si <= m.viewport.x1
             sx = data_index_to_cell(si, plot_inner, m.viewport)
             for y in (plot_inner.y + 1):(bottom(plot_inner) - 1)

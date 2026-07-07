@@ -91,9 +91,6 @@ Features (per design):
 - Fully TestBackend testable; follows Elm update!/view.
 
 See `design-spc-interactive-chart.md` for the full PR plan and rationale.
-```
-
-Refinements (PR2/PR3) complete; PR4 (PBT, recordings) can follow.
 
 ---
 

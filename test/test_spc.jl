@@ -27,7 +27,6 @@ end
         @test length(d.values) == 50
         @test length(d.violations) == 50
         @test d.ucl > d.mean > d.lcl
-        @test length(d.violations) == 50  # generator produces the right shape (violations are probabilistic)
         @test all(isfinite, d.values)
     end
 
@@ -113,8 +112,6 @@ end
         T.update!(m, T.MouseEvent(10, 5, T.mouse_left, T.mouse_press, false,false,false))
         T.update!(m, T.MouseEvent(20, 5, T.mouse_left, T.mouse_drag, false,false,false))
         @test m.viewport.x0 >= 5   # directionally panned (may clamp)
-
-        @test true
     end
 
     @testset "Selected persistent vertical line on click (PR1 visual)" begin
@@ -161,7 +158,7 @@ end
         T.update!(m, T.KeyEvent('r'))
         @test m.selected === nothing
         tb = render_spc_visual(m; w=70, h=18)
-        # No ┃ expected at that sx anymore
+        # No ┃ expected at that sx anymore (char_at + selected===nothing prove removal post-re-render)
         ch_after = T.char_at(tb, sx, midy)
         @test ch_after != '┃'
     end
