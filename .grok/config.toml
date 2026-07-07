@@ -1,0 +1,49 @@
+# .grok/config.toml — Project-scoped config for tachikoma-tui
+#
+# Tachikoma.jl TUI project with Grok agentic workflow.
+#
+# 2026-07 workflow (see docs/agentic-workflow-2026-07.md + AGENTS.md):
+# single lead agent + one independent verifier. The only project persona is
+# personas/validator.toml (the Tier-1 verifier, model = grok-build). The old
+# pipeline personas (planner/coder/reviewer/scout/test-writer/tdd-orchestrator)
+# were removed 2026-07-05 — recover from git history if ever needed.
+#
+# Key loading (no manual `export`):
+#   1. Edit .env and fill INCEPTION_API_KEY (or other keys)
+#   2. Launch with: set -a; source .env; set +a; grok ...
+#   .env is already gitignored.
+#
+# Models (native grok build models only — locked):
+#   lead / validator persona = grok-build
+#   bundled explore/plan subagents = grok-composer-2.5-fast (routed below)
+# BYOM mercury-2 is registered globally but unused. Persona `model =` lines
+# win over [subagents.models] routes.
+#
+# Project: tachikoma-tui — new Tachikoma.jl TUI app.
+
+[subagents]
+enabled = true
+
+# Route bundled subagents to the fast native model; the lead and the
+# validator persona stay on grok-build.
+[subagents.models]
+explore = "grok-composer-2.5-fast"
+plan = "grok-composer-2.5-fast"
+
+# Example of enabling/disabling built-ins (uncomment to experiment)
+# [subagents.toggle]
+# explore = true
+# plan = true
+
+# Note: Some subagent settings may also need to be in your global
+# ~/.grok/config.toml for full effect. Project config takes precedence
+# where supported (MCPs, plugins, certain permissions).
+
+[compat.claude]
+# Claude compat layer: `hooks = true` loads user-global ~/.claude hooks (the
+# repo-root .claude/ holds none). The in-repo safety hook is native:
+# .grok/hooks/safety.json + safety.py (PreToolUse — rm -rf / .env guard); see
+# the "Hooks" section in AGENTS.md, incl. why workflow gates are NOT hooks.
+hooks = true
+rules = true
+skills = false   # native .grok/skills/ carries the project skills

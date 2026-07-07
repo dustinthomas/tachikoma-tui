@@ -1,0 +1,21 @@
+name = "TachikomaTUI"
+uuid = "d5bda6e0-da7d-4e51-9834-c5c3e507adf0"
+authors = ["Grok Agentic Experiments"]
+version = "0.1.0"
+description = "Tachikoma.jl TUI project with full Grok agentic workflow (Tiered single-agent + verifier)."
+
+[deps]
+Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+Supposition = "5a0628fe-1738-4658-9b6d-0b7605a9755b"
+
+[compat]
+julia = "1.10"
+Tachikoma = "2"
+JSON = "0.21"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
