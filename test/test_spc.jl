@@ -253,6 +253,69 @@ end
         ) == '●'
     end
 
+    @testset "Hover tooltip window showing data point value (PR3 visual)" begin
+        # Use seed=42 data; paused=true for deterministic render (no live tick/advance in view)
+        d = generate_spc_data(25; seed = 42)
+        n = length(d.values)
+        m = SPCModel(data = d, viewport = Viewport(x0 = 1, x1 = n), paused = true)
+
+        tb = render_spc_visual(m; w = 60, h = 18)
+        pa = m.plot_area
+        @test pa.width > 10 && pa.height > 5
+
+        # Hover sets hovered; re-render; tooltip drawn last, use find_text for fragments
+        cx = pa.x + (pa.width ÷ 2)
+        cy = pa.y + (pa.height ÷ 2)
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_none, T.mouse_move, false, false, false))
+        @test m.hovered !== nothing
+        tb = render_spc_visual(m; w = 60, h = 18)
+        @test T.find_text(tb, "val=") !== nothing
+        hi = m.hovered
+        @test T.find_text(tb, "i=$hi") !== nothing
+        stat = d.violations[hi] ? "OOC" : "OK"
+        @test T.find_text(tb, stat) !== nothing
+
+        # selected + hover case: click sets selected, move hover shows tooltip on new point
+        si = hi
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_press, false, false, false))
+        T.update!(
+            m,
+            T.MouseEvent(cx, cy, T.mouse_left, T.mouse_release, false, false, false),
+        )
+        @test m.selected == si
+        cx2 = pa.x + (pa.width ÷ 3)
+        T.update!(m, T.MouseEvent(cx2, cy, T.mouse_none, T.mouse_move, false, false, false))
+        @test m.hovered != si && m.selected == si
+        tb = render_spc_visual(m; w = 60, h = 18)
+        @test T.find_text(tb, "val=") !== nothing  # tooltip follows hover
+
+        # no tooltip during drag (guard m.drag_start)
+        T.update!(
+            m,
+            T.MouseEvent(cx2, cy, T.mouse_left, T.mouse_press, false, false, false),
+        )
+        T.update!(
+            m,
+            T.MouseEvent(cx2 + 4, cy, T.mouse_left, T.mouse_drag, false, false, false),
+        )
+        tb = render_spc_visual(m; w = 60, h = 18)
+        @test T.find_text(tb, "val=") === nothing
+        # release to end drag gesture so subsequent hover can show tooltip
+        T.update!(
+            m,
+            T.MouseEvent(cx2 + 4, cy, T.mouse_left, T.mouse_release, false, false, false),
+        )
+
+        # positioning test: set plot_area near edge + hover near right to exercise fallback/clamp
+        pa_edge = Rect(pa.x + max(0, pa.width - 12), pa.y, 12, pa.height)
+        m.plot_area = pa_edge
+        rx = pa_edge.x + pa_edge.width - 2
+        ry = pa_edge.y + 3
+        T.update!(m, T.MouseEvent(rx, ry, T.mouse_none, T.mouse_move, false, false, false))
+        tb = render_spc_visual(m; w = 60, h = 18)
+        @test T.find_text(tb, "val=") !== nothing  # still draws (clamped inside)
+    end
+
     @testset "Live advance + viewport follow (PR3)" begin
         d = generate_spc_data(30; seed = 9)
         n0 = length(d.values)

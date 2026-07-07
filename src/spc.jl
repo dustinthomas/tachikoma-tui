@@ -197,6 +197,61 @@ function data_val_to_cell_row(v::Float64, pa::Rect, vp::Viewport)
     clamp(y, pa.y, bottom(pa))
 end
 
+# Hover tooltip (PR3): small bordered box near point (prefer right, clamp to plot_inner).
+# Drawn last (after markers/vertical/crosshair). Uses BOX_PLAIN + set_char!/set_string!.
+# Content: index/value/status. Only when hovered and not dragging.
+# BOX_PLAIN (and right/bottom) in scope via `using Tachikoma` (same as tstyle etc).
+function draw_hover_tooltip!(
+    buf,
+    plot_inner::Rect,
+    i::Int,
+    v::Float64,
+    is_viol::Bool,
+    vp::Viewport,
+)
+    hx = data_index_to_cell(i, plot_inner, vp)
+    hy = data_val_to_cell_row(v, plot_inner, vp)
+    val_str = "val=$(round(v;digits=2))"
+    idx_str = "i=$i"
+    stat = is_viol ? "OOC ✗" : "OK"
+    lines = [idx_str, val_str, stat]
+    tw = maximum(length, lines) + 2
+    th = length(lines) + 2
+    # prefer right, fallback left/above; clamp inside plot_inner rect only
+    tx = hx + 2
+    ty = hy - 1
+    if tx + tw > right(plot_inner)
+        tx = max(plot_inner.x + 1, hx - tw - 1)
+    end
+    if ty < plot_inner.y + 1
+        ty = hy + 2
+    end
+    ty = clamp(ty, plot_inner.y + 1, bottom(plot_inner) - th)
+    tx = clamp(tx, plot_inner.x + 1, right(plot_inner) - tw)
+    b = BOX_PLAIN
+    # top
+    set_char!(buf, tx, ty, b.tl, tstyle(:border))
+    for x in (tx + 1):(tx + tw - 2)
+        ;
+        set_char!(buf, x, ty, b.h, tstyle(:border));
+    end
+    set_char!(buf, tx+tw-1, ty, b.tr, tstyle(:border))
+    # sides + content
+    for (li, line) in enumerate(lines)
+        ry = ty + li
+        set_char!(buf, tx, ry, b.v, tstyle(:border))
+        set_string!(buf, tx+1, ry, " " * line * " ", tstyle(:text))
+        set_char!(buf, tx+tw-1, ry, b.v, tstyle(:border))
+    end
+    # bottom
+    set_char!(buf, tx, ty+th-1, b.bl, tstyle(:border))
+    for x in (tx + 1):(tx + tw - 2)
+        ;
+        set_char!(buf, x, ty+th-1, b.h, tstyle(:border));
+    end
+    set_char!(buf, tx+tw-1, ty+th-1, b.br, tstyle(:border))
+end
+
 # ── Coordinate mapping (render path) ───────────────────────────────────
 
 function map_to_dot_x(idx::Int, vp::Viewport, dot_w::Int)
@@ -450,13 +505,29 @@ function view(m::SPCModel, f::Frame)
             set_char!(buf, dx, dy, sym, sty)
         end
 
-        # Crosshair + marker from hovered (PR2)
+        # Crosshair + marker from hovered (PR2). Refined for PR3: arms only (no center ● overwrite)
+        # so data marker (●/◆) or ┃ remain visible at point; hover arms clarify row/col.
         if (hi = m.hovered) !== nothing && hi >= m.viewport.x0 && hi <= m.viewport.x1
             hx = data_index_to_cell(hi, plot_inner, m.viewport)
             hy = data_val_to_cell_row(m.data.values[hi], plot_inner, m.viewport)
             set_char!(buf, hx, plot_inner.y + 1, '│', tstyle(:accent))
             set_char!(buf, plot_inner.x + 1, hy, '─', tstyle(:accent))
-            set_char!(buf, hx, hy, '●', tstyle(:accent, bold = true))
+            # center intentionally not overwritten here (marker drawn earlier, tooltip last)
+        end
+
+        # Hover tooltip (PR3): drawn last after markers/vertical/crosshair when hovered and !dragging.
+        if (hi = m.hovered) !== nothing &&
+           hi >= m.viewport.x0 &&
+           hi <= m.viewport.x1 &&
+           m.drag_start === nothing
+            draw_hover_tooltip!(
+                buf,
+                plot_inner,
+                hi,
+                m.data.values[hi],
+                m.data.violations[hi],
+                m.viewport,
+            )
         end
 
         # Axis labels (minimal)

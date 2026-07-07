@@ -85,7 +85,7 @@ Features (per design):
 - Seeded SPC data with control limits (UCL/LCL), violations.
 - Canvas rendering: data line, dashed limits, violation markers, crosshair.
 - Discrete data points use distinct ● (in-control) / ◆ (OOC) markers overlaid on cells.
-- Mouse: hover (details + crosshair), click for persistent ┃ vertical (selected), left-drag pan, wheel zoom.
+- Mouse: hover (details + crosshair + tooltip window), click for persistent ┃ vertical (selected), left-drag pan, wheel zoom.
 - Live updates (tick-driven append when not paused).
 - Arc+needle gauges, side panel stats/legend, StatusBar footer.
 - Keys: p pause, r/z reset, arrows pan, q quit.
