@@ -453,9 +453,10 @@ end
                 ch2.data.values[1] = ch2.usl + 10.0
             end
         end
-        tb = T.TestBackend(90, 22); T.reset!(tb.buf)
-        T.view(m, T.Frame(tb.buf, T.Rect(1,1,90,22),[],[]))
-        rows = visual_rows_wb(m; w=90, h=22)
+        # Tall enough for 3 stacked plots + Side Stats (Lines + WECO + chart list)
+        tb = T.TestBackend(90, 28); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,90,28),[],[]))
+        rows = visual_rows_wb(m; w=90, h=28)
         full = join([string(r) for r in rows if r!==nothing], "\n")
         @test occursin("Dashboard", full)
         @test occursin("Chart 2", full)   # proves secondary chart panel rendered
@@ -653,6 +654,58 @@ end
         @test found3 !== nothing
         if found3 !== nothing
             @test found3.bubbles == "○●●●●●○○"
+        end
+    end
+
+    @testset "side stats WECO: blank gap after Specs + rule numbers under bubbles" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        tb = T.TestBackend(90, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,90,24),[],[]))
+        sa = m.side_area
+        @test sa.width > 0
+
+        # Locate Specs= and WECO rows in side panel
+        specs_y = nothing
+        weco_y = nothing
+        for y in sa.y:T.bottom(sa)
+            chars = Char[T.char_at(tb, x, y) for x in sa.x:T.right(sa)]
+            txt = rstrip(String(chars))
+            if occursin("Specs=", txt) || occursin("Specs ", txt)
+                specs_y = y
+            end
+            if length(txt) >= 4 && startswith(lstrip(txt), "WECO")
+                weco_y = y
+            end
+        end
+        @test specs_y !== nothing
+        @test weco_y !== nothing
+        if specs_y !== nothing && weco_y !== nothing
+            # At least one blank row between Specs and WECO
+            @test weco_y >= specs_y + 2
+            # Intermediate row(s) should be blank (or whitespace only)
+            for y in (specs_y + 1):(weco_y - 1)
+                chars = Char[T.char_at(tb, x, y) for x in sa.x:T.right(sa)]
+                @test all(c -> c == ' ' || c == '\0', chars)
+            end
+        end
+
+        # Numbers 1-8 under each bubble, column-aligned
+        found = _side_weco_bubbles(tb, m)
+        @test found !== nothing
+        if found !== nothing
+            bubble_xs = Int[]
+            for x in found.sa.x:T.right(found.sa)
+                ch = T.char_at(tb, x, found.y)
+                if ch == '●' || ch == '○'
+                    push!(bubble_xs, x)
+                end
+            end
+            @test length(bubble_xs) == 8
+            num_y = found.y + 1
+            @test num_y <= T.bottom(found.sa)
+            digits = Char[T.char_at(tb, x, num_y) for x in bubble_xs]
+            @test digits == ['1', '2', '3', '4', '5', '6', '7', '8']
         end
     end
 

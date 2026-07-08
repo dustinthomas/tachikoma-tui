@@ -1573,18 +1573,38 @@ function view(m::SPCWorkbenchModel, f::Frame)
             y += 1
         end
         # WECO on/off bubbles: ● green when enabled, ○ dim when off (rules 1–8)
-        if y <= bottom(side_inner) - 1
-            set_string!(buf, x, y, "WECO ", tstyle(:text_dim))
-            bx = x + 5
-            for i in 1:8
-                rid = "WECO-$i"
-                on = get(m.enabled_rules, rid, false)
-                if bx <= right(side_inner)
-                    set_char!(buf, bx, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
-                end
-                bx += 1
+        # Optional blank gap after Specs when there is room for gap + WECO row.
+        # Numbers 1–8 under each bubble when a second row fits.
+        bot = bottom(side_inner)
+        if y + 1 <= bot  # at least one row left for WECO bubbles
+            # blank spacer only if Specs→WECO gap and bubble row both fit
+            if y + 2 <= bot
+                y += 1
             end
-            y += 1
+            if y <= bot
+                set_string!(buf, x, y, "WECO ", tstyle(:text_dim))
+                bx0 = x + 5
+                bx = bx0
+                for i in 1:8
+                    rid = "WECO-$i"
+                    on = get(m.enabled_rules, rid, false)
+                    if bx <= right(side_inner)
+                        set_char!(buf, bx, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
+                    end
+                    bx += 1
+                end
+                y += 1
+                # digit row under bubbles when space remains
+                if y <= bot
+                    for i in 1:8
+                        nx = bx0 + i - 1
+                        if nx <= right(side_inner)
+                            set_char!(buf, nx, y, Char('0' + i), tstyle(:text_dim))
+                        end
+                    end
+                    y += 1
+                end
+            end
         end
         # dashboard multi hint (lowest priority when cramped)
         if length(m.charts) > 1
