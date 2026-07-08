@@ -566,4 +566,212 @@ end
 
         # (note: a separate flow would use Esc to cancel instead of q)
     end
+
+    # Side Stats: WECO on/off as filled/empty circle bubbles (● green on, ○ dim off)
+    # Helper: collect contiguous ●/○ sequence from side panel (avoids multi-byte row_text slicing)
+    function _side_weco_bubbles(tb, m)
+        sa = m.side_area
+        for y in sa.y:T.bottom(sa)
+            # look for "WECO" label chars in side columns
+            has_weco = false
+            for x in sa.x:(T.right(sa) - 3)
+                if T.char_at(tb, x, y) == 'W' && T.char_at(tb, x + 1, y) == 'E' &&
+                   T.char_at(tb, x + 2, y) == 'C' && T.char_at(tb, x + 3, y) == 'O'
+                    has_weco = true
+                    break
+                end
+            end
+            has_weco || continue
+            bubbles = Char[]
+            for x in sa.x:T.right(sa)
+                ch = T.char_at(tb, x, y)
+                if ch == '●' || ch == '○'
+                    push!(bubbles, ch)
+                end
+            end
+            isempty(bubbles) && continue
+            return (y=y, bubbles=String(bubbles), sa=sa)
+        end
+        return nothing
+    end
+
+    @testset "side stats WECO rule bubbles: ● green when ON, ○ when OFF; toggle updates" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        # defaults: WECO-1..5 true, 6..8 false
+        @test m.enabled_rules["WECO-1"] == true
+        @test m.enabled_rules["WECO-6"] == false
+
+        tb = T.TestBackend(80, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,80,18),[],[]))
+        @test m.side_area.width > 0
+
+        found = _side_weco_bubbles(tb, m)
+        @test found !== nothing
+        if found !== nothing
+            @test found.bubbles == "●●●●●○○○"
+
+            # Find first ● and first ○ on that row and assert styles
+            first_on_x = nothing
+            first_off_x = nothing
+            for x in found.sa.x:T.right(found.sa)
+                ch = T.char_at(tb, x, found.y)
+                if ch == '●' && first_on_x === nothing
+                    first_on_x = x
+                elseif ch == '○' && first_off_x === nothing
+                    first_off_x = x
+                end
+            end
+            @test first_on_x !== nothing
+            @test first_off_x !== nothing
+            # ON bubbles are green (success theme); OFF are dim
+            if first_on_x !== nothing
+                @test T.style_at(tb, first_on_x, found.y) == T.tstyle(:success)
+            end
+            if first_off_x !== nothing
+                @test T.style_at(tb, first_off_x, found.y) == T.tstyle(:text_dim)
+            end
+        end
+
+        # Toggle WECO-6 on via key '6' — bubble pattern updates to six filled
+        T.update!(m, T.KeyEvent('6'))
+        @test m.enabled_rules["WECO-6"] == true
+        tb2 = T.TestBackend(80, 18); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1,1,80,18),[],[]))
+        found2 = _side_weco_bubbles(tb2, m)
+        @test found2 !== nothing
+        if found2 !== nothing
+            @test found2.bubbles == "●●●●●●○○"
+        end
+
+        # Toggle WECO-1 off via key '1' — first bubble empty
+        T.update!(m, T.KeyEvent('1'))
+        @test m.enabled_rules["WECO-1"] == false
+        tb3 = T.TestBackend(80, 18); T.reset!(tb3.buf)
+        T.view(m, T.Frame(tb3.buf, T.Rect(1,1,80,18),[],[]))
+        found3 = _side_weco_bubbles(tb3, m)
+        @test found3 !== nothing
+        if found3 !== nothing
+            @test found3.bubbles == "○●●●●●○○"
+        end
+    end
+
+    # Side panel chart-line parameters (CL/±1/±2/±3/Specs) + configurable visibility
+    function _side_rows_text(tb, m)
+        sa = m.side_area
+        rows = String[]
+        for y in sa.y:T.bottom(sa)
+            chars = Char[T.char_at(tb, x, y) for x in sa.x:T.right(sa)]
+            push!(rows, rstrip(String(chars)))
+        end
+        return rows
+    end
+
+    function _side_full(tb, m)
+        join(_side_rows_text(tb, m), "\n")
+    end
+
+    # Find row in side panel that contains needle; return (y, text, leading bubble or nothing)
+    function _side_find_row(tb, m, needle::AbstractString)
+        sa = m.side_area
+        for y in sa.y:T.bottom(sa)
+            chars = Char[T.char_at(tb, x, y) for x in sa.x:T.right(sa)]
+            txt = rstrip(String(chars))
+            if occursin(needle, txt)
+                bubble = nothing
+                for ch in chars
+                    if ch == '●' || ch == '○'
+                        bubble = ch
+                        break
+                    end
+                end
+                return (y=y, text=txt, bubble=bubble)
+            end
+        end
+        return nothing
+    end
+
+    @testset "side stats chart-line params (CL/±σ/UCL/LCL/Specs) + configurable visibility" begin
+        d = generate_spc_workbench_data(16; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        # Defaults: all chart lines visible
+        @test haskey(m.show_chart_lines, "cl")
+        @test m.show_chart_lines["cl"] == true
+        @test m.show_chart_lines["sigma1"] == true
+        @test m.show_chart_lines["sigma2"] == true
+        @test m.show_chart_lines["sigma3"] == true
+        @test m.show_chart_lines["specs"] == true
+
+        tb = T.TestBackend(90, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,90,24),[],[]))
+        @test m.side_area.width > 0
+
+        ch = current_chart(m)
+        ctx = resolve_chart_render_context(ch; sigma_method=:mr)
+        lz = ctx.lz
+        side = _side_full(tb, m)
+
+        # Side panel lists each control-line parameter with a value
+        @test occursin("CL=", side) || occursin("CL ", side)
+        @test occursin("±1", side) || occursin("1σ", side) || occursin("UCL1", side)
+        @test occursin("±2", side) || occursin("2σ", side) || occursin("UCL2", side)
+        @test occursin("±3", side) || occursin("3σ", side) || occursin("UCL=", side)
+        # Numeric fidelity: rounded CL from ctx appears
+        cl_str = string(round(lz.cl; digits=2))
+        @test occursin(cl_str, side)
+        ucl_str = string(round(lz.ucl; digits=2))
+        @test occursin(ucl_str, side)
+
+        # Bubbles present and ON by default for CL= row (not UCL)
+        cl_row = _side_find_row(tb, m, "CL=")
+        @test cl_row !== nothing
+        if cl_row !== nothing
+            @test cl_row.bubble == '●'
+            @test any(x -> T.char_at(tb, x, cl_row.y) == '●' && T.style_at(tb, x, cl_row.y) == T.tstyle(:success),
+                      m.side_area.x:T.right(m.side_area))
+        end
+
+        # Configure: open config Lines tab (v or c+Tab), toggle sigma1 off
+        T.update!(m, T.KeyEvent('v'))  # open chart-lines config
+        @test m.config_open == true
+        @test m.config_tab == :lines
+        # select ±1σ (item 2) and toggle
+        T.update!(m, T.KeyEvent('2'))
+        @test m.show_chart_lines["sigma1"] == false
+
+        tb2 = T.TestBackend(90, 24); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1,1,90,24),[],[]))
+        # still in config — close and check side
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.config_open == false
+        tb3 = T.TestBackend(90, 24); T.reset!(tb3.buf)
+        T.view(m, T.Frame(tb3.buf, T.Rect(1,1,90,24),[],[]))
+        s1_row = _side_find_row(tb3, m, "±1")
+        if s1_row === nothing
+            s1_row = _side_find_row(tb3, m, "1σ")
+        end
+        @test s1_row !== nothing
+        if s1_row !== nothing
+            @test s1_row.bubble == '○'  # off bubble on side
+        end
+        # values for ±1 still listed (params always shown; bubble reflects chart visibility)
+        side3 = _side_full(tb3, m)
+        @test occursin(string(round(lz.ucl1; digits=2)), side3) || occursin("±1", side3)
+
+        # Toggle specs off via lines config key 5
+        T.update!(m, T.KeyEvent('v'))
+        T.update!(m, T.KeyEvent('5'))
+        @test m.show_chart_lines["specs"] == false
+        T.update!(m, T.KeyEvent('c'))  # close
+        @test m.config_open == false
+
+        # Tab switches between WECO and Lines inside config
+        T.update!(m, T.KeyEvent('c'))
+        @test m.config_open && m.config_tab == :weco
+        T.update!(m, T.KeyEvent(:tab))
+        @test m.config_tab == :lines
+        T.update!(m, T.KeyEvent(:tab))
+        @test m.config_tab == :weco
+        T.update!(m, T.KeyEvent(:escape))
+    end
 end

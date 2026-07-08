@@ -78,6 +78,25 @@ const DEFAULT_WECO_RULES = Dict{String,Bool}(
     "WECO-8" => false,
 )
 
+# Chart limit-line visibility (side panel params + which lines are drawn on the plot)
+const CHART_LINE_KEYS = ["cl", "sigma1", "sigma2", "sigma3", "specs"]
+const CHART_LINE_LABELS = Dict(
+    "cl" => "CL",
+    "sigma1" => "±1σ",
+    "sigma2" => "±2σ",
+    "sigma3" => "±3σ",
+    "specs" => "Specs",
+)
+const DEFAULT_CHART_LINES = Dict{String,Bool}(
+    "cl" => true,
+    "sigma1" => true,
+    "sigma2" => true,
+    "sigma3" => true,
+    "specs" => true,
+)
+
+_line_on(m, key::AbstractString) = get(m.show_chart_lines, key, true)
+
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 function _beyond(v::Real, bound::Real, op::Function)
@@ -455,7 +474,7 @@ export WECOViolation, WorkbenchData, LimitsAndZones, CapabilityResult
 export weco_detect, compute_limits_and_zones, compute_capability, generate_spc_workbench_data
 export detect_oos, cpk_band, cpk_color_for_band
 export ChartRenderContext, resolve_chart_render_context, point_status
-export DEFAULT_WECO_RULES
+export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 
 # UI requires Tachikoma (slices 2+). Pure tests include will pull it in.
 using Tachikoma
@@ -686,6 +705,7 @@ end
     # Slice 4+
     config_open::Bool = false
     config_selected::Int = 1
+    config_tab::Symbol = :weco   # :weco | :lines
     # Slice 5+
     usl::Union{Float64, Nothing} = nothing
     target::Union{Float64, Nothing} = nothing
@@ -694,6 +714,8 @@ end
     edit_buf::String = ""
     # enabled_rules carried for live/config
     enabled_rules::Dict{String, Bool} = copy(DEFAULT_WECO_RULES)
+    # Chart line visibility (CL / ±1σ / ±2σ / ±3σ / Specs)
+    show_chart_lines::Dict{String, Bool} = copy(DEFAULT_CHART_LINES)
     # Dashboard multi-chart (AC2/AC3)
     charts::Vector{ChartSpec} = ChartSpec[]
     active::Int = 1
@@ -771,32 +793,55 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
 
     # config / editing handling (slice 4+)
     if m.config_open
-        if evt.key == :escape || (evt.key == :char && evt.char == 'c')
+        if evt.key == :escape || (evt.key == :char && (evt.char == 'c' || evt.char == 'C' || evt.char == 'v' || evt.char == 'V'))
             m.config_open = false
             m.last_event = "config closed"
             return
         end
+        # Tab switches WECO ↔ Lines tabs
+        if evt.key == :tab || (evt.key == :char && evt.char == '\t')
+            m.config_tab = m.config_tab == :weco ? :lines : :weco
+            m.config_selected = 1
+            m.last_event = "config tab $(m.config_tab)"
+            return
+        end
+        n_items = m.config_tab == :lines ? length(CHART_LINE_KEYS) : 8
         if evt.key == :up
             m.config_selected = max(1, m.config_selected - 1)
             m.last_event = "config up"
             return
         elseif evt.key == :down
-            m.config_selected = min(8, m.config_selected + 1)
+            m.config_selected = min(n_items, m.config_selected + 1)
             m.last_event = "config down"
             return
         elseif evt.key == :enter || (evt.key == :char && evt.char == ' ')
-            rid = "WECO-$(m.config_selected)"
-            m.enabled_rules[rid] = !get(m.enabled_rules, rid, false)
-            _sync_active_back!(m)
-            m.last_event = "toggle $rid"
+            if m.config_tab == :lines
+                key = CHART_LINE_KEYS[clamp(m.config_selected, 1, length(CHART_LINE_KEYS))]
+                m.show_chart_lines[key] = !get(m.show_chart_lines, key, true)
+                m.last_event = "toggle line $key"
+            else
+                rid = "WECO-$(m.config_selected)"
+                m.enabled_rules[rid] = !get(m.enabled_rules, rid, false)
+                _sync_active_back!(m)
+                m.last_event = "toggle $rid"
+            end
             return
-        elseif evt.key == :char && '1' <= evt.char <= '8'
+        elseif evt.key == :char && isdigit(evt.char)
             idx = parse(Int, string(evt.char))
-            rid = "WECO-$idx"
-            m.enabled_rules[rid] = !get(m.enabled_rules, rid, false)
-            m.config_selected = idx
-            _sync_active_back!(m)
-            m.last_event = "toggle $rid"
+            if m.config_tab == :lines
+                if 1 <= idx <= length(CHART_LINE_KEYS)
+                    key = CHART_LINE_KEYS[idx]
+                    m.show_chart_lines[key] = !get(m.show_chart_lines, key, true)
+                    m.config_selected = idx
+                    m.last_event = "toggle line $key"
+                end
+            elseif 1 <= idx <= 8
+                rid = "WECO-$idx"
+                m.enabled_rules[rid] = !get(m.enabled_rules, rid, false)
+                m.config_selected = idx
+                _sync_active_back!(m)
+                m.last_event = "toggle $rid"
+            end
             return
         end
         return
@@ -875,8 +920,16 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             _sync_active_back!(m)
         elseif c == 'c' || c == 'C'
             m.config_open = !m.config_open
+            m.config_tab = :weco
             m.config_selected = 1
             m.last_event = m.config_open ? "config open" : "config close"
+            return
+        elseif c == 'v' || c == 'V'
+            # Open config directly on chart-lines tab
+            m.config_open = true
+            m.config_tab = :lines
+            m.config_selected = 1
+            m.last_event = "config lines"
             return
         elseif c == 'u' || c == 'U'
             m.editing = :usl
@@ -1090,11 +1143,12 @@ function view(m::SPCWorkbenchModel, f::Frame)
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
 
     if m.config_open
-        # overlay (slice 4) — no bleed
+        # overlay (slice 4) — no bleed; Tab switches WECO ↔ Lines
         ov = plot_rect
-        ov_h = max(6, min(ov.height - 2, 12))
+        ov_h = max(6, min(ov.height - 2, 14))
         ov_rect = Rect(ov.x + 2, ov.y + 1, ov.width - 4, ov_h)
-        cfg = Block(title="Config: WECO Rules (↑↓ 1-8 space/enter toggle, Esc/c close)", border_style=tstyle(:accent, bold=true))
+        tab_lbl = m.config_tab == :lines ? "Chart Lines" : "WECO Rules"
+        cfg = Block(title="Config: $tab_lbl (Tab switch · ↑↓ · 1-N space/enter · Esc/c/v close)", border_style=tstyle(:accent, bold=true))
         inner = render(cfg, ov_rect, buf)
         # clear
         for yy in inner.y:bottom(inner)
@@ -1103,15 +1157,29 @@ function view(m::SPCWorkbenchModel, f::Frame)
             end
         end
         y = inner.y + 1
-        for (idx, rid) in enumerate(["WECO-1","WECO-2","WECO-3","WECO-4","WECO-5","WECO-6","WECO-7","WECO-8"])
-            if y > bottom(inner) - 1
-                break
+        if m.config_tab == :lines
+            for (idx, key) in enumerate(CHART_LINE_KEYS)
+                if y > bottom(inner) - 1
+                    break
+                end
+                sel = idx == m.config_selected ? "▶ " : "  "
+                on = get(m.show_chart_lines, key, true)
+                bub = on ? "●" : "○"
+                lbl = get(CHART_LINE_LABELS, key, key)
+                set_string!(buf, inner.x + 1, y, "$sel$idx $bub $lbl  $(on ? "[ON]" : "[OFF]")  (draw on chart)", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
+                y += 1
             end
-            sel = idx == m.config_selected ? "▶ " : "  "
-            on = get(m.enabled_rules, rid, false) ? "[ON]" : "[OFF]"
-            desc = get(WECO_RULE_DESCS, idx, "")
-            set_string!(buf, inner.x + 1, y, "$sel$rid $on $desc", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
-            y += 1
+        else
+            for (idx, rid) in enumerate(["WECO-1","WECO-2","WECO-3","WECO-4","WECO-5","WECO-6","WECO-7","WECO-8"])
+                if y > bottom(inner) - 1
+                    break
+                end
+                sel = idx == m.config_selected ? "▶ " : "  "
+                on = get(m.enabled_rules, rid, false) ? "[ON]" : "[OFF]"
+                desc = get(WECO_RULE_DESCS, idx, "")
+                set_string!(buf, inner.x + 1, y, "$sel$rid $on $desc", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
+                y += 1
+            end
         end
         return
     end
@@ -1149,29 +1217,43 @@ function view(m::SPCWorkbenchModel, f::Frame)
             prev = (dx, dy)
         end
 
-        # limits + zones (slice 5) -- use MR disp
+        # limits + zones (slice 5) -- use MR disp; gated by show_chart_lines
         lz = lz_disp
-        for (z, dash) in [(lz.ucl1, 2), (lz.lcl1, 2), (lz.ucl2, 3), (lz.lcl2, 3)]
-            zy = map_to_dot_y(z, m.viewport, dh)
-            dashed_line!(c, 0, zy, dw-1, zy; dash = dash)
+        if _line_on(m, "sigma1")
+            for (z, dash) in [(lz.ucl1, 2), (lz.lcl1, 2)]
+                zy = map_to_dot_y(z, m.viewport, dh)
+                dashed_line!(c, 0, zy, dw-1, zy; dash = dash)
+            end
         end
-        dashed_line!(c, 0, map_to_dot_y(lz.ucl, m.viewport, dh), dw-1, map_to_dot_y(lz.ucl, m.viewport, dh); dash=4)
-        dashed_line!(c, 0, map_to_dot_y(lz.lcl, m.viewport, dh), dw-1, map_to_dot_y(lz.lcl, m.viewport, dh); dash=4)
-        line!(c, 0, map_to_dot_y(lz.cl, m.viewport, dh), dw-1, map_to_dot_y(lz.cl, m.viewport, dh))
+        if _line_on(m, "sigma2")
+            for (z, dash) in [(lz.ucl2, 3), (lz.lcl2, 3)]
+                zy = map_to_dot_y(z, m.viewport, dh)
+                dashed_line!(c, 0, zy, dw-1, zy; dash = dash)
+            end
+        end
+        if _line_on(m, "sigma3")
+            dashed_line!(c, 0, map_to_dot_y(lz.ucl, m.viewport, dh), dw-1, map_to_dot_y(lz.ucl, m.viewport, dh); dash=4)
+            dashed_line!(c, 0, map_to_dot_y(lz.lcl, m.viewport, dh), dw-1, map_to_dot_y(lz.lcl, m.viewport, dh); dash=4)
+        end
+        if _line_on(m, "cl")
+            line!(c, 0, map_to_dot_y(lz.cl, m.viewport, dh), dw-1, map_to_dot_y(lz.cl, m.viewport, dh))
+        end
 
         # spec lines if set (slice 5)
-        if m.usl !== nothing
-            sy = map_to_dot_y(m.usl, m.viewport, dh)
-            dashed_line!(c, 0, sy, dw-1, sy; dash=2)
-        end
-        if m.lsl !== nothing
-            sy = map_to_dot_y(m.lsl, m.viewport, dh)
-            dashed_line!(c, 0, sy, dw-1, sy; dash=2)
+        if _line_on(m, "specs")
+            if m.usl !== nothing
+                sy = map_to_dot_y(m.usl, m.viewport, dh)
+                dashed_line!(c, 0, sy, dw-1, sy; dash=2)
+            end
+            if m.lsl !== nothing
+                sy = map_to_dot_y(m.lsl, m.viewport, dh)
+                dashed_line!(c, 0, sy, dw-1, sy; dash=2)
+            end
         end
 
         render_canvas(c, plot_inner, f)
 
-        # Colorized limit/zone/spec lines (distinct styles per objective + HTML: red for USL/LSL, warning for ±3, secondary for ±2/1)
+        # Colorized limit/zone/spec lines (distinct styles; gated by show_chart_lines)
         lz_c = lz_disp  # already :mr
         function _draw_lim_line!(rect, val, sty, step=3)
             yy = data_val_to_cell_row(val, rect, m.viewport)
@@ -1181,17 +1263,26 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 end
             end
         end
-        if m.usl !== nothing; _draw_lim_line!(plot_inner, m.usl, tstyle(:error, bold=true), 2); end
-        if m.lsl !== nothing; _draw_lim_line!(plot_inner, m.lsl, tstyle(:error, bold=true), 2); end
-        _draw_lim_line!(plot_inner, lz_c.ucl, tstyle(:warning, bold=true), 4)
-        _draw_lim_line!(plot_inner, lz_c.lcl, tstyle(:warning, bold=true), 4)
-        _draw_lim_line!(plot_inner, lz_c.ucl2, tstyle(:secondary), 3)
-        _draw_lim_line!(plot_inner, lz_c.lcl2, tstyle(:secondary), 3)
-        _draw_lim_line!(plot_inner, lz_c.ucl1, tstyle(:text_dim), 2)
-        _draw_lim_line!(plot_inner, lz_c.lcl1, tstyle(:text_dim), 2)
-        # CL solid
-        cly = data_val_to_cell_row(lz_c.cl, plot_inner, m.viewport)
-        for xx in plot_inner.x:right(plot_inner); set_char!(buf, xx, cly, '─', tstyle(:accent)); end
+        if _line_on(m, "specs")
+            if m.usl !== nothing; _draw_lim_line!(plot_inner, m.usl, tstyle(:error, bold=true), 2); end
+            if m.lsl !== nothing; _draw_lim_line!(plot_inner, m.lsl, tstyle(:error, bold=true), 2); end
+        end
+        if _line_on(m, "sigma3")
+            _draw_lim_line!(plot_inner, lz_c.ucl, tstyle(:warning, bold=true), 4)
+            _draw_lim_line!(plot_inner, lz_c.lcl, tstyle(:warning, bold=true), 4)
+        end
+        if _line_on(m, "sigma2")
+            _draw_lim_line!(plot_inner, lz_c.ucl2, tstyle(:secondary), 3)
+            _draw_lim_line!(plot_inner, lz_c.lcl2, tstyle(:secondary), 3)
+        end
+        if _line_on(m, "sigma1")
+            _draw_lim_line!(plot_inner, lz_c.ucl1, tstyle(:text_dim), 2)
+            _draw_lim_line!(plot_inner, lz_c.lcl1, tstyle(:text_dim), 2)
+        end
+        if _line_on(m, "cl")
+            cly = data_val_to_cell_row(lz_c.cl, plot_inner, m.viewport)
+            for xx in plot_inner.x:right(plot_inner); set_char!(buf, xx, cly, '─', tstyle(:accent)); end
+        end
 
         # overlays (fidelity)
         if m.hover_x !== nothing
@@ -1268,37 +1359,61 @@ function view(m::SPCWorkbenchModel, f::Frame)
                     prev2 = (dx, dy)
                 end
                 lz2 = ctx2.lz
-                for (z, dsh) in [(lz2.ucl1,2),(lz2.lcl1,2),(lz2.ucl2,3),(lz2.lcl2,3)]
-                    zy = map_to_dot_y(z, vp2, dh2)
-                    dashed_line!(c2, 0, zy, dw2-1, zy; dash=dsh)
+                if _line_on(m, "sigma1")
+                    for (z, dsh) in [(lz2.ucl1,2),(lz2.lcl1,2)]
+                        zy = map_to_dot_y(z, vp2, dh2)
+                        dashed_line!(c2, 0, zy, dw2-1, zy; dash=dsh)
+                    end
                 end
-                dashed_line!(c2, 0, map_to_dot_y(lz2.ucl, vp2, dh2), dw2-1, map_to_dot_y(lz2.ucl, vp2, dh2); dash=4)
-                dashed_line!(c2, 0, map_to_dot_y(lz2.lcl, vp2, dh2), dw2-1, map_to_dot_y(lz2.lcl, vp2, dh2); dash=4)
-                line!(c2, 0, map_to_dot_y(lz2.cl, vp2, dh2), dw2-1, map_to_dot_y(lz2.cl, vp2, dh2))
-                if ch2.usl !== nothing
-                    sy = map_to_dot_y(ch2.usl, vp2, dh2); dashed_line!(c2, 0, sy, dw2-1, sy; dash=2)
+                if _line_on(m, "sigma2")
+                    for (z, dsh) in [(lz2.ucl2,3),(lz2.lcl2,3)]
+                        zy = map_to_dot_y(z, vp2, dh2)
+                        dashed_line!(c2, 0, zy, dw2-1, zy; dash=dsh)
+                    end
                 end
-                if ch2.lsl !== nothing
-                    sy = map_to_dot_y(ch2.lsl, vp2, dh2); dashed_line!(c2, 0, sy, dw2-1, sy; dash=2)
+                if _line_on(m, "sigma3")
+                    dashed_line!(c2, 0, map_to_dot_y(lz2.ucl, vp2, dh2), dw2-1, map_to_dot_y(lz2.ucl, vp2, dh2); dash=4)
+                    dashed_line!(c2, 0, map_to_dot_y(lz2.lcl, vp2, dh2), dw2-1, map_to_dot_y(lz2.lcl, vp2, dh2); dash=4)
+                end
+                if _line_on(m, "cl")
+                    line!(c2, 0, map_to_dot_y(lz2.cl, vp2, dh2), dw2-1, map_to_dot_y(lz2.cl, vp2, dh2))
+                end
+                if _line_on(m, "specs")
+                    if ch2.usl !== nothing
+                        sy = map_to_dot_y(ch2.usl, vp2, dh2); dashed_line!(c2, 0, sy, dw2-1, sy; dash=2)
+                    end
+                    if ch2.lsl !== nothing
+                        sy = map_to_dot_y(ch2.lsl, vp2, dh2); dashed_line!(c2, 0, sy, dw2-1, sy; dash=2)
+                    end
                 end
                 render_canvas(c2, inn2, f)
-                # Colorized overlays for ch2 (same as active)
+                # Colorized overlays for ch2 (same as active; gated)
                 function _draw_lim2!(r, v, st, stp=3)
                     yy = data_val_to_cell_row(v, r, vp2)
                     for xx in r.x:right(r)
                         if (xx % stp) == 0; set_char!(buf, xx, yy, '-', st); end
                     end
                 end
-                if ch2.usl !== nothing; _draw_lim2!(inn2, ch2.usl, tstyle(:error, bold=true), 2); end
-                if ch2.lsl !== nothing; _draw_lim2!(inn2, ch2.lsl, tstyle(:error, bold=true), 2); end
-                _draw_lim2!(inn2, lz2.ucl, tstyle(:warning, bold=true), 4)
-                _draw_lim2!(inn2, lz2.lcl, tstyle(:warning, bold=true), 4)
-                _draw_lim2!(inn2, lz2.ucl2, tstyle(:secondary), 3)
-                _draw_lim2!(inn2, lz2.lcl2, tstyle(:secondary), 3)
-                _draw_lim2!(inn2, lz2.ucl1, tstyle(:text_dim), 2)
-                _draw_lim2!(inn2, lz2.lcl1, tstyle(:text_dim), 2)
-                cly2 = data_val_to_cell_row(lz2.cl, inn2, vp2)
-                for xx in inn2.x:right(inn2); set_char!(buf, xx, cly2, '─', tstyle(:accent)); end
+                if _line_on(m, "specs")
+                    if ch2.usl !== nothing; _draw_lim2!(inn2, ch2.usl, tstyle(:error, bold=true), 2); end
+                    if ch2.lsl !== nothing; _draw_lim2!(inn2, ch2.lsl, tstyle(:error, bold=true), 2); end
+                end
+                if _line_on(m, "sigma3")
+                    _draw_lim2!(inn2, lz2.ucl, tstyle(:warning, bold=true), 4)
+                    _draw_lim2!(inn2, lz2.lcl, tstyle(:warning, bold=true), 4)
+                end
+                if _line_on(m, "sigma2")
+                    _draw_lim2!(inn2, lz2.ucl2, tstyle(:secondary), 3)
+                    _draw_lim2!(inn2, lz2.lcl2, tstyle(:secondary), 3)
+                end
+                if _line_on(m, "sigma1")
+                    _draw_lim2!(inn2, lz2.ucl1, tstyle(:text_dim), 2)
+                    _draw_lim2!(inn2, lz2.lcl1, tstyle(:text_dim), 2)
+                end
+                if _line_on(m, "cl")
+                    cly2 = data_val_to_cell_row(lz2.cl, inn2, vp2)
+                    for xx in inn2.x:right(inn2); set_char!(buf, xx, cly2, '─', tstyle(:accent)); end
+                end
                 # markers for ch2 (OOC/OOS)
                 for i in vp2.x0:vp2.x1
                     (i<1||i>n2) && continue
@@ -1343,22 +1458,46 @@ function view(m::SPCWorkbenchModel, f::Frame)
                     prev3 = (dx, dy)
                 end
                 lz3 = ctx3.lz
-                for (z, dsh) in [(lz3.ucl1,2),(lz3.lcl1,2),(lz3.ucl2,3),(lz3.lcl2,3)]
-                    zy = map_to_dot_y(z, vp3, dh3); dashed_line!(c3, 0, zy, dw3-1, zy; dash=dsh)
+                if _line_on(m, "sigma1")
+                    for (z, dsh) in [(lz3.ucl1,2),(lz3.lcl1,2)]
+                        zy = map_to_dot_y(z, vp3, dh3); dashed_line!(c3, 0, zy, dw3-1, zy; dash=dsh)
+                    end
                 end
-                dashed_line!(c3, 0, map_to_dot_y(lz3.ucl, vp3, dh3), dw3-1, map_to_dot_y(lz3.ucl, vp3, dh3); dash=4)
-                dashed_line!(c3, 0, map_to_dot_y(lz3.lcl, vp3, dh3), dw3-1, map_to_dot_y(lz3.lcl, vp3, dh3); dash=4)
-                line!(c3, 0, map_to_dot_y(lz3.cl, vp3, dh3), dw3-1, map_to_dot_y(lz3.cl, vp3, dh3))
-                if ch3.usl !== nothing; sy=map_to_dot_y(ch3.usl,vp3,dh3); dashed_line!(c3,0,sy,dw3-1,sy;dash=2); end
-                if ch3.lsl !== nothing; sy=map_to_dot_y(ch3.lsl,vp3,dh3); dashed_line!(c3,0,sy,dw3-1,sy;dash=2); end
+                if _line_on(m, "sigma2")
+                    for (z, dsh) in [(lz3.ucl2,3),(lz3.lcl2,3)]
+                        zy = map_to_dot_y(z, vp3, dh3); dashed_line!(c3, 0, zy, dw3-1, zy; dash=dsh)
+                    end
+                end
+                if _line_on(m, "sigma3")
+                    dashed_line!(c3, 0, map_to_dot_y(lz3.ucl, vp3, dh3), dw3-1, map_to_dot_y(lz3.ucl, vp3, dh3); dash=4)
+                    dashed_line!(c3, 0, map_to_dot_y(lz3.lcl, vp3, dh3), dw3-1, map_to_dot_y(lz3.lcl, vp3, dh3); dash=4)
+                end
+                if _line_on(m, "cl")
+                    line!(c3, 0, map_to_dot_y(lz3.cl, vp3, dh3), dw3-1, map_to_dot_y(lz3.cl, vp3, dh3))
+                end
+                if _line_on(m, "specs")
+                    if ch3.usl !== nothing; sy=map_to_dot_y(ch3.usl,vp3,dh3); dashed_line!(c3,0,sy,dw3-1,sy;dash=2); end
+                    if ch3.lsl !== nothing; sy=map_to_dot_y(ch3.lsl,vp3,dh3); dashed_line!(c3,0,sy,dw3-1,sy;dash=2); end
+                end
                 render_canvas(c3, inn3, f)
-                # color overlays + markers for ch3
+                # color overlays + markers for ch3 (gated)
                 function _d3!(r,v,st,stp=3); yy=data_val_to_cell_row(v,r,vp3); for xx in r.x:right(r); if (xx%stp)==0; set_char!(buf,xx,yy,'-',st); end; end; end
-                if ch3.usl!==nothing; _d3!(inn3,ch3.usl,tstyle(:error,bold=true),2); end
-                if ch3.lsl!==nothing; _d3!(inn3,ch3.lsl,tstyle(:error,bold=true),2); end
-                _d3!(inn3,lz3.ucl,tstyle(:warning,bold=true),4); _d3!(inn3,lz3.lcl,tstyle(:warning,bold=true),4)
-                _d3!(inn3,lz3.ucl2,tstyle(:secondary),3); _d3!(inn3,lz3.lcl2,tstyle(:secondary),3)
-                cly3 = data_val_to_cell_row(lz3.cl, inn3, vp3); for xx in inn3.x:right(inn3); set_char!(buf,xx,cly3,'─',tstyle(:accent)); end
+                if _line_on(m, "specs")
+                    if ch3.usl!==nothing; _d3!(inn3,ch3.usl,tstyle(:error,bold=true),2); end
+                    if ch3.lsl!==nothing; _d3!(inn3,ch3.lsl,tstyle(:error,bold=true),2); end
+                end
+                if _line_on(m, "sigma3")
+                    _d3!(inn3,lz3.ucl,tstyle(:warning,bold=true),4); _d3!(inn3,lz3.lcl,tstyle(:warning,bold=true),4)
+                end
+                if _line_on(m, "sigma2")
+                    _d3!(inn3,lz3.ucl2,tstyle(:secondary),3); _d3!(inn3,lz3.lcl2,tstyle(:secondary),3)
+                end
+                if _line_on(m, "sigma1")
+                    _d3!(inn3,lz3.ucl1,tstyle(:text_dim),2); _d3!(inn3,lz3.lcl1,tstyle(:text_dim),2)
+                end
+                if _line_on(m, "cl")
+                    cly3 = data_val_to_cell_row(lz3.cl, inn3, vp3); for xx in inn3.x:right(inn3); set_char!(buf,xx,cly3,'─',tstyle(:accent)); end
+                end
                 for i in vp3.x0:vp3.x1
                     (i<1||i>n3)&&continue
                     dx=data_index_to_cell(i,inn3,vp3); dy=data_val_to_cell_row(ch3.data.values[i],inn3,vp3)
@@ -1399,23 +1538,65 @@ function view(m::SPCWorkbenchModel, f::Frame)
         if m.usl !== nothing || m.lsl !== nothing
             set_string!(buf, x, y, "USL=$(m.usl===nothing ? "—" : round(m.usl;digits=1)) T=$(m.target===nothing ? "—" : round(m.target;digits=1)) LSL=$(m.lsl===nothing ? "—" : round(m.lsl;digits=1))", tstyle(:text_dim)); y += 1
         end
+        # Hover first (priority over long line list when side is short)
         if (hi = m.hovered) !== nothing && 1 <= hi <= n
-            v = m.data.values[hi]
-            ach = current_chart(m)
-            actx = resolve_chart_render_context(ach; sigma_method=:mr)
-            st = point_status(hi, actx, ach)
-            stat = st == :oos ? "OOS" : (st == :ooc ? "OOC" : "OK")
-            set_string!(buf, x, y, "h[$hi]=$(round(v;digits=2)) $stat", tstyle(:accent, bold=true))
-        end
-        # dashboard multi hint
-        if length(m.charts) > 1
-            y += 1
-            set_string!(buf, x, y, "Charts: $(length(m.charts))", tstyle(:text_dim))
-            for (ci, c) in enumerate(m.charts)
-                if y + 1 > bottom(side_inner) - 1; break; end
+            if y <= bottom(side_inner) - 1
+                v = m.data.values[hi]
+                ach = current_chart(m)
+                actx = resolve_chart_render_context(ach; sigma_method=:mr)
+                st = point_status(hi, actx, ach)
+                stat = st == :oos ? "OOS" : (st == :ooc ? "OOC" : "OK")
+                set_string!(buf, x, y, "h[$hi]=$(round(v;digits=2)) $stat", tstyle(:accent, bold=true))
                 y += 1
+            end
+        end
+        # Chart line parameters (●/○ = draw on chart; [v] config). Compact: header + 5 value rows.
+        if y <= bottom(side_inner) - 1
+            set_string!(buf, x, y, "Lines [v]", tstyle(:text_dim)); y += 1
+        end
+        usl_s = m.usl === nothing ? "—" : string(round(m.usl; digits=1))
+        lsl_s = m.lsl === nothing ? "—" : string(round(m.lsl; digits=1))
+        line_rows = (
+            ("CL", "cl", string(round(lz.cl; digits=2))),
+            ("±1σ", "sigma1", "$(round(lz.ucl1; digits=2))/$(round(lz.lcl1; digits=2))"),
+            ("±2σ", "sigma2", "$(round(lz.ucl2; digits=2))/$(round(lz.lcl2; digits=2))"),
+            ("±3σ", "sigma3", "UCL=$(round(lz.ucl; digits=2)) LCL=$(round(lz.lcl; digits=2))"),
+            ("Specs", "specs", "USL=$usl_s LSL=$lsl_s"),
+        )
+        for (label, key, valstr) in line_rows
+            if y > bottom(side_inner) - 1
+                break
+            end
+            on = _line_on(m, key)
+            set_char!(buf, x, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
+            set_string!(buf, x + 2, y, "$label=$valstr", tstyle(:text_dim))
+            y += 1
+        end
+        # WECO on/off bubbles: ● green when enabled, ○ dim when off (rules 1–8)
+        if y <= bottom(side_inner) - 1
+            set_string!(buf, x, y, "WECO ", tstyle(:text_dim))
+            bx = x + 5
+            for i in 1:8
+                rid = "WECO-$i"
+                on = get(m.enabled_rules, rid, false)
+                if bx <= right(side_inner)
+                    set_char!(buf, bx, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
+                end
+                bx += 1
+            end
+            y += 1
+        end
+        # dashboard multi hint (lowest priority when cramped)
+        if length(m.charts) > 1
+            if y <= bottom(side_inner) - 1
+                set_string!(buf, x, y, "Charts: $(length(m.charts))", tstyle(:text_dim))
+                y += 1
+            end
+            for (ci, c) in enumerate(m.charts)
+                if y > bottom(side_inner) - 1; break; end
                 cctx = resolve_chart_render_context(c; sigma_method=:mr)
                 set_string!(buf, x, y, " $(ci==m.active ? "▶" : " ") $(c.name[1:min(8,length(c.name))]) cpk=$(_fmt(cctx.cpk))", tstyle(ci==m.active ? :accent : :text_dim))
+                y += 1
             end
         end
     else
@@ -1461,7 +1642,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     else
         " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
     end
-    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p r c u t l s] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p r c v u t l s] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
 end
 
 # small helper for fmt
@@ -1481,10 +1662,11 @@ function _render_help_page!(buf, area, m)
         "QUICK START (TUI):",
         "  p/P     toggle pause / live append",
         "  r/R/z/Z reset viewport to full data",
-        "  c/C     open/close WECO rule config (1-8 toggle)",
+        "  c/C     open/close WECO rule config (1-8 toggle; Tab→Lines)",
+        "  v/V     open chart-line visibility config (CL/±σ/specs)",
         "  u/U t/T l/L  edit USL / Target / LSL (enter to set, esc cancel)",
         "  s/S     clear all spec limits",
-        "  1..8    toggle WECO rule directly",
+        "  1..8    toggle WECO rule directly (or 1-5 line keys in Lines tab)",
         "  ← →     pan viewport",
         "  wheel / scroll mouse : zoom around point",
         "  drag LMB : pan; click release : select (thick ┃ )",
@@ -1518,16 +1700,12 @@ function _render_keymap_page!(buf, area, m)
         "KEYS:",
         "  p/P         Pause/Resume live mode",
         "  r R z Z     Reset view (full range + auto y)",
-        "  c C         Toggle config (rules 1-8)",
-        "  u U         Edit USL (specs upper)",
-        "  t T         Edit Target",
-        "  l L         Edit LSL (lower spec)",
-        "  s S         Clear specs",
-        "  1-8         Toggle WECO-N",
+        "  c C / v V   Config WECO (Tab→Lines) / open Lines visibility",
+        "  u t l / s   Edit USL/Target/LSL / clear specs",
+        "  1-8         Toggle WECO-N (or 1-5 in Lines tab)",
         "  [ ] < >     Prev / Next chart (dashboard)",
         "  ← →         Pan left/right",
-        "  h ?         Help page",
-        "  k           This keymap",
+        "  h ? / k     Help / This keymap",
         "  q Esc       Quit",
         "",
         "MOUSE:",
@@ -1538,9 +1716,7 @@ function _render_keymap_page!(buf, area, m)
         "  Wheel up    Zoom in (around cursor)",
         "  Wheel down  Zoom out",
         "",
-        "In config: ↑↓ or 1-8 or space/enter to toggle; Esc/c close",
-        "Editing specs: type number . - , Enter=apply, BS, Esc=cancel",
-        "Dashboard shows Primary + others; Cpk per active + legend bands.",
+        "Config: Tab WECO↔Lines; ↑↓/digits/space; Esc/c/v close. Lines ●=draw on chart.",
     ]
     for (i, ln) in enumerate(kbd)
         if y + i - 1 > bottom(area); break; end

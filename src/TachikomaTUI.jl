@@ -23,7 +23,7 @@ export SPCWorkbenchModel, WorkbenchData, generate_spc_workbench_data
 export weco_detect, compute_limits_and_zones, compute_capability
 export detect_oos, cpk_band, cpk_color_for_band
 export ChartRenderContext, resolve_chart_render_context, point_status
-export DEFAULT_WECO_RULES
+export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 export spc_workbench_demo, run_spc_workbench, spc_workbench, advanced_spc, run_advanced_spc
 
 # Add your own includes here as the project grows:
