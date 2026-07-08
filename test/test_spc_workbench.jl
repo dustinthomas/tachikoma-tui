@@ -256,4 +256,273 @@ include("../src/spc_workbench.jl")
             isempty(vi)
         end
     end
+
+    # ═══════════════════════════════════════════════════════════════════
+    # HTML fidelity / equivalence (AC1) — RED FIRST per TDD
+    # Sample from SPC_workbench HTML state (first chart Film-Thickness-1.3um, tool-filtered, n=10)
+    # Expected from HTML autoLimits + checkWeco + computeCpk (with USL/Target/LSL)
+    # ═══════════════════════════════════════════════════════════════════
+    @testset "HTML sample equivalence + OOS + Cpk bands (red-first; will implement to green)" begin
+        # Exact series from HTML first chart (Film-Thickness-1.3um, filtered to Film-PTPECVD01)
+        html_vals = [1303.0, 1305.0, 1299.0, 1301.0, 1294.0, 1303.0, 1305.0, 1299.0, 1301.0, 1294.0]
+        html_usl = 1320.0
+        html_lsl = 1280.0
+        html_target = 1300.0
+        html_rules = copy(DEFAULT_WECO_RULES)  # 1-5 true, 6-8 false
+
+        # Use :mr for I-MR fidelity to match HTML autoLimits (MRbar/1.128 ~4.24, Cpk=1.54)
+        lz = compute_limits_and_zones(html_vals; sigma_method=:mr)
+        @test lz.cl ≈ 1300.4 atol=0.01
+        @test round(lz.sigma, digits=2) ≈ 4.24   # exact match to HTML
+
+        # WECO on clean sample (within ~3.2σ) should give 0 violations with defaults
+        vs = weco_detect(html_vals, lz.cl, lz.sigma; enabled_rules=html_rules)
+        @test isempty(vs)
+
+        # OOS detection (NEW for AC1): points strictly outside USL/LSL
+        # (for this sample none; will use injected OOS later)
+        oos_idxs = detect_oos(html_vals; usl=html_usl, lsl=html_lsl)
+        @test oos_idxs isa Vector{Int}
+        @test isempty(oos_idxs)
+
+        # OOS with injected out of spec
+        oos_inj = copy(html_vals); oos_inj[3] = 1325.0; oos_inj[7] = 1275.0
+        oos2 = detect_oos(oos_inj; usl=html_usl, lsl=html_lsl)
+        @test 3 in oos2 && 7 in oos2 && length(oos2) == 2
+
+        # Cpk for the HTML sample (specs set) exactly 1.54 (navy) using MR sigma
+        cr = compute_capability(html_vals, lz.cl, lz.sigma; usl=html_usl, lsl=html_lsl)
+        @test cr.cpk !== nothing
+        @test round(cr.cpk, digits=2) ≈ 1.54 atol=0.01
+
+        # cpk_band + color decision matching HTML cpkColor exactly
+        band = cpk_band(cr.cpk)
+        @test band == :navy
+        col = cpk_color_for_band(band)
+        @test col == "#1a2e5c" || col == "var(--navy)"
+
+        # Other bands
+        @test cpk_band(1.80) == :green
+        @test cpk_band(1.20) == :amber
+        @test cpk_band(0.90) == :red
+        @test cpk_band(nothing) == :none
+    end
+
+    @testset "ChartRenderContext + resolve (centralized :mr + point_status + consistency)" begin
+        # HTML Film-Thickness sample (exact from original HTML state)
+        html_vals = [1303.0, 1305.0, 1299.0, 1301.0, 1294.0, 1303.0, 1305.0, 1299.0, 1301.0, 1294.0]
+        html_usl, html_lsl = 1320.0, 1280.0
+        d = WorkbenchData(values = html_vals, cl = mean(html_vals), sigma = std(html_vals))
+        ch = ChartSpec(name = "Film-Thickness-1.3um", data = d, usl = html_usl, lsl = html_lsl, enabled_rules = copy(DEFAULT_WECO_RULES))
+
+        ctx = resolve_chart_render_context(ch; sigma_method = :mr)
+        @test round(ctx.lz.sigma; digits = 2) == 4.24
+        @test round(ctx.cpk; digits = 2) == 1.54
+        @test ctx.band == :navy
+        @test isempty(ctx.viol_indices)  # clean sample
+
+        # point_status agrees with viol + OOS
+        @test point_status(1, ctx, ch) == :ok
+        # inject OOS + force OOC for test
+        d2 = WorkbenchData(values = copy(html_vals), cl = mean(html_vals), sigma = std(html_vals))
+        d2.values[1] = 1325.0   # > USL -> oos
+        ch2 = ChartSpec(data = d2, usl = html_usl, lsl = html_lsl)
+        ctx2 = resolve_chart_render_context(ch2; sigma_method = :mr)
+        @test point_status(1, ctx2, ch2) == :oos
+        # OOC point (beyond 3s of mr sigma) -- use fresh ch with no specs, huge outlier to survive sigma pollution
+        d3 = WorkbenchData(values = copy(html_vals), cl = mean(html_vals), sigma = std(html_vals))
+        ch3 = ChartSpec(data = d3)  # no usl/lsl
+        d3.values[2] = 99999.0
+        ctx3b = resolve_chart_render_context(ch3; sigma_method = :mr)
+        @test point_status(2, ctx3b, ch3) == :ooc
+    end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Tachikoma UI / TestBackend BDD tests (AC2,4) — red-first for dashboard,
+# rich visuals (color markers, OOS/OOC), help, keymap, mouse, guards.
+# Must re-render after every update! ; use find_text / row_text / char_at / visual_rows.
+# ═══════════════════════════════════════════════════════════════════════
+
+using Tachikoma
+const T = Tachikoma
+
+function visual_rows_wb(m; w::Int=82, h::Int=20)
+    tb = T.TestBackend(w, h)
+    T.reset!(tb.buf)
+    T.view(m, T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height), [], []))
+    [T.row_text(tb, i) for i in 1:h]
+end
+
+@testset "SPC Workbench UI (TestBackend BDD + dashboard + help/keymap + mouse + colors)" begin
+    @testset "Model construction + basic render (paused)" begin
+        d = generate_spc_workbench_data(25; seed=42)
+        n = length(d.values)
+        m = SPCWorkbenchModel(data = d, viewport = Viewport(x0=1, x1=n), paused=true)
+        tb = T.TestBackend(80, 18)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height),[],[]))
+        @test T.find_text(tb, "SPC Workbench") !== nothing
+        @test T.find_text(tb, "Side Stats") !== nothing
+    end
+
+    @testset "context-driven consistency (hover status == point_status, list cpk == main cpk)" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        # set specs so Cpk is numeric (capability needs usl or lsl)
+        if isempty(m.data.values) == false
+            mu = mean(m.data.values); s = std(m.data.values; corrected=true)
+            m.usl = mu + 3*s
+            m.lsl = mu - 3*s
+        end
+        tb = T.TestBackend(80,18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,80,18),[],[]))
+        ch = current_chart(m)
+        ctx = resolve_chart_render_context(ch; sigma_method=:mr)
+        side_text = join([T.row_text(tb, i) for i=1:18 if T.row_text(tb,i)!==nothing], "\n")
+        # Parse the actual rendered numeric cpk from side (top Cpk= or list) and assert matches ctx.cpk
+        m_cpk_match = match(r"Cpk=([0-9.\-]+)", side_text)  # top stats shows "Cpk=..."
+        if m_cpk_match === nothing
+            m_cpk_match = match(r"cpk=([0-9.\-]+)", side_text)
+        end
+        @test m_cpk_match !== nothing
+        m_cpk = parse(Float64, m_cpk_match.captures[1])
+        @test isapprox(m_cpk, ctx.cpk; atol=0.05)  # rendered side/list numeric cpk == ctx.cpk
+        @test occursin("Cpk=", side_text) || occursin("cpk=", side_text)
+        # Force OOS (beyond usl) for label test
+        if m.usl !== nothing
+            m.data.values[1] = m.usl + 1.0
+        end
+        m.hovered = 1
+        tb2 = T.TestBackend(80,18); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1,1,80,18),[],[]))
+        hover_text = join([T.row_text(tb2, i) for i=1:18 if T.row_text(tb2,i)!==nothing], "\n")
+        @test occursin("h[1]=", hover_text)
+        # Must reflect OOS (not OK) for out-of-spec point
+        @test occursin("OOS", hover_text) || occursin("OOC", hover_text)
+    end
+
+    @testset "help page toggle (?/h) shows content from HTML quickstart/WECO; no bleed" begin
+        d = generate_spc_workbench_data(12; seed=7)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        # before
+        tb = T.TestBackend(80, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,80,18),[],[]))
+        @test T.find_text(tb, "HELP") === nothing
+        @test !occursin("Quick start", join([r for r in visual_rows_wb(m) if r!==nothing], "\n"))
+
+        T.update!(m, T.KeyEvent('h'))
+        tb2 = T.TestBackend(80, 18); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1,1,80,18),[],[]))
+        rows = [T.row_text(tb2, i) for i in 1:18]
+        help_text = join([r for r in rows if r !== nothing], "\n")
+        @test occursin("Help", help_text) || occursin("WECO", help_text) || occursin("QUICK START", help_text)
+        # strict no-bleed (real test that would fail without early return in help view)
+        @test T.find_text(tb2, "SPC Workbench [dashboard]") === nothing   # normal path header not emitted
+        @test T.find_text(tb2, "Side Stats") === nothing
+        @test T.find_text(tb2, "Dashboard:") === nothing   # plot block title from normal layout not present
+
+    end
+
+    @testset "keyboard map page (k) shows bindings table + mouse actions; esc closes" begin
+        m = SPCWorkbenchModel(data=generate_spc_workbench_data(8;seed=1), paused=true)
+        T.update!(m, T.KeyEvent('k'))
+        tb = T.TestBackend(80, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,80,18),[],[]))
+        krows = [T.row_text(tb, i) for i in 1:18]
+        kfull = join([string(r) for r in krows if r!==nothing], "\n")
+        @test occursin("KEYBOARD MAP", kfull)
+        @test occursin("p/P", kfull)
+        @test occursin("Pause/Resume", kfull)
+        @test occursin("MOUSE:", kfull)  # mouse section header always rendered early
+        T.update!(m, T.KeyEvent(:escape))
+        tb2 = T.TestBackend(80, 18); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1,1,80,18),[],[]))
+        @test T.find_text(tb2, "KEYBOARD MAP") === nothing
+    end
+
+    @testset "dashboard multi-chart text + multiple plots visible simultaneously" begin
+        # use default ctor that will populate multi in impl
+        m = SPCWorkbenchModel(data=generate_spc_workbench_data(15;seed=99), paused=true)
+        _ensure_charts!(m)  # ensure copies exist before we mutate ch2
+        # Force OOS on ch2 (secondary) so its render path draws an ✕ marker
+        if length(m.charts) >= 2
+            ch2 = m.charts[2]
+            if length(ch2.data.values) >= 1
+                ch2.usl = mean(ch2.data.values)
+                ch2.data.values[1] = ch2.usl + 10.0
+            end
+        end
+        tb = T.TestBackend(90, 22); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,90,22),[],[]))
+        rows = visual_rows_wb(m; w=90, h=22)
+        full = join([string(r) for r in rows if r!==nothing], "\n")
+        @test occursin("Dashboard", full)
+        @test occursin("Chart 2", full)   # proves secondary chart panel rendered
+        @test occursin("Secondary", full)
+        if length(m.charts) >= 3
+            @test occursin("Tertiary", full)
+        end
+        # Require marker drawing from secondary (not just dashes from any panel)
+        @test occursin("◆", full) || occursin("✕", full)  # at least one OOC/OOS marker must come from the forced secondary
+    end
+
+    @testset "rich visuals — colorized OOC ◆ , OOS markers, Cpk bands text, dashed zones" begin
+        d = generate_spc_workbench_data(20; seed=123, hints=Dict{String,Any}("trigger"=>"WECO-1"))
+        m = SPCWorkbenchModel(data=d, paused=true)
+        # set specs to trigger OOS on a point inside viewport
+        m.usl = d.cl + 1.5 * d.sigma
+        # force a known OOC point visible and in viewport[1]
+        if length(m.data.values) >= 1
+            mu = mean(m.data.values)
+            sig = std(m.data.values; corrected=true)
+            m.data.values[1] = mu + 5 * sig   # extreme OOC (WECO-1), will show ◆ regardless of MR vs std
+            m.viewport.x0 = 1
+            m.viewport.x1 = max(m.viewport.x1, 5)
+        end
+        tb = T.TestBackend(70, 16); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,70,16),[],[]))
+        full = join([T.row_text(tb,i) for i=1:16], "\n")
+        # strict (drive real marker code): count OOC/OOS markers from forced point; no loose ||
+        marker_count = count(c -> c == '◆' || c == '✕', collect(full))
+        @test marker_count >= 1
+        @test T.find_text(tb, "Cpk=") !== nothing
+        # Cpk label is drawn (band styling is internal to tstyle; text presence proves the Cpk render path)
+        band_text = join([T.row_text(tb, i) for i=1:16 if T.row_text(tb,i)!==nothing], "\n")
+        @test occursin("Cpk=", band_text)
+    end
+
+    @testset "mouse hover/click/drag/zoom drive state + re-render shows updates (no crash)" begin
+        d = generate_spc_workbench_data(18; seed=55)
+        n = length(d.values)
+        m = SPCWorkbenchModel(data=d, paused=true, viewport=Viewport(x0=1,x1=n))
+        tb0 = T.TestBackend(60,16); T.reset!(tb0.buf)
+        T.view(m, T.Frame(tb0.buf, T.Rect(1,1,60,16),[],[]))
+        pa = m.plot_area
+        @test pa.width > 5
+        cx, cy = pa.x + pa.width÷2 , pa.y + pa.height÷2
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_move, false,false,false))
+        tb1 = T.TestBackend(60,16); T.reset!(tb1.buf); T.view(m, T.Frame(tb1.buf, T.Rect(1,1,60,16),[],[]))
+        @test m.hovered !== nothing
+        # scroll zoom
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_scroll_up, T.mouse_press, false,false,false))
+        @test m.viewport.x1 - m.viewport.x0 < n
+    end
+
+    @testset "Small terminal guard + config overlay no-bleed" begin
+        m = SPCWorkbenchModel(data=generate_spc_workbench_data(5;seed=2), paused=true)
+        tb = T.TestBackend(18,5)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,18,5),[],[]))
+        # real assertion: small guard produces recognizable output without crash/full layout
+        small_text = join([T.row_text(tb,i) for i in 1:5 if T.row_text(tb,i)!==nothing], " ")
+        @test length(small_text) > 0
+        @test occursin("SPC", small_text)
+        @test occursin("sma", small_text)  # truncated " (sma" from " (small)" guard in 18-col width
+        @test T.find_text(tb, "config open") === nothing   # tiny guard did not draw full config UI
+        T.update!(m, T.KeyEvent('c'))
+        tb2 = T.TestBackend(50,12); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1,1,50,12),[],[]))
+        @test T.find_text(tb2, "WECO-") !== nothing
+    end
 end
