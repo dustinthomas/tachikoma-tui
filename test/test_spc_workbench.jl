@@ -818,13 +818,198 @@ end
         T.update!(m, T.KeyEvent('c'))  # close
         @test m.config_open == false
 
-        # Tab switches between WECO and Lines inside config
+        # Tab switches WECO → Lines → Visual → WECO
         T.update!(m, T.KeyEvent('c'))
         @test m.config_open && m.config_tab == :weco
         T.update!(m, T.KeyEvent(:tab))
         @test m.config_tab == :lines
         T.update!(m, T.KeyEvent(:tab))
+        @test m.config_tab == :visual
+        T.update!(m, T.KeyEvent(:tab))
         @test m.config_tab == :weco
         T.update!(m, T.KeyEvent(:escape))
+    end
+
+    @testset "visual prefs panel + solid series line connector" begin
+        # Defaults: solid series connector ON; panel extensible via visual_prefs
+        d = WorkbenchData(values=[0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0], cl=0.5, sigma=0.5)
+        m = SPCWorkbenchModel(data=d, paused=true, viewport=Viewport(x0=1, x1=8, ylo=-0.5, yhi=1.5))
+        @test haskey(m.visual_prefs, "solid_series")
+        @test m.visual_prefs["solid_series"] == true
+        # Hide zone/spec lines so connector is visible
+        for k in keys(m.show_chart_lines)
+            m.show_chart_lines[k] = false
+        end
+
+        # Key o opens Visual Preferences panel
+        T.update!(m, T.KeyEvent('o'))
+        @test m.config_open == true
+        @test m.config_tab == :visual
+        tb = T.TestBackend(80, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,80,18),[],[]))
+        full = join([string(T.row_text(tb, i)) for i in 1:18 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("Visual", full)
+        @test occursin("Solid", full) || occursin("solid", lowercase(full)) || occursin("series", lowercase(full))
+        # no-bleed: normal dashboard header/side not mixed into config path
+        @test T.find_text(tb, "Side Stats") === nothing
+
+        # Toggle solid_series off via 1
+        T.update!(m, T.KeyEvent('1'))
+        @test m.visual_prefs["solid_series"] == false
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.config_open == false
+
+        # With solid OFF: re-enable and compare connector density
+        # Solid ON should place solid connector glyphs on the cell path between points
+        m.visual_prefs["solid_series"] = true
+        tb_on = T.TestBackend(70, 18); T.reset!(tb_on.buf)
+        T.view(m, T.Frame(tb_on.buf, T.Rect(1,1,70,18),[],[]))
+        pa = m.plot_area
+        @test pa.width > 4 && pa.height > 3
+        # Sample consecutive points' cell coords and require non-space cells on the segment
+        i0, i1 = 1, 2
+        x0 = data_index_to_cell(i0, pa, m.viewport)
+        y0 = data_val_to_cell_row(m.data.values[i0], pa, m.viewport)
+        x1 = data_index_to_cell(i1, pa, m.viewport)
+        y1 = data_val_to_cell_row(m.data.values[i1], pa, m.viewport)
+        # Midpoint-ish cell of the solid segment should not be empty when solid is on
+        mx = (x0 + x1) ÷ 2
+        my = (y0 + y1) ÷ 2
+        # Walk a few cells on the Bresenham-ish segment and count filled
+        filled_on = 0
+        steps = max(abs(x1 - x0), abs(y1 - y0), 1)
+        for s in 0:steps
+            t = s / steps
+            xx = round(Int, x0 + t * (x1 - x0))
+            yy = round(Int, y0 + t * (y1 - y0))
+            ch = T.char_at(tb_on, xx, yy)
+            if ch != ' ' && ch != '\0'
+                filled_on += 1
+            end
+        end
+        @test filled_on >= max(2, steps ÷ 2)  # solid path is continuous
+
+        m.visual_prefs["solid_series"] = false
+        tb_off = T.TestBackend(70, 18); T.reset!(tb_off.buf)
+        T.view(m, T.Frame(tb_off.buf, T.Rect(1,1,70,18),[],[]))
+        filled_off = 0
+        for s in 0:steps
+            t = s / steps
+            xx = round(Int, x0 + t * (x1 - x0))
+            yy = round(Int, y0 + t * (y1 - y0))
+            ch = T.char_at(tb_off, xx, yy)
+            # endpoints may still have markers; ignore pure marker-only if mid empty
+            if ch != ' ' && ch != '\0'
+                filled_off += 1
+            end
+        end
+        # Solid ON denser than OFF (braille-only / sparse)
+        @test filled_on >= filled_off
+        # And solid ON is actually continuous (not just endpoints)
+        if steps >= 3
+            mid_ch = T.char_at(tb_on, mx, my)
+            @test mid_ch != ' ' && mid_ch != '\0'
+        end
+    end
+
+    @testset "visual prefs: solid stroke (box-drawing) alongside dotted series" begin
+        d = WorkbenchData(values=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], cl=0.0, sigma=0.5)
+        m = SPCWorkbenchModel(data=d, paused=true, viewport=Viewport(x0=1, x1=8, ylo=-1.0, yhi=1.0))
+        for k in keys(m.show_chart_lines)
+            m.show_chart_lines[k] = false
+        end
+        # Prefs: keep dotted optional; stroke is separate
+        @test haskey(m.visual_prefs, "solid_stroke")
+        @test m.visual_prefs["solid_stroke"] == true  # default on
+        @test "solid_stroke" in VISUAL_PREF_KEYS
+
+        # Panel lists Stroke option
+        T.update!(m, T.KeyEvent('o'))
+        tb = T.TestBackend(80, 16); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,80,16),[],[]))
+        full = join([string(T.row_text(tb, i)) for i in 1:16 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("Stroke", full) || occursin("stroke", lowercase(full))
+        # Toggle stroke via key 2 (item 2 after solid_series)
+        T.update!(m, T.KeyEvent('2'))
+        @test m.visual_prefs["solid_stroke"] == false
+        T.update!(m, T.KeyEvent('2'))  # back on
+        @test m.visual_prefs["solid_stroke"] == true
+        T.update!(m, T.KeyEvent(:escape))
+
+        # Dotted off, stroke on → box-drawing chars on horizontal path (flat data)
+        m.visual_prefs["solid_series"] = false
+        m.visual_prefs["solid_stroke"] = true
+        tb2 = T.TestBackend(70, 16); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1,1,70,16),[],[]))
+        pa = m.plot_area
+        @test pa.width > 4
+        # Flat series → mostly horizontal ─ between points
+        stroke_box = Set(['─', '│', '╱', '╲', '╳', '━', '┃'])
+        box_count = 0
+        bullet_count = 0
+        for y in pa.y:T.bottom(pa), x in pa.x:T.right(pa)
+            ch = T.char_at(tb2, x, y)
+            ch in stroke_box && (box_count += 1)
+            ch == '•' && (bullet_count += 1)
+        end
+        @test box_count >= 3
+        @test bullet_count == 0  # dotted off
+
+        # Stroke off, dotted on → bullets, no requirement for box-drawing
+        m.visual_prefs["solid_series"] = true
+        m.visual_prefs["solid_stroke"] = false
+        tb3 = T.TestBackend(70, 16); T.reset!(tb3.buf)
+        T.view(m, T.Frame(tb3.buf, T.Rect(1,1,70,16),[],[]))
+        box_count2 = 0
+        bullet_count2 = 0
+        for y in pa.y:T.bottom(pa), x in pa.x:T.right(pa)
+            ch = T.char_at(tb3, x, y)
+            ch in stroke_box && (box_count2 += 1)
+            ch == '•' && (bullet_count2 += 1)
+        end
+        @test bullet_count2 >= 3
+        @test box_count2 == 0
+    end
+
+    @testset "visual prefs: braille canvas series line toggle" begin
+        is_braille(c::Char) = let u = UInt32(c); 0x2800 <= u <= 0x28FF; end
+        d = WorkbenchData(values=[0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0], cl=0.5, sigma=0.5)
+        m = SPCWorkbenchModel(data=d, paused=true, viewport=Viewport(x0=1, x1=8, ylo=-0.5, yhi=1.5))
+        for k in keys(m.show_chart_lines)
+            m.show_chart_lines[k] = false
+        end
+        # New pref: standard braille connector between dots
+        @test haskey(m.visual_prefs, "braille_series")
+        @test m.visual_prefs["braille_series"] == true
+        @test "braille_series" in VISUAL_PREF_KEYS
+
+        T.update!(m, T.KeyEvent('o'))
+        tb = T.TestBackend(80, 16); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,80,16),[],[]))
+        full = join([string(T.row_text(tb, i)) for i in 1:16 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("Braille", full) || occursin("braille", lowercase(full))
+        # key 3 toggles braille (3rd visual pref)
+        T.update!(m, T.KeyEvent('3'))
+        @test m.visual_prefs["braille_series"] == false
+        T.update!(m, T.KeyEvent('3'))
+        @test m.visual_prefs["braille_series"] == true
+        T.update!(m, T.KeyEvent(:escape))
+
+        # Isolate braille: turn off dotted + stroke so canvas line is the main connector
+        m.visual_prefs["solid_series"] = false
+        m.visual_prefs["solid_stroke"] = false
+        m.visual_prefs["braille_series"] = true
+        tb_on = T.TestBackend(70, 16); T.reset!(tb_on.buf)
+        T.view(m, T.Frame(tb_on.buf, T.Rect(1,1,70,16),[],[]))
+        pa = m.plot_area
+        braille_on = count(is_braille(T.char_at(tb_on, x, y)) for y in pa.y:T.bottom(pa) for x in pa.x:T.right(pa))
+
+        m.visual_prefs["braille_series"] = false
+        tb_off = T.TestBackend(70, 16); T.reset!(tb_off.buf)
+        T.view(m, T.Frame(tb_off.buf, T.Rect(1,1,70,16),[],[]))
+        braille_off = count(is_braille(T.char_at(tb_off, x, y)) for y in pa.y:T.bottom(pa) for x in pa.x:T.right(pa))
+        # Connecting line! adds braille cells; points-only is sparser
+        @test braille_on > braille_off
+        @test braille_on >= 2
     end
 end

@@ -97,6 +97,21 @@ const DEFAULT_CHART_LINES = Dict{String,Bool}(
 
 _line_on(m, key::AbstractString) = get(m.show_chart_lines, key, true)
 
+# Extensible graph visual preferences (add keys over time; panel lists VISUAL_PREF_KEYS)
+const VISUAL_PREF_KEYS = ["solid_series", "solid_stroke", "braille_series"]
+const VISUAL_PREF_LABELS = Dict{String,String}(
+    "solid_series" => "Dotted series (• connect)",
+    "solid_stroke" => "Solid stroke (box-drawing)",
+    "braille_series" => "Braille canvas line (between dots)",
+)
+const DEFAULT_VISUAL_PREFS = Dict{String,Bool}(
+    "solid_series" => true,
+    "solid_stroke" => true,
+    "braille_series" => true,
+)
+
+_pref_on(m, key::AbstractString) = get(m.visual_prefs, key, get(DEFAULT_VISUAL_PREFS, key, false))
+
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 function _beyond(v::Real, bound::Real, op::Function)
@@ -475,6 +490,7 @@ export weco_detect, compute_limits_and_zones, compute_capability, generate_spc_w
 export detect_oos, cpk_band, cpk_color_for_band
 export ChartRenderContext, resolve_chart_render_context, point_status
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
+export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS
 
 # UI requires Tachikoma (slices 2+). Pure tests include will pull it in.
 using Tachikoma
@@ -489,6 +505,93 @@ __precompile__(false)  # to avoid method overwrite issues from duplicated helper
 # ═══════════════════════════════════════════════════════════════════════
 
 # ── Viewport + helpers (copied/adapted privately) ───────────────────────
+
+"""Bresenham solid cell line (every cell filled) for dotted series connectors."""
+function solid_cell_line!(buf, x0::Int, y0::Int, x1::Int, y1::Int, sty; ch::Char = '•')
+    dx = abs(x1 - x0)
+    dy = -abs(y1 - y0)
+    sx = x0 < x1 ? 1 : -1
+    sy = y0 < y1 ? 1 : -1
+    err = dx + dy
+    x, y = x0, y0
+    while true
+        set_char!(buf, x, y, ch, sty)
+        (x == x1 && y == y1) && break
+        e2 = 2 * err
+        if e2 >= dy
+            err += dy
+            x += sx
+        end
+        if e2 <= dx
+            err += dx
+            y += sy
+        end
+    end
+end
+
+"""Pick box-drawing stroke glyph from a step (dx, dy). Terminal y grows downward."""
+function _stroke_char(dx::Int, dy::Int)::Char
+    if dy == 0
+        return '─'
+    elseif dx == 0
+        return '│'
+    elseif (dx > 0 && dy > 0) || (dx < 0 && dy < 0)
+        return '╲'  # down-right or up-left
+    else
+        return '╱'  # up-right or down-left
+    end
+end
+
+"""Bresenham solid stroke with box-drawing characters (─│╱╲)."""
+function solid_stroke_line!(buf, x0::Int, y0::Int, x1::Int, y1::Int, sty)
+    adx = abs(x1 - x0)
+    ady = -abs(y1 - y0)
+    sx = x0 < x1 ? 1 : -1
+    sy = y0 < y1 ? 1 : -1
+    err = adx + ady
+    x, y = x0, y0
+    odx = x1 == x0 ? 0 : (x1 > x0 ? 1 : -1)
+    ody = y1 == y0 ? 0 : (y1 > y0 ? 1 : -1)
+    # paint start with overall direction
+    set_char!(buf, x, y, _stroke_char(odx, ody), sty)
+    while !(x == x1 && y == y1)
+        e2 = 2 * err
+        step_dx, step_dy = 0, 0
+        if e2 >= ady
+            err += ady
+            x += sx
+            step_dx = sx
+        end
+        if e2 <= adx
+            err += adx
+            y += sy
+            step_dy = sy
+        end
+        set_char!(buf, x, y, _stroke_char(step_dx, step_dy), sty)
+    end
+end
+
+"""Draw series connectors for a plot rect according to visual prefs (dotted and/or stroke)."""
+function draw_series_connectors!(buf, plot_inner, values, vp, m)
+    n = length(values)
+    prev_cell = nothing
+    for i in vp.x0:vp.x1
+        if i < 1 || i > n
+            continue
+        end
+        cx = data_index_to_cell(i, plot_inner, vp)
+        cy = data_val_to_cell_row(values[i], plot_inner, vp)
+        if prev_cell !== nothing
+            if _pref_on(m, "solid_series")
+                solid_cell_line!(buf, prev_cell[1], prev_cell[2], cx, cy, tstyle(:primary); ch='•')
+            end
+            if _pref_on(m, "solid_stroke")
+                solid_stroke_line!(buf, prev_cell[1], prev_cell[2], cx, cy, tstyle(:primary, bold=true))
+            end
+        end
+        prev_cell = (cx, cy)
+    end
+end
 
 if !isdefined(@__MODULE__, :Viewport)
 @kwdef mutable struct Viewport
@@ -705,7 +808,7 @@ end
     # Slice 4+
     config_open::Bool = false
     config_selected::Int = 1
-    config_tab::Symbol = :weco   # :weco | :lines
+    config_tab::Symbol = :weco   # :weco | :lines | :visual
     # Slice 5+
     usl::Union{Float64, Nothing} = nothing
     target::Union{Float64, Nothing} = nothing
@@ -716,6 +819,8 @@ end
     enabled_rules::Dict{String, Bool} = copy(DEFAULT_WECO_RULES)
     # Chart line visibility (CL / ±1σ / ±2σ / ±3σ / Specs)
     show_chart_lines::Dict{String, Bool} = copy(DEFAULT_CHART_LINES)
+    # Graph visual preferences (extensible panel; start with solid series line)
+    visual_prefs::Dict{String, Bool} = copy(DEFAULT_VISUAL_PREFS)
     # Dashboard multi-chart (AC2/AC3)
     charts::Vector{ChartSpec} = ChartSpec[]
     active::Int = 1
@@ -793,19 +898,26 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
 
     # config / editing handling (slice 4+)
     if m.config_open
-        if evt.key == :escape || (evt.key == :char && (evt.char == 'c' || evt.char == 'C' || evt.char == 'v' || evt.char == 'V'))
+        if evt.key == :escape || (evt.key == :char && (evt.char == 'c' || evt.char == 'C' ||
+                evt.char == 'v' || evt.char == 'V' || evt.char == 'o' || evt.char == 'O'))
             m.config_open = false
             m.last_event = "config closed"
             return
         end
-        # Tab switches WECO ↔ Lines tabs
+        # Tab cycles WECO → Lines → Visual → WECO
         if evt.key == :tab || (evt.key == :char && evt.char == '\t')
-            m.config_tab = m.config_tab == :weco ? :lines : :weco
+            m.config_tab = m.config_tab == :weco ? :lines : (m.config_tab == :lines ? :visual : :weco)
             m.config_selected = 1
             m.last_event = "config tab $(m.config_tab)"
             return
         end
-        n_items = m.config_tab == :lines ? length(CHART_LINE_KEYS) : 8
+        n_items = if m.config_tab == :lines
+            length(CHART_LINE_KEYS)
+        elseif m.config_tab == :visual
+            length(VISUAL_PREF_KEYS)
+        else
+            8
+        end
         if evt.key == :up
             m.config_selected = max(1, m.config_selected - 1)
             m.last_event = "config up"
@@ -819,6 +931,10 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                 key = CHART_LINE_KEYS[clamp(m.config_selected, 1, length(CHART_LINE_KEYS))]
                 m.show_chart_lines[key] = !get(m.show_chart_lines, key, true)
                 m.last_event = "toggle line $key"
+            elseif m.config_tab == :visual
+                key = VISUAL_PREF_KEYS[clamp(m.config_selected, 1, length(VISUAL_PREF_KEYS))]
+                m.visual_prefs[key] = !_pref_on(m, key)
+                m.last_event = "toggle visual $key"
             else
                 rid = "WECO-$(m.config_selected)"
                 m.enabled_rules[rid] = !get(m.enabled_rules, rid, false)
@@ -834,6 +950,13 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                     m.show_chart_lines[key] = !get(m.show_chart_lines, key, true)
                     m.config_selected = idx
                     m.last_event = "toggle line $key"
+                end
+            elseif m.config_tab == :visual
+                if 1 <= idx <= length(VISUAL_PREF_KEYS)
+                    key = VISUAL_PREF_KEYS[idx]
+                    m.visual_prefs[key] = !_pref_on(m, key)
+                    m.config_selected = idx
+                    m.last_event = "toggle visual $key"
                 end
             elseif 1 <= idx <= 8
                 rid = "WECO-$idx"
@@ -930,6 +1053,13 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.config_tab = :lines
             m.config_selected = 1
             m.last_event = "config lines"
+            return
+        elseif c == 'o' || c == 'O'
+            # Open Visual Preferences panel (extensible graph prefs)
+            m.config_open = true
+            m.config_tab = :visual
+            m.config_selected = 1
+            m.last_event = "config visual"
             return
         elseif c == 'u' || c == 'U'
             m.editing = :usl
@@ -1143,12 +1273,12 @@ function view(m::SPCWorkbenchModel, f::Frame)
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
 
     if m.config_open
-        # overlay (slice 4) — no bleed; Tab switches WECO ↔ Lines
+        # overlay (slice 4) — no bleed; Tab cycles WECO → Lines → Visual
         ov = plot_rect
         ov_h = max(6, min(ov.height - 2, 14))
         ov_rect = Rect(ov.x + 2, ov.y + 1, ov.width - 4, ov_h)
-        tab_lbl = m.config_tab == :lines ? "Chart Lines" : "WECO Rules"
-        cfg = Block(title="Config: $tab_lbl (Tab switch · ↑↓ · 1-N space/enter · Esc/c/v close)", border_style=tstyle(:accent, bold=true))
+        tab_lbl = m.config_tab == :lines ? "Chart Lines" : (m.config_tab == :visual ? "Visual Preferences" : "WECO Rules")
+        cfg = Block(title="Config: $tab_lbl (Tab switch · ↑↓ · 1-N space/enter · Esc/c/v/o close)", border_style=tstyle(:accent, bold=true))
         inner = render(cfg, ov_rect, buf)
         # clear
         for yy in inner.y:bottom(inner)
@@ -1167,6 +1297,20 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 bub = on ? "●" : "○"
                 lbl = get(CHART_LINE_LABELS, key, key)
                 set_string!(buf, inner.x + 1, y, "$sel$idx $bub $lbl  $(on ? "[ON]" : "[OFF]")  (draw on chart)", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
+                y += 1
+            end
+        elseif m.config_tab == :visual
+            set_string!(buf, inner.x + 1, y, "Graph visual prefs (add more over time):", tstyle(:text_dim))
+            y += 1
+            for (idx, key) in enumerate(VISUAL_PREF_KEYS)
+                if y > bottom(inner) - 1
+                    break
+                end
+                sel = idx == m.config_selected ? "▶ " : "  "
+                on = _pref_on(m, key)
+                bub = on ? "●" : "○"
+                lbl = get(VISUAL_PREF_LABELS, key, key)
+                set_string!(buf, inner.x + 1, y, "$sel$idx $bub $lbl  $(on ? "[ON]" : "[OFF]")", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
                 y += 1
             end
         else
@@ -1211,7 +1355,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
             dx = map_to_dot_x(i, m.viewport, dw)
             dy = map_to_dot_y(v, m.viewport, dh)
             set_point!(c, dx, dy)
-            if prev !== nothing
+            if prev !== nothing && _pref_on(m, "braille_series")
                 line!(c, prev[1], prev[2], dx, dy)
             end
             prev = (dx, dy)
@@ -1302,6 +1446,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
             set_char!(buf, plot_inner.x + 1, hy, '─', tstyle(:accent))
         end
 
+        # Series connectors (visual prefs): dotted • and/or solid box-drawing stroke
+        draw_series_connectors!(buf, plot_inner, m.data.values, m.viewport, m)
+
         # markers
         for i in m.viewport.x0:m.viewport.x1
             if i < 1 || i > n
@@ -1353,7 +1500,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
                     dx = map_to_dot_x(i, vp2, dw2)
                     dy = map_to_dot_y(v, vp2, dh2)
                     set_point!(c2, dx, dy)
-                    if prev2 !== nothing
+                    if prev2 !== nothing && _pref_on(m, "braille_series")
                         line!(c2, prev2[1], prev2[2], dx, dy)
                     end
                     prev2 = (dx, dy)
@@ -1414,6 +1561,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
                     cly2 = data_val_to_cell_row(lz2.cl, inn2, vp2)
                     for xx in inn2.x:right(inn2); set_char!(buf, xx, cly2, '─', tstyle(:accent)); end
                 end
+                draw_series_connectors!(buf, inn2, ch2.data.values, vp2, m)
                 # markers for ch2 (OOC/OOS)
                 for i in vp2.x0:vp2.x1
                     (i<1||i>n2) && continue
@@ -1454,7 +1602,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
                     dx = map_to_dot_x(i, vp3, dw3)
                     dy = map_to_dot_y(v, vp3, dh3)
                     set_point!(c3, dx, dy)
-                    if prev3 !== nothing; line!(c3, prev3[1], prev3[2], dx, dy); end
+                    if prev3 !== nothing && _pref_on(m, "braille_series")
+                        line!(c3, prev3[1], prev3[2], dx, dy)
+                    end
                     prev3 = (dx, dy)
                 end
                 lz3 = ctx3.lz
@@ -1498,6 +1648,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 if _line_on(m, "cl")
                     cly3 = data_val_to_cell_row(lz3.cl, inn3, vp3); for xx in inn3.x:right(inn3); set_char!(buf,xx,cly3,'─',tstyle(:accent)); end
                 end
+                draw_series_connectors!(buf, inn3, ch3.data.values, vp3, m)
                 for i in vp3.x0:vp3.x1
                     (i<1||i>n3)&&continue
                     dx=data_index_to_cell(i,inn3,vp3); dy=data_val_to_cell_row(ch3.data.values[i],inn3,vp3)
@@ -1662,7 +1813,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     else
         " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
     end
-    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p r c v u t l s] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p r c v o u t l s] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
 end
 
 # small helper for fmt
@@ -1682,8 +1833,9 @@ function _render_help_page!(buf, area, m)
         "QUICK START (TUI):",
         "  p/P     toggle pause / live append",
         "  r/R/z/Z reset viewport to full data",
-        "  c/C     open/close WECO rule config (1-8 toggle; Tab→Lines)",
+        "  c/C     open/close WECO rule config (1-8 toggle; Tab→Lines→Visual)",
         "  v/V     open chart-line visibility config (CL/±σ/specs)",
+        "  o/O     open Visual Preferences (solid series line, …)",
         "  u/U t/T l/L  edit USL / Target / LSL (enter to set, esc cancel)",
         "  s/S     clear all spec limits",
         "  1..8    toggle WECO rule directly (or 1-5 line keys in Lines tab)",
@@ -1720,7 +1872,7 @@ function _render_keymap_page!(buf, area, m)
         "KEYS:",
         "  p/P         Pause/Resume live mode",
         "  r R z Z     Reset view (full range + auto y)",
-        "  c C / v V   Config WECO (Tab→Lines) / open Lines visibility",
+        "  c C / v V / o O  Config WECO / Lines / Visual prefs",
         "  u t l / s   Edit USL/Target/LSL / clear specs",
         "  1-8         Toggle WECO-N (or 1-5 in Lines tab)",
         "  [ ] < >     Prev / Next chart (dashboard)",
