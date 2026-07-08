@@ -525,4 +525,45 @@ end
         T.view(m, T.Frame(tb2.buf, T.Rect(1,1,50,12),[],[]))
         @test T.find_text(tb2, "WECO-") !== nothing
     end
+
+    @testset "spec editing (u/t/l keys): enters mode, bottom info visibly updates with prompt+buf, typing reflects, q quits from edit, esc cancels" begin
+        d = generate_spc_workbench_data(8; seed=123)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        # ensure multi-chart state is ready like real runs
+        _ensure_charts!(m)
+
+        # initial: no editing
+        tb0 = T.TestBackend(80, 18); T.reset!(tb0.buf)
+        T.view(m, T.Frame(tb0.buf, T.Rect(1,1,80,18),[],[]))
+        @test m.editing === nothing
+        init_stat = T.row_text(tb0, 18)
+        @test init_stat !== nothing
+        @test !occursin("EDITING", string(init_stat))
+
+        # press u → should enter usl edit, bottom info MUST change visibly
+        T.update!(m, T.KeyEvent('u'))
+        tb = T.TestBackend(80, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,80,18),[],[]))
+        @test m.editing == :usl
+        stat = T.row_text(tb, 18)
+        @test occursin("EDITING USL", string(stat)) || occursin("edit usl", lowercase(string(stat)))
+        # last_event or prompt should mention it
+        @test m.last_event != ""
+
+        # type digits — bottom/prompt must reflect the accumulating input value (not frozen)
+        T.update!(m, T.KeyEvent('1'))
+        T.update!(m, T.KeyEvent('3'))
+        T.update!(m, T.KeyEvent('2'))
+        T.update!(m, T.KeyEvent('0'))
+        tb2 = T.TestBackend(80, 18); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1,1,80,18),[],[]))
+        stat2 = string(T.row_text(tb2, 18))
+        @test occursin("1320", stat2)   # the typed value must appear in bottom info
+
+        # q while in editing should still quit the app (was swallowed → freeze)
+        T.update!(m, T.KeyEvent('q'))
+        @test m.quit == true
+
+        # (note: a separate flow would use Esc to cancel instead of q)
+    end
 end

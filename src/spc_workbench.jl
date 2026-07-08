@@ -803,6 +803,10 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     end
 
     if m.editing !== nothing
+        if evt.key == :char && evt.char == 'q'
+            m.quit = true
+            return
+        end
         if evt.key == :enter
             val = tryparse(Float64, m.edit_buf)
             if val !== nothing
@@ -825,7 +829,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             if !isempty(m.edit_buf)
                 m.edit_buf = m.edit_buf[1:end-1]
             end
-            m.last_event = "edit bs"
+            m.last_event = "edit $(m.editing): $(m.edit_buf)"
             return
         elseif evt.key == :escape
             m.editing = nothing
@@ -834,7 +838,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             return
         elseif evt.key == :char && (isdigit(evt.char) || evt.char in ".-+")
             m.edit_buf *= evt.char
-            m.last_event = "edit $(m.editing)"
+            m.last_event = "edit $(m.editing): $(m.edit_buf)"
             return
         end
         return
@@ -877,17 +881,17 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         elseif c == 'u' || c == 'U'
             m.editing = :usl
             m.edit_buf = m.usl === nothing ? "" : string(m.usl)
-            m.last_event = "edit usl"
+            m.last_event = "edit usl: $(m.edit_buf)"
             return
         elseif c == 't' || c == 'T'
             m.editing = :target
             m.edit_buf = m.target === nothing ? "" : string(m.target)
-            m.last_event = "edit target"
+            m.last_event = "edit target: $(m.edit_buf)"
             return
         elseif c == 'l' || c == 'L'
             m.editing = :lsl
             m.edit_buf = m.lsl === nothing ? "" : string(m.lsl)
-            m.last_event = "edit lsl"
+            m.last_event = "edit lsl: $(m.edit_buf)"
             return
         elseif c == 's' || c == 'S'
             m.usl = m.target = m.lsl = nothing
@@ -1451,7 +1455,13 @@ function view(m::SPCWorkbenchModel, f::Frame)
         end
     end
 
-    render(StatusBar(left=[Span(" paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) ", tstyle(:text_dim))], right=[Span("[p r c u t l s] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+    # Make editing state obvious in bottom info (addresses "press u, nothing changes on screen")
+    left = if m.editing !== nothing
+        " EDITING $(uppercase(string(m.editing))): [$(m.edit_buf)]  (Enter=apply  Esc=cancel  q=quit) "
+    else
+        " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
+    end
+    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p r c u t l s] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
 end
 
 # small helper for fmt
