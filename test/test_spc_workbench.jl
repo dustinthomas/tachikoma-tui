@@ -336,6 +336,68 @@ include("../src/spc_workbench.jl")
         ctx3b = resolve_chart_render_context(ch3; sigma_method = :mr)
         @test point_status(2, ctx3b, ch3) == :ooc
     end
+
+    @testset "y auto-fit: compute_fit_y_range + extras enclose points and lines" begin
+        # Visible window only (index 2..4), not full series min/max
+        vals = [0.0, 10.0, 20.0, 30.0, 100.0]
+        ylo, yhi = compute_fit_y_range(vals, 2, 4; pad_frac = 0.0, pad_abs = 0.0)
+        @test ylo == 10.0
+        @test yhi == 30.0
+
+        # Extras (e.g. UCL/LCL beyond data) expand the range
+        ylo2, yhi2 = compute_fit_y_range(vals, 2, 4; extras = [5.0, 40.0], pad_frac = 0.0, pad_abs = 0.0)
+        @test ylo2 == 5.0
+        @test yhi2 == 40.0
+
+        # Padding expands beyond raw min/max
+        ylo3, yhi3 = compute_fit_y_range([0.0, 10.0], 1, 2; pad_frac = 0.1, pad_abs = 0.0)
+        @test ylo3 ≈ -1.0
+        @test yhi3 ≈ 11.0
+
+        # Constant series still has non-zero span
+        ylo4, yhi4 = compute_fit_y_range([5.0, 5.0, 5.0], 1, 3; pad_frac = 0.0, pad_abs = 0.5)
+        @test ylo4 < 5.0 < yhi4
+        @test (yhi4 - ylo4) >= MIN_Y_SPAN || (yhi4 - ylo4) >= 1.0
+
+        # Empty / no-visible → finite default span
+        ylo5, yhi5 = compute_fit_y_range(Float64[], 1, 0)
+        @test isfinite(ylo5) && isfinite(yhi5) && yhi5 > ylo5
+
+        # y_extras_from_limits respects show_chart_lines flags
+        lz = LimitsAndZones(0.0, 1.0, 3.0, -3.0, 2.0, -2.0, 1.0, -1.0)
+        all_on = y_extras_from_limits(lz; usl = 10.0, lsl = -10.0, show_lines = DEFAULT_CHART_LINES)
+        @test 0.0 in all_on && 3.0 in all_on && -3.0 in all_on && 10.0 in all_on && -10.0 in all_on
+        none = Dict(k => false for k in CHART_LINE_KEYS)
+        @test isempty(y_extras_from_limits(lz; usl = 10.0, lsl = -10.0, show_lines = none))
+        only_cl = merge(none, Dict("cl" => true))
+        @test y_extras_from_limits(lz; show_lines = only_cl) == [0.0]
+
+        # fit_viewport_y! mutates viewport to enclose data + extras
+        vp = Viewport(x0 = 1, x1 = 5, ylo = 0.0, yhi = 1.0)
+        fit_viewport_y!(vp, vals; extras = [-1.0, 110.0], pad_frac = 0.0, pad_abs = 0.0)
+        @test vp.ylo == -1.0
+        @test vp.yhi == 110.0
+
+        # auto_fit_viewport_y! with MR limits: UCL/LCL beyond sample extrema still inside y
+        d = generate_spc_workbench_data(30; seed = 42)
+        lz2 = compute_limits_and_zones(d.values; sigma_method = :mr)
+        vp2 = Viewport(x0 = 1, x1 = length(d.values), ylo = 0.0, yhi = 0.01)
+        auto_fit_viewport_y!(vp2, d.values, lz2; show_lines = DEFAULT_CHART_LINES)
+        @test vp2.ylo <= minimum(d.values)
+        @test vp2.yhi >= maximum(d.values)
+        @test vp2.ylo <= lz2.lcl
+        @test vp2.yhi >= lz2.ucl
+        # Every series value maps inside a synthetic canvas height
+        dh = 40
+        for v in d.values
+            dy = map_to_dot_y(v, vp2, dh)
+            @test 0 <= dy <= dh - 1
+        end
+        for z in (lz2.ucl, lz2.lcl, lz2.cl, lz2.ucl1, lz2.lcl1, lz2.ucl2, lz2.lcl2)
+            dy = map_to_dot_y(z, vp2, dh)
+            @test 0 <= dy <= dh - 1
+        end
+    end
 end
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -364,6 +426,50 @@ end
         T.view(m, T.Frame(tb.buf, T.Rect(1,1,tb.width,tb.height),[],[]))
         @test T.find_text(tb, "SPC Workbench") !== nothing
         @test T.find_text(tb, "Side Stats") !== nothing
+    end
+
+    @testset "auto-fit y on render: points + limit lines map inside plot" begin
+        # Deliberately bad Y (0..1) with data ~μ=100 would clip; view must re-fit
+        d = generate_spc_workbench_data(20; seed=55, μ=100.0, σ=2.0)
+        n = length(d.values)
+        m = SPCWorkbenchModel(
+            data = d,
+            viewport = Viewport(x0 = 1, x1 = n, ylo = 0.0, yhi = 1.0),
+            paused = true,
+            usl = 110.0,
+            lsl = 90.0,
+        )
+        tb = T.TestBackend(90, 24)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 24), [], []))
+        pa = m.plot_area
+        @test pa.width > 5 && pa.height > 3
+        # Y range must now enclose data + UCL/LCL + specs
+        lz = compute_limits_and_zones(d.values; sigma_method = :mr)
+        @test m.viewport.ylo <= minimum(d.values)
+        @test m.viewport.yhi >= maximum(d.values)
+        @test m.viewport.ylo <= lz.lcl
+        @test m.viewport.yhi >= lz.ucl
+        @test m.viewport.ylo <= 90.0
+        @test m.viewport.yhi >= 110.0
+        # Cell mapping for every visible point stays inside plot_inner
+        for i in m.viewport.x0:m.viewport.x1
+            (i < 1 || i > n) && continue
+            cy = data_val_to_cell_row(m.data.values[i], pa, m.viewport)
+            @test pa.y <= cy <= T.bottom(pa)
+        end
+        for z in (lz.ucl, lz.lcl, lz.cl, 110.0, 90.0)
+            cy = data_val_to_cell_row(z, pa, m.viewport)
+            @test pa.y <= cy <= T.bottom(pa)
+        end
+        # Multi-chart boot: secondary/tertiary must not keep default y=0..1
+        @test length(m.charts) >= 3
+        for ch in m.charts
+            nn = length(ch.data.values)
+            nn == 0 && continue
+            @test ch.viewport.ylo <= minimum(ch.data.values)
+            @test ch.viewport.yhi >= maximum(ch.data.values)
+        end
     end
 
     @testset "context-driven consistency (hover status == point_status, list cpk == main cpk)" begin

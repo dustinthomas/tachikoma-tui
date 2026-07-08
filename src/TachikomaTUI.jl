@@ -22,6 +22,7 @@ export static_spc_demo, run_static_spc, spc_demo, run_spc
 export SPCWorkbenchModel, WorkbenchData, generate_spc_workbench_data
 export weco_detect, compute_limits_and_zones, compute_capability
 export detect_oos, cpk_band, cpk_color_for_band
+export compute_fit_y_range, y_extras_from_limits, fit_viewport_y!, auto_fit_viewport_y!
 export ChartRenderContext, resolve_chart_render_context, point_status
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS

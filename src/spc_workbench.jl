@@ -340,6 +340,131 @@ function detect_oos(
     out
 end
 
+# ── Y auto-fit (points + control/spec lines inside plot) ────────────────
+
+const FIT_Y_PAD_FRAC = 0.08
+const FIT_Y_PAD_ABS = 0.5
+
+"""
+    compute_fit_y_range(values, x0, x1; extras=[], pad_frac, pad_abs) -> (ylo, yhi)
+
+Enclose all series values in the visible index window `[x0, x1]` plus any
+extra levels (UCL/LCL, sigma zones, specs). Padding keeps points and lines
+strictly inside the plot rather than on the edge.
+"""
+function compute_fit_y_range(
+    values::AbstractVector{<:Real},
+    x0::Int,
+    x1::Int;
+    extras::AbstractVector{<:Real} = Float64[],
+    pad_frac::Float64 = FIT_Y_PAD_FRAC,
+    pad_abs::Float64 = FIT_Y_PAD_ABS,
+)::Tuple{Float64,Float64}
+    lo = Inf
+    hi = -Inf
+    n = length(values)
+    i_lo = max(1, min(x0, x1))
+    i_hi = min(n, max(x0, x1))
+    if n > 0 && i_lo <= i_hi
+        @inbounds for i in i_lo:i_hi
+            v = Float64(values[i])
+            lo = min(lo, v)
+            hi = max(hi, v)
+        end
+    end
+    for e in extras
+        v = Float64(e)
+        isfinite(v) || continue
+        lo = min(lo, v)
+        hi = max(hi, v)
+    end
+    if !isfinite(lo) || !isfinite(hi)
+        return (0.0, 1.0)
+    end
+    if hi == lo
+        pad = max(pad_abs, abs(lo) * pad_frac, 0.5)
+        return (lo - pad, hi + pad)
+    end
+    span = hi - lo
+    pad = max(pad_abs, span * pad_frac)
+    return (lo - pad, hi + pad)
+end
+
+"""
+    y_extras_from_limits(lz; usl, lsl, show_lines) -> Vector{Float64}
+
+Levels that must stay inside the plot when their chart-line toggles are on.
+"""
+function y_extras_from_limits(
+    lz::LimitsAndZones;
+    usl::Union{Real,Nothing} = nothing,
+    lsl::Union{Real,Nothing} = nothing,
+    show_lines::AbstractDict = DEFAULT_CHART_LINES,
+)::Vector{Float64}
+    extras = Float64[]
+    if get(show_lines, "cl", true)
+        push!(extras, lz.cl)
+    end
+    if get(show_lines, "sigma1", true)
+        push!(extras, lz.ucl1, lz.lcl1)
+    end
+    if get(show_lines, "sigma2", true)
+        push!(extras, lz.ucl2, lz.lcl2)
+    end
+    if get(show_lines, "sigma3", true)
+        push!(extras, lz.ucl, lz.lcl)
+    end
+    if get(show_lines, "specs", true)
+        usl !== nothing && isfinite(Float64(usl)) && push!(extras, Float64(usl))
+        lsl !== nothing && isfinite(Float64(lsl)) && push!(extras, Float64(lsl))
+    end
+    extras
+end
+
+"""
+    fit_viewport_y!(vp, values; x0, x1, extras, pad_frac, pad_abs)
+
+Mutate `vp.ylo`/`vp.yhi` so the visible series (and extras) fit in the plot.
+Uses `vp.x0`/`vp.x1` when `x0`/`x1` are omitted.
+"""
+function fit_viewport_y!(
+    vp::Viewport,
+    values::AbstractVector{<:Real};
+    x0::Union{Int,Nothing} = nothing,
+    x1::Union{Int,Nothing} = nothing,
+    extras::AbstractVector{<:Real} = Float64[],
+    pad_frac::Float64 = FIT_Y_PAD_FRAC,
+    pad_abs::Float64 = FIT_Y_PAD_ABS,
+)
+    xa = x0 === nothing ? vp.x0 : x0
+    xb = x1 === nothing ? vp.x1 : x1
+    ylo, yhi = compute_fit_y_range(values, xa, xb; extras = extras, pad_frac = pad_frac, pad_abs = pad_abs)
+    vp.ylo = ylo
+    vp.yhi = yhi
+    vp
+end
+
+"""
+    auto_fit_viewport_y!(vp, values, lz; usl, lsl, show_lines, x0, x1)
+
+Fit Y from visible data + enabled control/spec lines (SPC auto-scale).
+"""
+function auto_fit_viewport_y!(
+    vp::Viewport,
+    values::AbstractVector{<:Real},
+    lz::LimitsAndZones;
+    usl::Union{Real,Nothing} = nothing,
+    lsl::Union{Real,Nothing} = nothing,
+    show_lines::AbstractDict = DEFAULT_CHART_LINES,
+    x0::Union{Int,Nothing} = nothing,
+    x1::Union{Int,Nothing} = nothing,
+    pad_frac::Float64 = FIT_Y_PAD_FRAC,
+    pad_abs::Float64 = FIT_Y_PAD_ABS,
+)
+    extras = y_extras_from_limits(lz; usl = usl, lsl = lsl, show_lines = show_lines)
+    fit_viewport_y!(vp, values; x0 = x0, x1 = x1, extras = extras, pad_frac = pad_frac, pad_abs = pad_abs)
+end
+
 """
     cpk_band(cpk)
 
@@ -488,6 +613,7 @@ end
 export WECOViolation, WorkbenchData, LimitsAndZones, CapabilityResult
 export weco_detect, compute_limits_and_zones, compute_capability, generate_spc_workbench_data
 export detect_oos, cpk_band, cpk_color_for_band
+export compute_fit_y_range, y_extras_from_limits, fit_viewport_y!, auto_fit_viewport_y!
 export ChartRenderContext, resolve_chart_render_context, point_status
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS
@@ -838,19 +964,27 @@ function _ensure_charts!(m::SPCWorkbenchModel)
         else
             generate_spc_workbench_data(n; seed=42)
         end
+        function _boot_vp(d::WorkbenchData; usl=nothing, lsl=nothing)
+            nn = length(d.values)
+            nn <= 0 && return Viewport()
+            lz = compute_limits_and_zones(d.values; sigma_method = :mr)
+            vp = Viewport(x0 = 1, x1 = nn)
+            auto_fit_viewport_y!(vp, d.values, lz; usl = usl, lsl = lsl, show_lines = m.show_chart_lines)
+            return vp
+        end
         push!(m.charts, ChartSpec(
             name = "Primary",
             data = base,
-            viewport = (n>0 ? Viewport(x0=1, x1=n, ylo=minimum(base.values)-1, yhi=maximum(base.values)+1) : Viewport()),
+            viewport = _boot_vp(base; usl = m.usl, lsl = m.lsl),
             usl = m.usl, target = m.target, lsl = m.lsl,
             enabled_rules = copy(m.enabled_rules)
         ))
         d2 = generate_spc_workbench_data(n; seed=123)
         push!(m.charts, ChartSpec(name="Secondary (demo)", data=d2,
-            viewport = Viewport(x0=1, x1=length(d2.values))))
+            viewport = _boot_vp(d2)))
         d3 = generate_spc_workbench_data(15; seed=55, μ=100.0, σ=2.0)
         push!(m.charts, ChartSpec(name="Tertiary", data=d3,
-            viewport=Viewport(x0=1, x1=length(d3.values))))
+            viewport = _boot_vp(d3)))
         m.active = 1
     end
     ch = m.charts[clamp(m.active, 1, length(m.charts))]
@@ -1031,8 +1165,9 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             else
                 m.viewport.x0 = 1
                 m.viewport.x1 = n
-                m.viewport.ylo = minimum(m.data.values) - 1.0
-                m.viewport.yhi = maximum(m.data.values) + 1.0
+                lz_r = compute_limits_and_zones(m.data.values; sigma_method = :mr)
+                auto_fit_viewport_y!(m.viewport, m.data.values, lz_r;
+                    usl = m.usl, lsl = m.lsl, show_lines = m.show_chart_lines)
                 clamp_viewport!(m.viewport, n)
             end
             m.hovered = nothing
@@ -1342,6 +1477,10 @@ function view(m::SPCWorkbenchModel, f::Frame)
         ctx = resolve_chart_render_context(ch_act; sigma_method = :mr)
         viol_set = ctx.viol_indices
         lz_disp = ctx.lz   # canonical mr-based
+        # Auto-scale Y so visible points + enabled limit/spec lines stay inside the plot
+        auto_fit_viewport_y!(m.viewport, m.data.values, lz_disp;
+            usl = m.usl, lsl = m.lsl, show_lines = m.show_chart_lines)
+        ch_act.viewport = m.viewport
 
         c = create_canvas(cw, ch; style = !isempty(viol_set) ? tstyle(:accent) : tstyle(:primary))
         dw, dh = canvas_dot_size(c)
@@ -1490,6 +1629,8 @@ function view(m::SPCWorkbenchModel, f::Frame)
             if cw2 > 0 && ch2h > 0
                 ctx2 = resolve_chart_render_context(ch2; sigma_method=:mr)
                 viol2 = ctx2.viol_indices
+                auto_fit_viewport_y!(ch2.viewport, ch2.data.values, ctx2.lz;
+                    usl = ch2.usl, lsl = ch2.lsl, show_lines = m.show_chart_lines)
                 c2 = create_canvas(cw2, ch2h; style = !isempty(viol2) ? tstyle(:accent) : tstyle(:primary))
                 dw2, dh2 = canvas_dot_size(c2)
                 prev2 = nothing
@@ -1592,6 +1733,8 @@ function view(m::SPCWorkbenchModel, f::Frame)
             if cw3 > 0 && ch3h > 0
                 ctx3 = resolve_chart_render_context(ch3; sigma_method=:mr)
                 viol3 = ctx3.viol_indices
+                auto_fit_viewport_y!(ch3.viewport, ch3.data.values, ctx3.lz;
+                    usl = ch3.usl, lsl = ch3.lsl, show_lines = m.show_chart_lines)
                 c3 = create_canvas(cw3, ch3h; style = !isempty(viol3) ? tstyle(:accent) : tstyle(:primary))
                 dw3, dh3 = canvas_dot_size(c3)
                 prev3 = nothing
@@ -1982,12 +2125,11 @@ Static/paused public runner.
 function spc_workbench_demo()
     d = generate_spc_workbench_data(40; seed=42)
     n = length(d.values)
-    vp = Viewport(
-        x0 = n > 0 ? 1 : 0,
-        x1 = n > 0 ? n : 0,
-        ylo = n > 0 ? minimum(d.values) - 1.0 : 0.0,
-        yhi = n > 0 ? maximum(d.values) + 1.0 : 0.0,
-    )
+    vp = Viewport(x0 = n > 0 ? 1 : 0, x1 = n > 0 ? n : 0)
+    if n > 0
+        lz = compute_limits_and_zones(d.values; sigma_method = :mr)
+        auto_fit_viewport_y!(vp, d.values, lz)
+    end
     m = SPCWorkbenchModel(data = d, viewport = vp, paused = true)
     if n > 0
         clamp_viewport!(m.viewport, n)
@@ -2006,12 +2148,11 @@ Live/interactive.
 function spc_workbench(; paused::Bool = false)
     d = generate_spc_workbench_data(40; seed=42)
     n = length(d.values)
-    vp = Viewport(
-        x0 = n > 0 ? 1 : 0,
-        x1 = n > 0 ? n : 0,
-        ylo = n > 0 ? minimum(d.values) - 1.0 : 0.0,
-        yhi = n > 0 ? maximum(d.values) + 1.0 : 0.0,
-    )
+    vp = Viewport(x0 = n > 0 ? 1 : 0, x1 = n > 0 ? n : 0)
+    if n > 0
+        lz = compute_limits_and_zones(d.values; sigma_method = :mr)
+        auto_fit_viewport_y!(vp, d.values, lz)
+    end
     m = SPCWorkbenchModel(data = d, viewport = vp, paused = paused)
     if n > 0
         clamp_viewport!(m.viewport, n)
