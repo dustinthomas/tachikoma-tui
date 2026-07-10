@@ -670,6 +670,11 @@ function _clear_load_ephemerals!(m::SPCWorkbenchModel)
     m.prompt_kind = nothing
     m.prompt_buf = ""
     m.pending_delete = false
+    # Session-ephemeral filters (GC-PR4) — not in JSON schema; always reset on load
+    m.filter_tool = ""
+    m.filter_type = ""
+    m.filter_owner = ""
+    m.filter_prompt_field = :tool
     return nothing
 end
 

@@ -1876,6 +1876,10 @@ function delete_chart!(m::SPCWorkbenchModel, idx::Int)::Bool
     end
     m.library_selected = clamp(m.library_selected, 1, length(m.charts))
     _ensure_charts!(m)  # resync legacy mirrors from new active
+    # A6: under filters, absolute clamp may land on a non-matching chart — rehome
+    if _any_filter_active(m)
+        _rehome_active_if_filtered!(m)
+    end
     return true
 end
 
@@ -1914,6 +1918,7 @@ function _chart_matches_filters(m::SPCWorkbenchModel, ch::ChartSpec)::Bool
         chart_type_to_string(ch.chart_type) == m.filter_type || return false
     end
     if !isempty(m.filter_owner)
+        # strip both sides (intentional vs bare ==): chart owner may have padding
         strip(ch.owner) == strip(m.filter_owner) || return false
     end
     return true
@@ -1998,7 +2003,11 @@ function set_filter_owner!(m::SPCWorkbenchModel, s::AbstractString)
     return nothing
 end
 
-"""Package-private. Clear all three filters; cancel filter prompt if open; rehome + last_event."""
+"""Package-private. Clear all three filters; cancel filter prompt if open.
+
+After clear, every chart is visible so A6 rehome is a no-op — always set
+`last_event = "filters cleared"` (no rehome branch).
+"""
 function clear_filters!(m::SPCWorkbenchModel)
     m.filter_tool = ""
     m.filter_type = ""
@@ -2007,10 +2016,30 @@ function clear_filters!(m::SPCWorkbenchModel)
         m.prompt_kind = nothing
         m.prompt_buf = ""
     end
-    changed = _rehome_active_if_filtered!(m)
-    if !changed
-        m.last_event = "filters cleared"
+    m.last_event = "filters cleared"
+    return nothing
+end
+
+"""Cycle `active` among `visible_charts` by `delta` (±1). Absolute indices into `m.charts`."""
+function _cycle_active_visible!(m::SPCWorkbenchModel, delta::Int)
+    vis = visible_charts(m)
+    if isempty(vis)
+        m.last_event = "No charts match filters"
+        return nothing
     end
+    isempty(m.charts) && return nothing
+    act = current_chart(m)
+    pos = findfirst(c -> c.id == act.id, vis)
+    if pos === nothing
+        # Active was filtered out — land on first (forward) or last (backward)
+        new_pos = delta >= 0 ? 1 : length(vis)
+    else
+        new_pos = clamp(pos + delta, 1, length(vis))
+    end
+    idx = findfirst(c -> c.id == vis[new_pos].id, m.charts)
+    idx === nothing && return nothing
+    set_active_chart!(m, idx)
+    m.last_event = "chart $(m.active)"
     return nothing
 end
 
@@ -2606,7 +2635,9 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                            m.prompt_kind === :filter_owner
         if evt.key == :escape
             m.prompt_kind = nothing
-            # keep prompt_buf for re-edit; filters stay as last applied
+            # Filters stay as last applied. Clear buf: next `f` reseeds from filter_*,
+            # not from the cancelled edit (comment previously overpromised re-edit).
+            m.prompt_buf = ""
             m.last_event = is_filter_prompt ? "filter edit cancel" : "prompt cancel"
             return
         elseif evt.key == :enter
@@ -2860,14 +2891,11 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.last_event = "builder open"
             return
         elseif c == ']' || c == '>'
-            m.active = min(length(m.charts), m.active + 1)
-            _ensure_charts!(m)
-            m.last_event = "chart $(m.active)"
+            # GC-PR4: step only among visible_charts (absolute indices)
+            _cycle_active_visible!(m, +1)
             return
         elseif c == '[' || c == '<'
-            m.active = max(1, m.active - 1)
-            _ensure_charts!(m)
-            m.last_event = "chart $(m.active)"
+            _cycle_active_visible!(m, -1)
             return
         end
         _sync_active_back!(m)
@@ -3048,14 +3076,24 @@ function view(m::SPCWorkbenchModel, f::Frame)
     hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [m]library [f]filter [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
 
-    # A6: empty filter match — message, no crash (active left as-is)
+    # A6: empty filter match — plot message + side list (Charts: 0/N) + footer (no full early return)
     if npanes == 0 && _any_filter_active(m)
         set_string!(buf, plot_rect.x + 2, plot_rect.y + max(1, plot_rect.height ÷ 2),
             "No charts match filters", tstyle(:warning, bold=true))
         set_string!(buf, plot_rect.x + 2, plot_rect.y + max(2, plot_rect.height ÷ 2 + 1),
             "Press [f] to edit filters or [F] to clear. Demo tools may be empty.", tstyle(:text_dim))
         m.plot_area = plot_rect
-        m.side_area = side_rect
+        # Side panel still shows filtered count (design: side list always uses visible_charts)
+        side_block = Block(title="Side Stats (chart $(m.active)/$(max(1,length(m.charts))) • dashboard)", border_style=tstyle(:border))
+        side_inner = render(side_block, side_rect, buf)
+        m.side_area = side_inner
+        nch_all = length(m.charts)
+        set_string!(buf, side_inner.x, side_inner.y, "Charts: 0/$nch_all", tstyle(:text_dim))
+        if side_inner.y + 1 <= bottom(side_inner)
+            set_string!(buf, side_inner.x, side_inner.y + 1, " (no match)", tstyle(:warning))
+        end
+        left = " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
+        render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
         return
     end
 

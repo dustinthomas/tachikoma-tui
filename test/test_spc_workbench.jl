@@ -1280,6 +1280,43 @@ include("../src/spc_workbench.jl")
         # seed_demos default still :triple
         m_def = SPCWorkbenchModel(data = d, paused = true)
         @test m_def.seed_demos === :triple
+
+        # A6: delete_chart! under filter rehomes active onto remaining visible
+        clear_filters!(m)
+        set_active_chart!(m, idx1)  # Alpha (T-A, Alice)
+        set_filter_owner!(m, "Alice")  # Alpha + Gamma; Beta hidden
+        @test Set(c.name for c in visible_charts(m)) == Set(["Alpha", "Gamma"])
+        @test m.active == idx1
+        id_gamma = m.charts[idx3].id
+        @test delete_chart!(m, idx1) === true  # delete active Alpha
+        @test length(m.charts) == 2
+        # active must be a visible chart (Gamma), not Bob/Beta
+        @test any(c -> c.id == current_chart(m).id, visible_charts(m))
+        @test current_chart(m).id == id_gamma || current_chart(m).name == "Gamma"
+        # [ ] cycle only among visible (absolute indices)
+        clear_filters!(m)
+        # rebuild 3 charts for cycle test
+        m2 = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        a = add_chart!(m2; name = "Keep")
+        b = add_chart!(m2; name = "Hide")
+        c = add_chart!(m2; name = "Keep2")
+        m2.charts[a].owner = "A"
+        m2.charts[b].owner = "B"
+        m2.charts[c].owner = "A"
+        set_active_chart!(m2, a)
+        set_filter_owner!(m2, "A")
+        @test length(visible_charts(m2)) == 2
+        _cycle_active_visible!(m2, +1)
+        @test current_chart(m2).name == "Keep2"
+        _cycle_active_visible!(m2, +1)
+        @test current_chart(m2).name == "Keep2"  # clamped at end
+        _cycle_active_visible!(m2, -1)
+        @test current_chart(m2).name == "Keep"
+        # never lands on Hide while filter active
+        for _ in 1:5
+            _cycle_active_visible!(m2, +1)
+            @test current_chart(m2).name != "Hide"
+        end
     end
 end
 
@@ -2689,13 +2726,17 @@ end
         T.update!(m, T.KeyEvent(:escape))
         @test m.view_mode == :dashboard
 
-        # Filter that hides all → empty dashboard message
+        # Filter that hides all → empty dashboard message + side Charts: 0/N + footer
         set_filter_owner!(m, "Nobody")
         @test isempty(visible_charts(m))
         tb3 = T.TestBackend(80, 20); T.reset!(tb3.buf)
         T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 80, 20), [], []))
         dash = join([string(T.row_text(tb3, i)) for i = 1:20 if T.row_text(tb3, i) !== nothing], "\n")
         @test occursin("No charts match filters", dash)
+        @test occursin("Charts: 0/2", dash) || occursin("Charts: 0/", dash)
+        @test occursin("(no match)", dash) || occursin("no match", lowercase(dash))
+        @test occursin("Side Stats", dash)
+        @test occursin("last=", dash)  # footer still rendered
 
         # Side list respects filters (visible only) + count form
         clear_filters!(m)
@@ -2706,6 +2747,15 @@ end
         side = join([string(T.row_text(tb4, i)) for i = 1:28 if T.row_text(tb4, i) !== nothing], "\n")
         @test occursin("Charts: 1/2", side) || occursin("KeepMe", side)
         @test !occursin("HideMe", side)
+
+        # ] / [ under filter only cycle visible (never land on HideMe)
+        set_active_chart!(m, a)
+        @test current_chart(m).name == "KeepMe"
+        T.update!(m, T.KeyEvent(']'))
+        @test current_chart(m).name == "KeepMe"  # only one visible
+        @test current_chart(m).name != "HideMe"
+        T.update!(m, T.KeyEvent('['))
+        @test current_chart(m).name == "KeepMe"
 
         # F on dashboard clears
         T.update!(m, T.KeyEvent('F'))
@@ -2741,6 +2791,7 @@ end
         @test m.prompt_kind === :filter_type
         @test occursin("invalid", m.last_event)
         T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_buf == ""  # cancel clears buf
 
         # anti-port: never enter :filters or :tools view modes
         @test m.view_mode in (:dashboard, :library, :help, :keymap, :builder, :focused)
@@ -3480,6 +3531,43 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
         ch.units = "nm"
         m.tools = [ToolEntry(id = "T1", description = "tool one")]
         return m
+    end
+
+    @testset "GC-PR4: filters omitted from JSON; load clears session filters" begin
+        m = _make_session()
+        m.filter_tool = "ETCH-1"
+        m.filter_type = "I-MR"
+        m.filter_owner = "Nobody"
+        m.filter_prompt_field = :owner
+        d = workbench_to_dict(m)
+        @test !haskey(d, "filter_tool")
+        @test !haskey(d, "filter_type")
+        @test !haskey(d, "filter_owner")
+        @test !haskey(d, "filter_prompt_field")
+        # setters not public exports
+        @test !(:set_filter_tool! in names(TachikomaTUI))
+        @test !(:set_filter_type! in names(TachikomaTUI))
+        @test !(:set_filter_owner! in names(TachikomaTUI))
+        @test !(:clear_filters! in names(TachikomaTUI))
+        @test :visible_charts in names(TachikomaTUI)
+        @test :dashboard_pane_charts in names(TachikomaTUI)
+
+        path = joinpath(tempdir(), "spc_wb_filt_$(rand(UInt32)).json")
+        try
+            err = save_workbench(m, path)
+            @test err === nothing
+            # leave filters set on model then load into same model
+            err2 = load_workbench!(m, path)
+            @test err2 === nothing
+            @test m.filter_tool == ""
+            @test m.filter_type == ""
+            @test m.filter_owner == ""
+            @test m.filter_prompt_field === :tool
+            @test length(visible_charts(m)) == length(m.charts)
+            @test !isempty(m.charts)
+        finally
+            isfile(path) && rm(path; force = true)
+        end
     end
 
     @testset "tempfile round-trip: values, WECO, specs, active, chart_type wire" begin
