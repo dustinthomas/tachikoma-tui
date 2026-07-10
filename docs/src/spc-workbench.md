@@ -18,15 +18,23 @@ spc_workbench(; paused = true)
 
 ## Keys (overview)
 
+Current workbench bindings (see in-app help `?` / `h` for the full list):
+
 | Key | Action |
 |-----|--------|
 | `q` / Esc | Quit |
 | `p` | Pause / resume live tick |
 | `r` / `z` | Reset viewport |
-| `g` / `G` | Live toggle (not `L`) |
 | `?` / `h` | Help overlay |
 
-Full keymap and library workflow pages land with feature PRs.
+### Planned keys (feature PRs)
+
+| Key | Action | When |
+|-----|--------|------|
+| `g` / `G` | Live toggle (**not** `L` — `L` is reserved for LSL edit) | PR3 |
+
+Do not document or implement live toggle as `L`. Full keymap and library workflow
+pages expand with feature PRs.
 
 ## I/O (planned)
 

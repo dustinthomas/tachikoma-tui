@@ -33,8 +33,8 @@ julia --project=. -e 'using TachikomaTUI; TachikomaTUI.spc_workbench_demo()'
 julia --project=. -e 'using TachikomaTUI; TachikomaTUI.spc_workbench(paused=true)'
 ```
 
-Live toggle in the workbench is **`g` / `G` only** (not `L`). Do not change
-`seed_demos` defaults without an explicit product decision.
+Live toggle convention (locks at PR3): **`g` / `G` only** (not `L` — `L` is LSL
+edit). Do not change `seed_demos` defaults without an explicit product decision.
 
 ## Verification gates
 
@@ -89,7 +89,9 @@ julia --project=docs -e 'using Pkg; Pkg.instantiate()'
 # Later: julia --project=docs docs/make.jl
 ```
 
-Pages: `docs/src/index.md`, `docs/src/spc-workbench.md` (stubs expand with feature PRs).
+Pages: `docs/src/index.md`, `docs/src/spc-workbench.md`, `docs/src/api.md`
+(stubs expand with feature PRs). Path dep for TachikomaTUI is declared in
+`docs/Project.toml` (`[sources]`).
 
 ## Grok Agentic Workflow (2026-07)
 

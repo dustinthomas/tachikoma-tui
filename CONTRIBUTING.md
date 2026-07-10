@@ -14,7 +14,7 @@ julia --project=. -e 'using TachikomaTUI; TachikomaTUI.spc_workbench_demo()'
 ```
 
 Never claim green without running these in-session. Do not flip `seed_demos`
-defaults. Live toggle is **`g`/`G` only** (not `L`).
+defaults. Live toggle convention (PR3): **`g`/`G` only** (not `L` — LSL edit).
 
 ## Testing conventions
 
@@ -62,6 +62,8 @@ Project config: `.JuliaFormatter.toml` (indent=4, margin=92).
 
 ## Suite wiring note (KD22 / KD24)
 
-- `test/test_spc.jl` runs in an isolated module so `using TachikomaTUI` does not
-  collide with pure workbench tests that still `include("../src/spc_workbench.jl")`.
+- `test/test_spc.jl` runs in an isolated `module TestSPCChart` so `using TachikomaTUI`
+  does not collide with pure workbench tests that still `include("../src/spc_workbench.jl")`.
+- **Do not remove the module wrapper** until pure workbench tests stop raw-including
+  `src/spc_workbench.jl` (flattening into Main re-breaks the suite).
 - Prefer package load for new tests; pure raw-include may remain until a consolidation PR.

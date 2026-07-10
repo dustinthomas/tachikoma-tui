@@ -12,6 +12,7 @@ shipped by this project.
 ## Quick links
 
 - [SPC Workbench](@ref) — workflow, keys, I/O schema (pages expand in later PRs)
+- [API Reference](@ref) — public API stub (`@autodocs` at PR11)
 - Repository `README.md` — runners, verification gates, formatting
 
 !!! note "Scaffold"
