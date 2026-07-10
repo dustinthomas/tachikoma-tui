@@ -23,6 +23,8 @@ Manifest.toml
 # Build artifacts (if any)
 dist/
 build/
+docs/build/
+docs/Manifest.toml
 package-lock.json
 
 # Tooling data (never commit)
