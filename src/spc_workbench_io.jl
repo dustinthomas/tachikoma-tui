@@ -1,4 +1,5 @@
 # SPC Workbench I/O — CSV import (PR3) + JSON session persistence schema v1 (PR4)
+# + HTML #spc-state / exportArchive import (PR10 P2; strip admins; no Excel).
 # Included after spc_workbench.jl from TachikomaTUI.jl.
 # CSV: simple comma split only (no full RFC4180). JSON: fail closed; no admins.
 
@@ -854,5 +855,402 @@ function load_workbench!(m::SPCWorkbenchModel, path::AbstractString)::Union{Noth
     return nothing
 end
 
+# ── HTML #spc-state / exportArchive import (PR10 P2) ───────────────────
+# Maps HTML archive JSON into SharedTable + ChartSpecs. Fail closed.
+# NEVER deserializes admins / passcodes (security: strip on sight).
+# No XLSX.jl — HTML/JSON only.
+
+const _HTML_ADMIN_KEYS = ("admins", "passcodes", "passcode", "admin")
+
+"""Drop any admin/passcode keys from a dict (shallow). Returns a new Dict."""
+function _strip_admin_keys(d::AbstractDict)::Dict{String,Any}
+    out = Dict{String,Any}()
+    for (k, v) in d
+        ks = String(k)
+        ks in _HTML_ADMIN_KEYS && continue
+        out[ks] = v
+    end
+    return out
+end
+
+"""
+    extract_html_spc_state(text) -> Dict | String
+
+Pull `#spc-state` JSON from an HTML archive (or accept raw JSON that is already
+the exportArchive / inline state object). Error string on failure.
+Never returns a dict that still carries top-level `admins`/`passcodes`.
+"""
+function extract_html_spc_state(text::AbstractString)::Union{Dict{String,Any},String}
+    s = String(text)
+    isempty(strip(s)) && return "empty input"
+    # Prefer explicit #spc-state script payload
+    m = match(r"""id\s*=\s*["']spc-state["'][^>]*>(.*?)</script>"""is, s)
+    json_text = if m !== nothing
+        String(m.captures[1])
+    else
+        # Raw JSON archive (exportArchive body) — must look like an object
+        t = strip(s)
+        startswith(t, "{") ? t : ""
+    end
+    isempty(strip(json_text)) && return "no #spc-state JSON found"
+    local d
+    try
+        d = JSON.parse(json_text)
+    catch e
+        return "spc-state JSON parse failed ($(sprint(showerror, e)))"
+    end
+    d isa AbstractDict || return "spc-state root must be an object"
+    # Strip secrets immediately — never pass through
+    return _strip_admin_keys(d)
+end
+
+"""
+    extract_html_spc_state_file(path) -> Dict | String
+
+Read file then `extract_html_spc_state`.
+"""
+function extract_html_spc_state_file(path::AbstractString)::Union{Dict{String,Any},String}
+    if !isfile(path)
+        return "not found"
+    end
+    text = try
+        read(path, String)
+    catch e
+        return "unreadable ($(sprint(showerror, e)))"
+    end
+    return extract_html_spc_state(text)
+end
+
+function _html_cell_to_string(v)::String
+    v === nothing && return ""
+    v isa AbstractString && return String(v)
+    v isa Bool && return v ? "true" : "false"
+    v isa Integer && return string(Int(v))
+    v isa Real && return string(Float64(v))
+    return string(v)
+end
+
+"""
+Build SharedTable from HTML `data` (row objects) + optional `columns`.
+Empty value rows kept as empty cells (materialize skips non-numeric).
+"""
+function _shared_table_from_html(data, columns_raw)::Union{SharedTable,String}
+    data === nothing && return SharedTable()
+    data isa AbstractVector || return "data must be an array"
+    cols = String[]
+    if columns_raw !== nothing
+        columns_raw isa AbstractVector || return "columns must be an array"
+        for (i, c) in enumerate(columns_raw)
+            c isa AbstractString || return "columns[$i] must be string"
+            push!(cols, String(c))
+        end
+    end
+    # Discover columns from first non-empty row if omitted
+    if isempty(cols)
+        for row in data
+            row isa AbstractDict || continue
+            for k in keys(row)
+                ks = String(k)
+                ks in cols || push!(cols, ks)
+            end
+            !isempty(cols) && break
+        end
+    end
+    rows = Dict{String,String}[]
+    for (i, row) in enumerate(data)
+        row isa AbstractDict || return "data[$i] must be an object"
+        d = Dict{String,String}()
+        # union of declared cols + row keys (ignore admin keys if embedded)
+        all_keys = copy(cols)
+        for k in keys(row)
+            ks = String(k)
+            ks in _HTML_ADMIN_KEYS && continue
+            ks in all_keys || push!(all_keys, ks)
+        end
+        for c in all_keys
+            d[c] = _html_cell_to_string(get(row, c, ""))
+        end
+        push!(rows, d)
+        # grow cols set for table.columns
+        for c in all_keys
+            c in cols || push!(cols, c)
+        end
+    end
+    return SharedTable(columns = cols, rows = rows)
+end
+
+function _html_rules_from(v)::Union{Dict{String,Bool},String}
+    # HTML uses "rules" / "defaultRules" with WECO-N keys
+    return _rules_from_json(v)
+end
+
+function _html_tools_from(v)::Union{Vector{ToolEntry},String}
+    v === nothing && return ToolEntry[]
+    v isa AbstractVector || return "tools must be an array"
+    out = ToolEntry[]
+    for (i, item) in enumerate(v)
+        item isa AbstractDict || return "tools[$i] must be an object"
+        id = get(item, "id", nothing)
+        id isa AbstractString || return "tools[$i].id required string"
+        # HTML uses "desc"; schema v1 uses "description"
+        desc = get(item, "description", nothing)
+        if desc === nothing
+            desc = get(item, "desc", "")
+        end
+        desc = desc === nothing ? "" : String(desc)
+        push!(out, ToolEntry(id = String(id), description = desc))
+    end
+    return out
+end
+
+"""
+Map one HTML chart object → ChartSpec (values still empty; materialize separately).
+Ignores admins/passcodes on the chart object.
+"""
+function _chart_from_html_dict(cd)::Union{ChartSpec,String}
+    cd isa AbstractDict || return "chart must be an object"
+    # Required HTML keys
+    haskey(cd, "id") || return "chart missing id"
+    haskey(cd, "name") || return "chart missing name"
+    type_raw = get(cd, "type", get(cd, "chart_type", nothing))
+    type_raw === nothing && return "chart missing type"
+    type_raw isa AbstractString || return "chart type must be string"
+    ct = parse_chart_type(String(type_raw))
+    ct === nothing && return "unknown chart type: $type_raw"
+    id = cd["id"]
+    name = cd["name"]
+    (id isa AbstractString && name isa AbstractString) || return "chart id/name must be strings"
+
+    usl = _json_null_or_float(get(cd, "usl", nothing))
+    usl isa String && return "usl: $usl"
+    target = _json_null_or_float(get(cd, "target", nothing))
+    target isa String && return "target: $target"
+    lsl = _json_null_or_float(get(cd, "lsl", nothing))
+    lsl isa String && return "lsl: $lsl"
+
+    rules = _html_rules_from(get(cd, "rules", get(cd, "enabled_rules", nothing)))
+    rules isa String && return rules
+
+    param = _html_cell_to_string(get(cd, "param", ""))
+    units = _html_cell_to_string(get(cd, "units", ""))
+    owner = _html_cell_to_string(get(cd, "owner", ""))
+
+    tools_v = get(cd, "tools", nothing)
+    chart_tools = String[]
+    if tools_v !== nothing
+        tools_v isa AbstractVector || return "chart tools must be an array"
+        for (i, t) in enumerate(tools_v)
+            t isa AbstractString || return "chart tools[$i] must be string"
+            push!(chart_tools, String(t))
+        end
+    end
+
+    lm_raw = get(cd, "limitsMode", get(cd, "limits_mode", "auto"))
+    lm = if lm_raw === nothing || lm_raw == "auto" || lm_raw === :auto
+        :auto
+    elseif lm_raw == "manual" || lm_raw === :manual
+        :manual
+    else
+        return "limitsMode must be auto|manual"
+    end
+
+    # HTML manual limits live as cl/ucl/lcl; schema uses manual_*
+    manual_cl = _json_null_or_float(get(cd, "manual_cl", get(cd, "cl", nothing)))
+    manual_cl isa String && return "cl: $manual_cl"
+    manual_ucl = _json_null_or_float(get(cd, "manual_ucl", get(cd, "ucl", nothing)))
+    manual_ucl isa String && return "ucl: $manual_ucl"
+    manual_lcl = _json_null_or_float(get(cd, "manual_lcl", get(cd, "lcl", nothing)))
+    manual_lcl isa String && return "lcl: $manual_lcl"
+    # When mode is auto, drop manual values so resolver stays auto
+    if lm === :auto
+        manual_cl = nothing
+        manual_ucl = nothing
+        manual_lcl = nothing
+    end
+
+    sg = get(cd, "subgroupSize", get(cd, "subgroup_size", 5))
+    subgroup_size = try
+        Int(sg === nothing ? 5 : sg)
+    catch
+        return "subgroupSize must be integer"
+    end
+
+    col_value = _html_cell_to_string(get(cd, "col_value", "Value"))
+    isempty(col_value) && (col_value = "Value")
+    col_n = _html_cell_to_string(get(cd, "col_n", ""))
+    col_tool = _html_cell_to_string(get(cd, "col_tool", "Tool"))
+    isempty(col_tool) && (col_tool = "Tool")
+    col_time = _html_cell_to_string(get(cd, "col_time", "Timestamp"))
+    isempty(col_time) && (col_time = "Timestamp")
+    col_lot = _html_cell_to_string(get(cd, "col_lot", ""))
+
+    return ChartSpec(
+        id = String(id),
+        name = String(name),
+        chart_type = ct,
+        data = empty_workbench_data(),
+        usl = usl,
+        target = target,
+        lsl = lsl,
+        enabled_rules = rules,
+        param = param,
+        units = units,
+        owner = owner,
+        tools = chart_tools,
+        limits_mode = lm,
+        manual_cl = manual_cl,
+        manual_ucl = manual_ucl,
+        manual_lcl = manual_lcl,
+        subgroup_size = subgroup_size,
+        live_enabled = false,  # imported archive — never auto-live
+        source = :table,
+        col_value = col_value,
+        col_n = col_n,
+        col_tool = col_tool,
+        col_time = col_time,
+        col_lot = col_lot,
+    )
+end
+
+"""
+Fully validate + parse HTML archive dict into (charts, table, tools, default_rules).
+Does not mutate any model. Never reads admins/passcodes.
+"""
+function _parse_html_state_dict(d)::Union{NamedTuple,String}
+    d isa AbstractDict || return "html state root must be an object"
+    # Explicit strip (extract already strips; defense in depth)
+    d = _strip_admin_keys(d)
+    # Reject schema-v1 sessions — use load_workbench / workbench_from_dict instead
+    if haskey(d, "version")
+        return "schema-v1 JSON — use load_workbench (not HTML archive)"
+    end
+
+    haskey(d, "charts") || return "missing charts"
+    charts_raw = d["charts"]
+    charts_raw isa AbstractVector || return "charts must be an array"
+    isempty(charts_raw) && return "no charts"
+
+    table = _shared_table_from_html(get(d, "data", nothing), get(d, "columns", nothing))
+    table isa String && return table
+
+    charts = ChartSpec[]
+    for (i, cd) in enumerate(charts_raw)
+        # Strip per-chart admin keys if present
+        cd_clean = cd isa AbstractDict ? _strip_admin_keys(cd) : cd
+        ch = _chart_from_html_dict(cd_clean)
+        ch isa String && return "charts[$i]: $ch"
+        # Materialize series from shared table (copy-on-map)
+        materialize_chart_from_table!(ch, table)
+        push!(charts, ch)
+    end
+
+    # At least one chart must have numeric values after materialize (fail closed)
+    any_vals = any(ch -> !isempty(ch.data.values), charts)
+    any_vals || return "no numeric values after mapping charts to data"
+
+    tools = _html_tools_from(get(d, "tools", nothing))
+    tools isa String && return tools
+
+    default_rules = _html_rules_from(get(d, "defaultRules", get(d, "default_rules", nothing)))
+    default_rules isa String && return default_rules
+
+    return (
+        charts = charts,
+        table = table,
+        tools = tools,
+        default_rules = default_rules,
+        active = 1,
+    )
+end
+
+function _apply_html_parsed!(m::SPCWorkbenchModel, parsed::NamedTuple)
+    m.charts = parsed.charts
+    m.active = parsed.active
+    m.tools = parsed.tools
+    m.enabled_rules = parsed.default_rules
+    m.table = parsed.table
+    m.library_selected = clamp(parsed.active, 1, length(parsed.charts))
+    m.paused = true  # archive import pauses live (same spirit as CSV)
+    _clear_load_ephemerals!(m)
+    _ensure_charts!(m)
+    return nothing
+end
+
+"""
+    html_state_to_workbench(d) -> SPCWorkbenchModel | String
+
+Build a fresh model from an HTML archive state dict (already extracted).
+Strips admins. Fail closed → error string, no partial model.
+"""
+function html_state_to_workbench(d)::Union{SPCWorkbenchModel,String}
+    parsed = _parse_html_state_dict(d)
+    parsed isa String && return parsed
+    m = SPCWorkbenchModel(
+        data = empty_workbench_data(),
+        paused = true,
+        seed_demos = :none,
+        charts = ChartSpec[],
+        tools = ToolEntry[],
+    )
+    _apply_html_parsed!(m, parsed)
+    return m
+end
+
+"""
+    html_state_to_workbench!(m, d) -> nothing | String
+
+In-place apply HTML archive. Fail closed: on error, `m` is unchanged.
+Replaces charts/active/tools/table; clears UI ephemerals; preserves rng/tick/quit/geometry.
+"""
+function html_state_to_workbench!(m::SPCWorkbenchModel, d)::Union{Nothing,String}
+    parsed = _parse_html_state_dict(d)
+    parsed isa String && return parsed
+    _apply_html_parsed!(m, parsed)
+    return nothing
+end
+
+"""
+    load_html_archive(path) -> SPCWorkbenchModel | String
+
+CLI/construct: load HTML file (or raw JSON exportArchive) into a new model.
+Strips admins/passcodes. Error string on failure.
+"""
+function load_html_archive(path::AbstractString)::Union{SPCWorkbenchModel,String}
+    d = extract_html_spc_state_file(path)
+    d isa String && return _normalize_load_err(d)
+    m = html_state_to_workbench(d)
+    m isa String && return _normalize_load_err(m)
+    if hasfield(typeof(m), :last_workbench_path)
+        m.last_workbench_path = String(path)
+    end
+    m.last_event = "loaded html $(basename(String(path)))"
+    return m
+end
+
+"""
+    load_html_archive!(m, path) -> nothing | String
+
+In-session HTML archive import. Fail closed on chart mutate.
+`last_event` = `"loaded html …"` or `"load err: …"`.
+"""
+function load_html_archive!(m::SPCWorkbenchModel, path::AbstractString)::Union{Nothing,String}
+    d = extract_html_spc_state_file(path)
+    if d isa String
+        return _set_load_err!(m, d)
+    end
+    err = html_state_to_workbench!(m, d)
+    if err !== nothing
+        return _set_load_err!(m, err)
+    end
+    if hasfield(typeof(m), :last_workbench_path)
+        m.last_workbench_path = String(path)
+    end
+    m.last_event = "loaded html $(basename(String(path)))"
+    return nothing
+end
+
 export workbench_to_dict, workbench_from_dict, workbench_from_dict!
 export save_workbench, load_workbench, load_workbench!
+export extract_html_spc_state, extract_html_spc_state_file
+export html_state_to_workbench, html_state_to_workbench!
+export load_html_archive, load_html_archive!

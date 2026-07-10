@@ -635,142 +635,171 @@ include("../src/spc_workbench.jl")
         @test last3[2].rule == "WECO-1" && last3[3].rule == "WECO-8"
     end
 
-    @testset "auto_limits p/np/c/u (HTML formulas)" begin
-        # ── c-chart: counts; σ = √c̄; LCL floored at 0 (HTML ~2490–2496) ──
-        cvals = [2.0, 4.0, 3.0, 5.0, 1.0]  # c̄ = 3
-        cBar = mean(cvals)
-        @test cBar ≈ 3.0
-        sigma_c = sqrt(cBar)
-        lz_c = auto_limits(cvals; chart_type = c_chart)
-        @test lz_c.cl ≈ cBar
-        @test lz_c.sigma ≈ sigma_c
-        @test lz_c.ucl ≈ cBar + 3 * sigma_c
-        @test lz_c.lcl ≈ max(0.0, cBar - 3 * sigma_c)
-        @test lz_c.ucl1 ≈ cBar + 1 * sigma_c
-        @test lz_c.lcl1 ≈ cBar - 1 * sigma_c
-        @test lz_c.ucl2 ≈ cBar + 2 * sigma_c
-        @test lz_c.lcl2 ≈ cBar - 2 * sigma_c
+    @testset "SS_FACTORS table (HTML n=2..25)" begin
+        @test haskey(SS_FACTORS, 2) && haskey(SS_FACTORS, 25)
+        @test !haskey(SS_FACTORS, 1) && !haskey(SS_FACTORS, 26)
+        # Spot-check vs HTML SS_FACTORS
+        f2 = SS_FACTORS[2]
+        @test f2.A2 == 1.880
+        @test f2.A3 == 2.659
+        @test f2.d2 == 1.128
+        @test f2.c4 == 0.7979
+        @test f2.D3 == 0.0
+        @test f2.D4 == 3.267
+        @test f2.B3 == 0.0
+        @test f2.B4 == 3.267
+        f5 = SS_FACTORS[5]
+        @test f5.A2 == 0.577
+        @test f5.A3 == 1.427
+        @test f5.d2 == 2.326
+        @test f5.c4 == 0.9400
+        f10 = SS_FACTORS[10]
+        @test f10.A2 == 0.308
+        @test f10.A3 == 0.975
+        @test f10.d2 == 3.078
+        @test f10.c4 == 0.9727
+        f25 = SS_FACTORS[25]
+        @test f25.A2 == 0.153
+        @test f25.A3 == 0.606
+        @test f25.d2 == 3.931
+        @test f25.c4 == 0.9896
+    end
 
-        # c̄ = 0 → σ = 0
-        lz_c0 = auto_limits([0.0, 0.0, 0.0]; chart_type = c_chart)
-        @test lz_c0.cl == 0.0 && lz_c0.sigma == 0.0 && lz_c0.ucl == 0.0 && lz_c0.lcl == 0.0
+    @testset "subgroup_means_and_ranges / subgroup_means_and_s (series chunks)" begin
+        # 12 values → 4 complete groups of n=3; remainder dropped
+        vals = [10.0, 12.0, 11.0,  20.0, 22.0, 18.0,  30.0, 28.0, 32.0,  40.0, 41.0]
+        xbar, ranges, groups = subgroup_means_and_ranges(vals, 3)
+        @test length(xbar) == 3
+        @test length(ranges) == 3
+        @test length(groups) == 3
+        @test xbar[1] ≈ mean([10.0, 12.0, 11.0])
+        @test ranges[1] ≈ 2.0  # 12-10
+        @test xbar[2] ≈ mean([20.0, 22.0, 18.0])
+        @test ranges[2] ≈ 4.0  # 22-18
+        @test xbar[3] ≈ mean([30.0, 28.0, 32.0])
+        @test ranges[3] ≈ 4.0  # 32-28
+        # incomplete tail (40,41) discarded
+        @test length(groups[1]) == 3
 
-        # ── p-chart: proportions; σ = √(p̄(1-p̄)/n̄); UCL≤1 LCL≥0 (HTML ~2467–2477) ──
-        pvals = [0.10, 0.12, 0.08, 0.11, 0.09]  # p̄ = 0.10
-        pBar = mean(pvals)
-        @test pBar ≈ 0.10
-        n_bar = 100.0
-        sigma_p = sqrt(pBar * (1 - pBar) / n_bar)
-        lz_p = auto_limits(pvals; chart_type = p_chart, n_bar = n_bar)
-        @test lz_p.cl ≈ pBar
-        @test lz_p.sigma ≈ sigma_p
-        @test lz_p.ucl ≈ min(1.0, pBar + 3 * sigma_p)
-        @test lz_p.lcl ≈ max(0.0, pBar - 3 * sigma_p)
-        # intermediate WECO zones unclamped (checkWeco uses cl ± kσ)
-        @test lz_p.ucl1 ≈ pBar + 1 * sigma_p
-        @test lz_p.lcl1 ≈ pBar - 1 * sigma_p
+        xbar_s, svals, g2 = subgroup_means_and_s(vals, 3)
+        @test length(xbar_s) == 3
+        @test xbar_s ≈ xbar
+        @test svals[1] ≈ std([10.0, 12.0, 11.0]; corrected = true)
+        @test svals[2] ≈ std([20.0, 22.0, 18.0]; corrected = true)
 
-        # n_bar defaults to subgroup_size when omitted
-        lz_p_sg = auto_limits(pvals; chart_type = p_chart, subgroup_size = 50)
-        sigma_ps = sqrt(pBar * (1 - pBar) / 50.0)
-        @test lz_p_sg.sigma ≈ sigma_ps
+        # too few for one full subgroup → empty
+        xb0, r0, g0 = subgroup_means_and_ranges([1.0, 2.0], 5)
+        @test isempty(xb0) && isempty(r0) && isempty(g0)
 
-        # clamp fixture: p̄≈0.5 / small n → UCL=1, LCL=0 (3σ exceeds both bounds)
-        p_mid = [0.5, 0.4, 0.6]
-        pBar_mid = mean(p_mid)
-        n_small = 2.0
-        sigma_mid = sqrt(pBar_mid * (1 - pBar_mid) / n_small)
-        lz_clamp = auto_limits(p_mid; chart_type = p_chart, n_bar = n_small)
-        @test pBar_mid + 3 * sigma_mid > 1.0
-        @test pBar_mid - 3 * sigma_mid < 0.0
-        @test lz_clamp.ucl == 1.0
-        @test lz_clamp.lcl == 0.0
+        # n clamped by helpers to [2,25]
+        xb2, r2, _ = subgroup_means_and_ranges(collect(1.0:10.0), 1)  # treat as 2
+        @test length(xb2) == 5
+    end
 
-        # ── np-chart: defect counts; σ = √(np̄(1-p̄)); p̄=np̄/n̄ (HTML ~2478–2488) ──
-        npvals = [2.0, 5.0, 3.0, 4.0, 1.0]  # np̄ = 3
-        npBar = mean(npvals)
-        n_np = 50.0
-        p_from_np = npBar / n_np
-        sigma_np = sqrt(npBar * (1 - p_from_np))
-        lz_np = auto_limits(npvals; chart_type = np_chart, n_bar = n_np)
-        @test lz_np.cl ≈ npBar
-        @test lz_np.sigma ≈ sigma_np
-        @test lz_np.ucl ≈ npBar + 3 * sigma_np
-        @test lz_np.lcl ≈ max(0.0, npBar - 3 * sigma_np)
+    @testset "auto_limits Xbar_R / Xbar_S (HTML formulas)" begin
+        # Crafted series: 3 subgroups of size 5
+        # SG1 mean=10, R=4; SG2 mean=12, R=2; SG3 mean=11, R=6
+        raw = Float64[
+            8, 10, 12, 9, 11,   # mean 10, R=4
+            11, 12, 13, 12, 12, # mean 12, R=2
+            8, 14, 10, 11, 12,  # mean 11, R=6
+        ]
+        n = 5
+        f = SS_FACTORS[n]
+        xbar, ranges, _ = subgroup_means_and_ranges(raw, n)
+        @test length(xbar) == 3
+        rbar = mean(ranges)
+        xbb = mean(xbar)
+        lz_r = auto_limits(raw; chart_type = Xbar_R, subgroup_size = n)
+        @test lz_r.cl ≈ xbb
+        @test lz_r.sigma ≈ rbar / f.d2
+        @test lz_r.ucl ≈ xbb + f.A2 * rbar
+        @test lz_r.lcl ≈ xbb - f.A2 * rbar
+        # intermediate zones from process σ (WECO scale)
+        @test lz_r.ucl1 ≈ xbb + 1 * lz_r.sigma
+        @test lz_r.ucl2 ≈ xbb + 2 * lz_r.sigma
+        @test lz_r.lcl1 ≈ xbb - 1 * lz_r.sigma
+        @test lz_r.lcl2 ≈ xbb - 2 * lz_r.sigma
 
-        # ── u-chart: defects/unit; σ = √(ū/n̄) (HTML ~2497–2506) ──
-        uvals = [0.2, 0.4, 0.3, 0.5, 0.1]  # ū = 0.3
-        uBar = mean(uvals)
-        n_u = 25.0
-        sigma_u = sqrt(uBar / n_u)
-        lz_u = auto_limits(uvals; chart_type = u_chart, n_bar = n_u)
-        @test lz_u.cl ≈ uBar
-        @test lz_u.sigma ≈ sigma_u
-        @test lz_u.ucl ≈ uBar + 3 * sigma_u
-        @test lz_u.lcl ≈ max(0.0, uBar - 3 * sigma_u)
+        xbar_s, svals, _ = subgroup_means_and_s(raw, n)
+        sbar = mean(svals)
+        lz_s = auto_limits(raw; chart_type = Xbar_S, subgroup_size = n)
+        @test lz_s.cl ≈ mean(xbar_s)
+        @test lz_s.sigma ≈ sbar  # HTML: sigma = sBar
+        @test lz_s.ucl ≈ mean(xbar_s) + f.A3 * sbar
+        @test lz_s.lcl ≈ mean(xbar_s) - f.A3 * sbar
 
-        # empty series → zero limits
-        lz_empty = auto_limits(Float64[]; chart_type = c_chart)
-        @test lz_empty.cl == 0.0 && lz_empty.sigma == 0.0 && lz_empty.ucl == 0.0
+        # empty / incomplete → zero limits
+        lz0 = auto_limits(Float64[1, 2, 3]; chart_type = Xbar_R, subgroup_size = 5)
+        @test lz0.cl == 0.0 && lz0.sigma == 0.0 && lz0.ucl == 0.0
 
-        # I_MR / Xbar paths still work (attribute branches don't steal them)
+        # I_MR path unchanged
         vs = [1.0, 2.0, 3.0, 4.0, 5.0]
         @test auto_limits(vs; chart_type = I_MR, sigma_method = :mr).sigma ==
               compute_limits_and_zones(vs; sigma_method = :mr).sigma
     end
 
-    @testset "resolve attribute charts: Cpk N/A + WECO on primary" begin
-        # Pre-binned c counts; spike at index 4 for WECO-1
-        cvals = [2.0, 2.0, 2.0, 20.0, 2.0]
-        ch_c = ChartSpec(
-            name = "c test",
-            chart_type = c_chart,
-            data = WorkbenchData(values = cvals, cl = 0.0, sigma = 0.0),
-            usl = 100.0,
-            lsl = 0.0,
-        )
-        ctx_c = resolve_chart_render_context(ch_c)
-        @test ctx_c.primary_values ≈ cvals
-        @test ctx_c.secondary_name == ""
-        @test ctx_c.secondary_bar === nothing
-        @test ctx_c.cpk === nothing  # attributes: Cpk N/A (HTML isVariablesChart)
-        @test ctx_c.band == :none
-        @test ctx_c.lz.cl ≈ mean(cvals)
-        @test ctx_c.lz.sigma ≈ sqrt(mean(cvals))
-        # WECO still runs on primary — spike beyond +3σ
-        @test 4 in ctx_c.viol_indices
+    @testset "resolve Xbar_R / Xbar_S primary series + Cpk c4 + secondary stats" begin
+        raw = Float64[
+            8, 10, 12, 9, 11,
+            11, 12, 13, 12, 12,
+            8, 14, 10, 11, 12,
+        ]
+        n = 5
+        f = SS_FACTORS[n]
+        usl, lsl = 20.0, 0.0
 
-        # p-chart with constant n via subgroup_size
-        pvals = [0.05, 0.06, 0.04, 0.05, 0.07]
-        ch_p = ChartSpec(
-            name = "p test",
-            chart_type = p_chart,
-            data = WorkbenchData(values = pvals, cl = 0.0, sigma = 0.0),
-            subgroup_size = 100,
-            usl = 1.0,
-            lsl = 0.0,
+        ch_r = ChartSpec(
+            name = "XbarR test",
+            chart_type = Xbar_R,
+            data = WorkbenchData(values = raw, cl = 0.0, sigma = 0.0),
+            subgroup_size = n,
+            usl = usl,
+            lsl = lsl,
         )
-        ctx_p = resolve_chart_render_context(ch_p)
-        pBar = mean(pvals)
-        sigma_p = sqrt(pBar * (1 - pBar) / 100.0)
-        @test ctx_p.lz.cl ≈ pBar
-        @test ctx_p.lz.sigma ≈ sigma_p
-        @test ctx_p.lz.ucl ≈ min(1.0, pBar + 3 * sigma_p)
-        @test ctx_p.cpk === nothing
-        @test ctx_p.primary_values ≈ pvals
+        ctx_r = resolve_chart_render_context(ch_r)
+        xbar, ranges, _ = subgroup_means_and_ranges(raw, n)
+        @test ctx_r.primary_values ≈ xbar
+        @test length(ctx_r.primary_values) == 3
+        @test ctx_r.lz.ucl ≈ mean(xbar) + f.A2 * mean(ranges)
+        @test ctx_r.secondary_name == "R"
+        @test ctx_r.secondary_bar ≈ mean(ranges)
+        # Xbar-R Cpk uses process σ = R̄/d2 (already lz.sigma)
+        cr_r = compute_capability(xbar, ctx_r.lz.cl, ctx_r.lz.sigma; usl = usl, lsl = lsl)
+        @test ctx_r.cpk ≈ cr_r.cpk
 
-        # np / u also Cpk N/A
-        for (ct, vals, n) in ((np_chart, [1.0, 2.0, 3.0], 40), (u_chart, [0.1, 0.2, 0.15], 20))
-            ch = ChartSpec(
-                chart_type = ct,
-                data = WorkbenchData(values = vals, cl = 0.0, sigma = 0.0),
-                subgroup_size = n,
-                usl = 10.0,
-            )
-            ctx = resolve_chart_render_context(ch)
-            @test ctx.cpk === nothing
-            @test ctx.primary_values ≈ vals
-        end
+        ch_s = ChartSpec(
+            name = "XbarS test",
+            chart_type = Xbar_S,
+            data = WorkbenchData(values = raw, cl = 0.0, sigma = 0.0),
+            subgroup_size = n,
+            usl = usl,
+            lsl = lsl,
+        )
+        ctx_s = resolve_chart_render_context(ch_s)
+        xbar_s, svals, _ = subgroup_means_and_s(raw, n)
+        sbar = mean(svals)
+        @test ctx_s.primary_values ≈ xbar_s
+        @test ctx_s.secondary_name == "s"
+        @test ctx_s.secondary_bar ≈ sbar
+        # Xbar-S Cpk unbiases s̄ with c4 (HTML)
+        cpk_sigma = sbar / f.c4
+        cr_s = compute_capability(xbar_s, ctx_s.lz.cl, cpk_sigma; usl = usl, lsl = lsl)
+        @test ctx_s.cpk ≈ cr_s.cpk
+        # c4-unbiased sigma differs from raw s̄
+        cr_wrong = compute_capability(xbar_s, ctx_s.lz.cl, sbar; usl = usl, lsl = lsl)
+        @test ctx_s.cpk !== nothing && cr_wrong.cpk !== nothing
+        @test abs(ctx_s.cpk - cr_wrong.cpk) > 1e-9
+
+        # I_MR primary is raw values; secondary is MR̄ (mean moving range) — PR10 P2
+        ch_i = ChartSpec(data = WorkbenchData(values = raw, cl = 0.0, sigma = 0.0))
+        ctx_i = resolve_chart_render_context(ch_i)
+        @test ctx_i.primary_values ≈ raw
+        @test ctx_i.secondary_name == "MR"
+        mr_expected = mean(abs.(diff(raw)))
+        @test ctx_i.secondary_bar ≈ mr_expected
+        # σ̂ = MR̄ / d2(n=2) = MR̄ / 1.128
+        @test ctx_i.lz.sigma ≈ mr_expected / 1.128 atol = 1e-9
     end
 
     @testset "PR7b: table-sourced Xbar subgroups by column (pure fixtures)" begin
@@ -2667,3 +2696,231 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
 end
 
 end # module TestSPCWorkbenchJSON
+
+# HTML archive import (PR10 P2) — strip admins, map charts/values; via package module
+# ═══════════════════════════════════════════════════════════════════════
+
+module TestSPCWorkbenchHTMLImport
+using Test
+using Random
+using TachikomaTUI
+using Statistics: mean
+const _ensure_charts! = TachikomaTUI._ensure_charts!
+
+@testset "PR10 HTML archive import (strip admins; fail closed)" begin
+
+    function _mini_html_archive(; with_admins = true, values = [1303.0, 1305.0, 1299.0, 1301.0, 1294.0])
+        rows = [
+            Dict{String,Any}(
+                "Timestamp" => "2026-05-0$i",
+                "Tool" => "Film-PTPECVD01",
+                "Lot" => "L1",
+                "Wafer" => "W0$i",
+                "Value" => values[i],
+            ) for i in 1:length(values)
+        ]
+        push!(rows, Dict{String,Any}(
+            "Timestamp" => "", "Tool" => "", "Lot" => "", "Wafer" => "", "Value" => "",
+        ))
+        state = Dict{String,Any}(
+            "data" => rows,
+            "columns" => ["Timestamp", "Tool", "Lot", "Wafer", "Value"],
+            "charts" => [
+                Dict{String,Any}(
+                    "id" => "CHT-film",
+                    "name" => "Film-Thickness-1.3um",
+                    "param" => "PECVD Oxide",
+                    "type" => "I-MR",
+                    "units" => "nm",
+                    "subgroupSize" => 5,
+                    "col_value" => "Value",
+                    "col_n" => "n",
+                    "col_tool" => "Tool",
+                    "col_time" => "Timestamp",
+                    "col_lot" => "Wafer",
+                    "tools" => ["Film-PTPECVD01"],
+                    "limitsMode" => "auto",
+                    "cl" => nothing,
+                    "ucl" => nothing,
+                    "lcl" => nothing,
+                    "usl" => 1320,
+                    "target" => 1300,
+                    "lsl" => 1280,
+                    "rules" => Dict("WECO-1" => true, "WECO-6" => false),
+                    "admins" => "should-be-stripped-from-chart",
+                ),
+            ],
+            "tools" => [
+                Dict("id" => "Film-PTPECVD01", "desc" => "PlasmaTherm PECVD", "area" => "Production"),
+            ],
+            "defaultRules" => Dict("WECO-1" => true, "WECO-2" => true),
+            "savedAt" => "2026-06-18 20:46 UTC",
+        )
+        if with_admins
+            state["admins"] = [
+                Dict("name" => "Evil Admin", "email" => "evil@example.com", "passcode" => "SECRET-PASS"),
+            ]
+            state["passcodes"] = ["x"]
+        end
+        return state
+    end
+
+    @testset "html_state_to_workbench strips admins + maps values/specs/tools" begin
+        d = _mini_html_archive()
+        @test haskey(d, "admins")
+        m = html_state_to_workbench(d)
+        @test m isa SPCWorkbenchModel
+        @test !hasfield(typeof(m), :admins)
+        @test length(m.charts) == 1
+        ch = m.charts[1]
+        @test ch.name == "Film-Thickness-1.3um"
+        @test ch.chart_type === I_MR
+        @test ch.usl == 1320.0
+        @test ch.target == 1300.0
+        @test ch.lsl == 1280.0
+        @test ch.units == "nm"
+        @test ch.tools == ["Film-PTPECVD01"]
+        @test ch.live_enabled === false
+        @test ch.source === :table
+        @test ch.col_value == "Value"
+        @test ch.col_lot == "Wafer"
+        @test ch.data.values ≈ [1303.0, 1305.0, 1299.0, 1301.0, 1294.0]
+        @test length(m.table.rows) >= 5
+        @test length(m.tools) == 1
+        @test m.tools[1].id == "Film-PTPECVD01"
+        @test m.tools[1].description == "PlasmaTherm PECVD"
+        @test m.paused === true
+        ctx = resolve_chart_render_context(ch)
+        @test ctx.secondary_name == "MR"
+        @test ctx.secondary_bar ≈ mean(abs.(diff(ch.data.values)))
+        dumped = workbench_to_dict(m)
+        @test !haskey(dumped, "admins")
+        @test !haskey(dumped, "passcodes")
+    end
+
+    @testset "extract_html_spc_state from script tag + strip" begin
+        body = """
+        <!DOCTYPE html><html><body>
+        <script id="spc-state" type="application/json">{"data":[{"Tool":"T1","Value":10},{"Tool":"T1","Value":12},{"Tool":"T1","Value":11}],"columns":["Tool","Value"],"charts":[{"id":"c1","name":"N","type":"I-MR","col_value":"Value","col_tool":"Tool","tools":["T1"],"rules":{"WECO-1":true}}],"admins":[{"name":"X","passcode":"P"}],"tools":[{"id":"T1","desc":"tool"}]}</script>
+        <script>const state={admins:[{passcode:'LEAK'}]};</script>
+        </body></html>
+        """
+        d = extract_html_spc_state(body)
+        @test d isa AbstractDict
+        @test !haskey(d, "admins")
+        @test !haskey(d, "passcodes")
+        @test haskey(d, "charts")
+        m = html_state_to_workbench(d)
+        @test m isa SPCWorkbenchModel
+        @test m.charts[1].data.values ≈ [10.0, 12.0, 11.0]
+    end
+
+    @testset "fail closed: bad archive does not mutate model" begin
+        d0 = generate_spc_workbench_data(8; seed = 11)
+        m = SPCWorkbenchModel(data = d0, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        m.charts[1].usl = 77.0
+        m.charts[1].data.values[1] = 999.0
+        m.rng = MersenneTwister(55)
+        rng_before = m.rng
+        m.tick = 3
+        m.live_max = 111
+        snap_vals = copy(m.charts[1].data.values)
+        snap_n = length(m.charts)
+        snap_usl = m.charts[1].usl
+
+        bad = Dict{String,Any}("charts" => Any[])
+        err = html_state_to_workbench!(m, bad)
+        @test err isa AbstractString
+        @test occursin("no charts", err)
+        @test length(m.charts) == snap_n
+        @test m.charts[1].data.values == snap_vals
+        @test m.charts[1].usl == snap_usl
+        @test m.rng === rng_before
+        @test m.tick == 3
+        @test m.live_max == 111
+
+        err2 = html_state_to_workbench!(m, Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0])],
+        ))
+        @test err2 isa AbstractString
+        @test occursin("schema-v1", err2) || occursin("load_workbench", err2)
+        @test m.charts[1].usl == snap_usl
+        @test m.rng === rng_before
+
+        err3 = load_html_archive!(m, "/tmp/missing_spc_html_$(rand(UInt32)).html")
+        @test err3 isa AbstractString
+        @test startswith(err3, "load err:")
+        @test m.charts[1].data.values == snap_vals
+        @test m.rng === rng_before
+    end
+
+    @testset "load_html_archive! success path + last_event" begin
+        html = """
+        <html><head></head><body>
+        <script id="spc-state" type="application/json">{"data":[{"Tool":"A","Value":100},{"Tool":"A","Value":102},{"Tool":"A","Value":101},{"Tool":"B","Value":50}],"columns":["Tool","Value"],"charts":[{"id":"c1","name":"OnlyA","type":"I-MR","col_value":"Value","col_tool":"Tool","tools":["A"],"usl":110,"lsl":90,"rules":{"WECO-1":true}}],"admins":[{"name":"Z","passcode":"NOPE"}],"defaultRules":{"WECO-1":true},"tools":[{"id":"A","desc":"tool A"}]}</script>
+        </body></html>
+        """
+        path = joinpath(tempdir(), "spc_html_arch_$(rand(UInt32)).html")
+        try
+            open(path, "w") do io
+                write(io, html)
+            end
+            d0 = generate_spc_workbench_data(6; seed = 2)
+            m = SPCWorkbenchModel(data = d0, paused = false, seed_demos = :triple)
+            _ensure_charts!(m)
+            @test length(m.charts) == 3
+            m.rng = MersenneTwister(9)
+            rng_before = m.rng
+            m.tick = 8
+            m.live_max = 50
+
+            err = load_html_archive!(m, path)
+            @test err === nothing
+            @test length(m.charts) == 1
+            @test m.charts[1].name == "OnlyA"
+            @test m.charts[1].data.values ≈ [100.0, 102.0, 101.0]
+            @test m.charts[1].usl == 110.0
+            @test m.charts[1].live_enabled === false
+            @test m.paused === true
+            @test startswith(m.last_event, "loaded html ")
+            @test m.last_workbench_path == path
+            @test m.rng === rng_before
+            @test m.tick == 8
+            @test m.live_max == 50
+            @test m.view_mode === :dashboard
+            m2 = load_html_archive(path)
+            @test m2 isa SPCWorkbenchModel
+            @test m2.charts[1].data.values ≈ [100.0, 102.0, 101.0]
+        finally
+            isfile(path) && rm(path; force = true)
+        end
+    end
+
+    @testset "optional real SPC_workbench HTML sample" begin
+        sample = joinpath(@__DIR__, "..", "SPC_workbench_2026-06-18-20-46.html")
+        if isfile(sample)
+            m = load_html_archive(sample)
+            @test m isa SPCWorkbenchModel
+            @test length(m.charts) >= 1
+            film = findfirst(c -> occursin("Film-Thickness", c.name), m.charts)
+            @test film !== nothing
+            ch = m.charts[film]
+            @test length(ch.data.values) == 10
+            @test ch.usl == 1320.0
+            ctx = resolve_chart_render_context(ch)
+            @test round(ctx.lz.sigma; digits = 2) ≈ 4.24
+            @test ctx.secondary_name == "MR"
+            @test ctx.secondary_bar !== nothing
+            @test !hasfield(typeof(m), :admins)
+            dumped = workbench_to_dict(m)
+            @test !haskey(dumped, "admins")
+        else
+            @test true
+        end
+    end
+
+end
+end # module TestSPCWorkbenchHTMLImport
