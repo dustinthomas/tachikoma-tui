@@ -35,6 +35,9 @@ export shared_table_from_columns_rows, fill_shared_table!
 export ToolEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
 export workbench_to_dict, workbench_from_dict, workbench_from_dict!
 export save_workbench, load_workbench, load_workbench!
+export extract_html_spc_state, extract_html_spc_state_file
+export html_state_to_workbench, html_state_to_workbench!
+export load_html_archive, load_html_archive!
 export spc_workbench_demo, run_spc_workbench, spc_workbench, advanced_spc, run_advanced_spc
 
 # SPC Workbench I/O (PR3 CSV import)

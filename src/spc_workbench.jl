@@ -918,7 +918,7 @@ struct ChartRenderContext
     band::Symbol
     # Plotted primary series (individuals for I-MR; X̄ for Xbar_R/S)
     primary_values::Vector{Float64}
-    # Side-panel secondary summary (R̄ / s̄); dual canvas remains P2
+    # Side-panel secondary summary (R̄ / s̄ / MR̄); dual secondary Canvas deferred (P2)
     secondary_name::String
     secondary_bar::Union{Float64,Nothing}
 end
@@ -1020,8 +1020,10 @@ end
 """
     _primary_and_secondary(ch) -> (primary, secondary_name, secondary_bar)
 
-Series-chunk primary for plotting/WECO; R̄/s̄ for side panel.
+Series-chunk primary for plotting/WECO; secondary bar for side panel
+(R̄ / s̄ / MR̄). Dual secondary Canvas remains deferred (P2 optional polish).
 PR7b: when `meta["table_subgroups"]`, `data.values` are already X̄ and secondary is in meta.
+I_MR: primary is individuals; secondary_bar is mean moving range (MR̄).
 """
 function _primary_and_secondary(ch::ChartSpec)
     vs = ch.data.values
@@ -1040,6 +1042,14 @@ function _primary_and_secondary(ch::ChartSpec)
         xbar, svals, _ = subgroup_means_and_s(vs, n)
         bar = isempty(svals) ? nothing : mean(svals)
         return (xbar, "s", bar)
+    elseif ch.chart_type == I_MR
+        primary = Float64.(vs)
+        if length(primary) < 2
+            return (primary, "MR", nothing)
+        end
+        mrs = abs.(diff(primary))
+        bar = isempty(mrs) ? nothing : mean(mrs)
+        return (primary, "MR", bar)
     else
         return (Float64.(vs), "", nothing)
     end
@@ -2890,12 +2900,21 @@ function view(m::SPCWorkbenchModel, f::Frame)
         # Mode badge = effective gateway path (same predicate as resolve_chart_render_context)
         mode_lbl = _manual_limits_effective(act_ch) ? "limits:manual" : "limits:auto"
         set_string!(buf, x, y, "n=$n_primary $mode_lbl", tstyle(:text)); y += 1
-        set_string!(buf, x, y, "cl=$(round(lz.cl;digits=2)) σ=$(round(lz.sigma;digits=2))", tstyle(:text_dim)); y += 1
-        # Secondary subgroup stats (Rbar / sbar) for Xbar charts — dual canvas remains P2
+        # Secondary (Rbar/sbar/MRbar) on same line as cl/σ — dual canvas deferred (P2)
+        cl_sigma = "cl=$(round(lz.cl;digits=2)) σ=$(round(lz.sigma;digits=2))"
         if act_ctx.secondary_bar !== nothing && !isempty(act_ctx.secondary_name)
-            label = act_ctx.secondary_name == "R" ? "Rbar" : (act_ctx.secondary_name == "s" ? "sbar" : act_ctx.secondary_name)
-            set_string!(buf, x, y, "$label=$(round(act_ctx.secondary_bar; digits=2))", tstyle(:text_dim)); y += 1
+            sec_lbl = if act_ctx.secondary_name == "R"
+                "Rbar"
+            elseif act_ctx.secondary_name == "s"
+                "sbar"
+            elseif act_ctx.secondary_name == "MR"
+                "MRbar"
+            else
+                act_ctx.secondary_name
+            end
+            cl_sigma *= " $sec_lbl=$(round(act_ctx.secondary_bar; digits=2))"
         end
+        set_string!(buf, x, y, cl_sigma, tstyle(:text_dim)); y += 1
         cpk_s = act_ctx.cpk === nothing ? "—" : _fmt(act_ctx.cpk)
         band = act_ctx.band
         cpk_st = band == :green ? tstyle(:success, bold=true) : (band == :red ? tstyle(:error, bold=true) : (band == :amber ? tstyle(:warning, bold=true) : tstyle(:text)))
@@ -3122,6 +3141,8 @@ function _render_help_page!(buf, area, m)
         "  Dashed: zone lines (±1/2/3σ), specs (USL/LSL red)",
         "",
         "DASHBOARD: multiple charts visible (switch with []); each has own viewport/specs/rules.",
+        "SIDE STATS: Rbar/sbar (Xbar) and MRbar (I-MR); dual secondary plot canvas deferred (P2).",
+        "HTML archive: load_html_archive / load_html_archive! (#spc-state); strips admins/passcodes.",
         "WECO RULES (defaults 1-5 ON): 1=beyond3σ, 2=2of3@2σ, 3=4of5@1σ, 4=8sameCL, 5=6trend, 6=14alt, 7=15in1σ, 8=8out1σ",
         "See original HTML for full defs + workflow. This TUI ports core I-MR + WECO + Cpk fidelity.",
     ]

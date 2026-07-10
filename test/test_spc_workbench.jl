@@ -791,12 +791,15 @@ include("../src/spc_workbench.jl")
         @test ctx_s.cpk !== nothing && cr_wrong.cpk !== nothing
         @test abs(ctx_s.cpk - cr_wrong.cpk) > 1e-9
 
-        # I_MR primary is raw values; no secondary bar
+        # I_MR primary is raw values; secondary is MR̄ (mean moving range) — PR10 P2
         ch_i = ChartSpec(data = WorkbenchData(values = raw, cl = 0.0, sigma = 0.0))
         ctx_i = resolve_chart_render_context(ch_i)
         @test ctx_i.primary_values ≈ raw
-        @test ctx_i.secondary_name == ""
-        @test ctx_i.secondary_bar === nothing
+        @test ctx_i.secondary_name == "MR"
+        mr_expected = mean(abs.(diff(raw)))
+        @test ctx_i.secondary_bar ≈ mr_expected
+        # σ̂ = MR̄ / d2(n=2) = MR̄ / 1.128
+        @test ctx_i.lz.sigma ≈ mr_expected / 1.128 atol = 1e-9
     end
 
     @testset "PR7b: table-sourced Xbar subgroups by column (pure fixtures)" begin
@@ -2693,3 +2696,231 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
 end
 
 end # module TestSPCWorkbenchJSON
+
+# HTML archive import (PR10 P2) — strip admins, map charts/values; via package module
+# ═══════════════════════════════════════════════════════════════════════
+
+module TestSPCWorkbenchHTMLImport
+using Test
+using Random
+using TachikomaTUI
+using Statistics: mean
+const _ensure_charts! = TachikomaTUI._ensure_charts!
+
+@testset "PR10 HTML archive import (strip admins; fail closed)" begin
+
+    function _mini_html_archive(; with_admins = true, values = [1303.0, 1305.0, 1299.0, 1301.0, 1294.0])
+        rows = [
+            Dict{String,Any}(
+                "Timestamp" => "2026-05-0$i",
+                "Tool" => "Film-PTPECVD01",
+                "Lot" => "L1",
+                "Wafer" => "W0$i",
+                "Value" => values[i],
+            ) for i in 1:length(values)
+        ]
+        push!(rows, Dict{String,Any}(
+            "Timestamp" => "", "Tool" => "", "Lot" => "", "Wafer" => "", "Value" => "",
+        ))
+        state = Dict{String,Any}(
+            "data" => rows,
+            "columns" => ["Timestamp", "Tool", "Lot", "Wafer", "Value"],
+            "charts" => [
+                Dict{String,Any}(
+                    "id" => "CHT-film",
+                    "name" => "Film-Thickness-1.3um",
+                    "param" => "PECVD Oxide",
+                    "type" => "I-MR",
+                    "units" => "nm",
+                    "subgroupSize" => 5,
+                    "col_value" => "Value",
+                    "col_n" => "n",
+                    "col_tool" => "Tool",
+                    "col_time" => "Timestamp",
+                    "col_lot" => "Wafer",
+                    "tools" => ["Film-PTPECVD01"],
+                    "limitsMode" => "auto",
+                    "cl" => nothing,
+                    "ucl" => nothing,
+                    "lcl" => nothing,
+                    "usl" => 1320,
+                    "target" => 1300,
+                    "lsl" => 1280,
+                    "rules" => Dict("WECO-1" => true, "WECO-6" => false),
+                    "admins" => "should-be-stripped-from-chart",
+                ),
+            ],
+            "tools" => [
+                Dict("id" => "Film-PTPECVD01", "desc" => "PlasmaTherm PECVD", "area" => "Production"),
+            ],
+            "defaultRules" => Dict("WECO-1" => true, "WECO-2" => true),
+            "savedAt" => "2026-06-18 20:46 UTC",
+        )
+        if with_admins
+            state["admins"] = [
+                Dict("name" => "Evil Admin", "email" => "evil@example.com", "passcode" => "SECRET-PASS"),
+            ]
+            state["passcodes"] = ["x"]
+        end
+        return state
+    end
+
+    @testset "html_state_to_workbench strips admins + maps values/specs/tools" begin
+        d = _mini_html_archive()
+        @test haskey(d, "admins")
+        m = html_state_to_workbench(d)
+        @test m isa SPCWorkbenchModel
+        @test !hasfield(typeof(m), :admins)
+        @test length(m.charts) == 1
+        ch = m.charts[1]
+        @test ch.name == "Film-Thickness-1.3um"
+        @test ch.chart_type === I_MR
+        @test ch.usl == 1320.0
+        @test ch.target == 1300.0
+        @test ch.lsl == 1280.0
+        @test ch.units == "nm"
+        @test ch.tools == ["Film-PTPECVD01"]
+        @test ch.live_enabled === false
+        @test ch.source === :table
+        @test ch.col_value == "Value"
+        @test ch.col_lot == "Wafer"
+        @test ch.data.values ≈ [1303.0, 1305.0, 1299.0, 1301.0, 1294.0]
+        @test length(m.table.rows) >= 5
+        @test length(m.tools) == 1
+        @test m.tools[1].id == "Film-PTPECVD01"
+        @test m.tools[1].description == "PlasmaTherm PECVD"
+        @test m.paused === true
+        ctx = resolve_chart_render_context(ch)
+        @test ctx.secondary_name == "MR"
+        @test ctx.secondary_bar ≈ mean(abs.(diff(ch.data.values)))
+        dumped = workbench_to_dict(m)
+        @test !haskey(dumped, "admins")
+        @test !haskey(dumped, "passcodes")
+    end
+
+    @testset "extract_html_spc_state from script tag + strip" begin
+        body = """
+        <!DOCTYPE html><html><body>
+        <script id="spc-state" type="application/json">{"data":[{"Tool":"T1","Value":10},{"Tool":"T1","Value":12},{"Tool":"T1","Value":11}],"columns":["Tool","Value"],"charts":[{"id":"c1","name":"N","type":"I-MR","col_value":"Value","col_tool":"Tool","tools":["T1"],"rules":{"WECO-1":true}}],"admins":[{"name":"X","passcode":"P"}],"tools":[{"id":"T1","desc":"tool"}]}</script>
+        <script>const state={admins:[{passcode:'LEAK'}]};</script>
+        </body></html>
+        """
+        d = extract_html_spc_state(body)
+        @test d isa AbstractDict
+        @test !haskey(d, "admins")
+        @test !haskey(d, "passcodes")
+        @test haskey(d, "charts")
+        m = html_state_to_workbench(d)
+        @test m isa SPCWorkbenchModel
+        @test m.charts[1].data.values ≈ [10.0, 12.0, 11.0]
+    end
+
+    @testset "fail closed: bad archive does not mutate model" begin
+        d0 = generate_spc_workbench_data(8; seed = 11)
+        m = SPCWorkbenchModel(data = d0, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        m.charts[1].usl = 77.0
+        m.charts[1].data.values[1] = 999.0
+        m.rng = MersenneTwister(55)
+        rng_before = m.rng
+        m.tick = 3
+        m.live_max = 111
+        snap_vals = copy(m.charts[1].data.values)
+        snap_n = length(m.charts)
+        snap_usl = m.charts[1].usl
+
+        bad = Dict{String,Any}("charts" => Any[])
+        err = html_state_to_workbench!(m, bad)
+        @test err isa AbstractString
+        @test occursin("no charts", err)
+        @test length(m.charts) == snap_n
+        @test m.charts[1].data.values == snap_vals
+        @test m.charts[1].usl == snap_usl
+        @test m.rng === rng_before
+        @test m.tick == 3
+        @test m.live_max == 111
+
+        err2 = html_state_to_workbench!(m, Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0])],
+        ))
+        @test err2 isa AbstractString
+        @test occursin("schema-v1", err2) || occursin("load_workbench", err2)
+        @test m.charts[1].usl == snap_usl
+        @test m.rng === rng_before
+
+        err3 = load_html_archive!(m, "/tmp/missing_spc_html_$(rand(UInt32)).html")
+        @test err3 isa AbstractString
+        @test startswith(err3, "load err:")
+        @test m.charts[1].data.values == snap_vals
+        @test m.rng === rng_before
+    end
+
+    @testset "load_html_archive! success path + last_event" begin
+        html = """
+        <html><head></head><body>
+        <script id="spc-state" type="application/json">{"data":[{"Tool":"A","Value":100},{"Tool":"A","Value":102},{"Tool":"A","Value":101},{"Tool":"B","Value":50}],"columns":["Tool","Value"],"charts":[{"id":"c1","name":"OnlyA","type":"I-MR","col_value":"Value","col_tool":"Tool","tools":["A"],"usl":110,"lsl":90,"rules":{"WECO-1":true}}],"admins":[{"name":"Z","passcode":"NOPE"}],"defaultRules":{"WECO-1":true},"tools":[{"id":"A","desc":"tool A"}]}</script>
+        </body></html>
+        """
+        path = joinpath(tempdir(), "spc_html_arch_$(rand(UInt32)).html")
+        try
+            open(path, "w") do io
+                write(io, html)
+            end
+            d0 = generate_spc_workbench_data(6; seed = 2)
+            m = SPCWorkbenchModel(data = d0, paused = false, seed_demos = :triple)
+            _ensure_charts!(m)
+            @test length(m.charts) == 3
+            m.rng = MersenneTwister(9)
+            rng_before = m.rng
+            m.tick = 8
+            m.live_max = 50
+
+            err = load_html_archive!(m, path)
+            @test err === nothing
+            @test length(m.charts) == 1
+            @test m.charts[1].name == "OnlyA"
+            @test m.charts[1].data.values ≈ [100.0, 102.0, 101.0]
+            @test m.charts[1].usl == 110.0
+            @test m.charts[1].live_enabled === false
+            @test m.paused === true
+            @test startswith(m.last_event, "loaded html ")
+            @test m.last_workbench_path == path
+            @test m.rng === rng_before
+            @test m.tick == 8
+            @test m.live_max == 50
+            @test m.view_mode === :dashboard
+            m2 = load_html_archive(path)
+            @test m2 isa SPCWorkbenchModel
+            @test m2.charts[1].data.values ≈ [100.0, 102.0, 101.0]
+        finally
+            isfile(path) && rm(path; force = true)
+        end
+    end
+
+    @testset "optional real SPC_workbench HTML sample" begin
+        sample = joinpath(@__DIR__, "..", "SPC_workbench_2026-06-18-20-46.html")
+        if isfile(sample)
+            m = load_html_archive(sample)
+            @test m isa SPCWorkbenchModel
+            @test length(m.charts) >= 1
+            film = findfirst(c -> occursin("Film-Thickness", c.name), m.charts)
+            @test film !== nothing
+            ch = m.charts[film]
+            @test length(ch.data.values) == 10
+            @test ch.usl == 1320.0
+            ctx = resolve_chart_render_context(ch)
+            @test round(ctx.lz.sigma; digits = 2) ≈ 4.24
+            @test ctx.secondary_name == "MR"
+            @test ctx.secondary_bar !== nothing
+            @test !hasfield(typeof(m), :admins)
+            dumped = workbench_to_dict(m)
+            @test !haskey(dumped, "admins")
+        else
+            @test true
+        end
+    end
+
+end
+end # module TestSPCWorkbenchHTMLImport
