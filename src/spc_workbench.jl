@@ -2180,7 +2180,7 @@ function _sync_library_scroll!(m::SPCWorkbenchModel, nch::Int = length(m.charts)
     m.library_scroll = clamp(scroll, 0, max_scroll)
 end
 
-"""Apply prompt Enter. GC-PR2: rename fully wired; I/O kinds not opened until GC-PR3."""
+"""Apply prompt Enter. Rename + library I/O (GC-PR3) fully wired to master APIs."""
 function _apply_prompt!(m::SPCWorkbenchModel)
     kind = m.prompt_kind
     buf = m.prompt_buf
@@ -2201,8 +2201,44 @@ function _apply_prompt!(m::SPCWorkbenchModel)
         m.prompt_kind = nothing
         m.prompt_buf = ""
         return
+    elseif kind === :import_csv
+        # MUST pass library_selected — import_csv_into_model! defaults chart_idx to active
+        path = strip(buf)
+        nch = length(m.charts)
+        if nch >= 1
+            m.library_selected = clamp(m.library_selected, 1, nch)
+        end
+        import_csv_into_model!(m, path; chart_idx = m.library_selected)
+        # last_event set by import API (ok or "import err: …"); stay in library
+        m.prompt_kind = nothing
+        # keep prompt_buf for path retry on err (and harmless on ok)
+        return
+    elseif kind === :export_csv
+        path = strip(buf)
+        ch = chart_for_export(m)
+        err = export_csv_series(path, ch.data.values)
+        if err === nothing
+            m.last_export_path = path
+            m.last_event = "exported $(length(ch.data.values)) values to $path"
+        else
+            # fail-closed: do not update last_export_path
+            m.last_event = "export err: $err"
+        end
+        m.prompt_kind = nothing
+        return
+    elseif kind === :save_workbench
+        path = strip(buf)
+        # save_workbench sets last_workbench_path + last_event only on success
+        save_workbench(m, path)
+        m.prompt_kind = nothing
+        return
+    elseif kind === :load_workbench
+        path = strip(buf)
+        # load_workbench!: ok → dashboard + clear prompt; err → stay library, clear kind, keep buf
+        load_workbench!(m, path)
+        m.prompt_kind = nothing  # belt-and-suspenders (io already clears on both paths)
+        return
     else
-        # GC-PR2: I/O prompts are not opened (message-only keys). Defensive clear.
         m.prompt_kind = nothing
         m.prompt_buf = ""
         m.last_event = "prompt cancel"
@@ -2451,9 +2487,18 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                 seed = nch >= 1 ? m.charts[m.library_selected].name : ""
                 _open_prompt!(m, :rename_chart; seed = seed)
                 return
-            elseif c == 'i' || c == 'I' || c == 'e' || c == 'E' || c == 'w' || c == 'W'
-                # GC-PR2: message-only — do NOT set prompt_kind (I/O Enter in GC-PR3)
-                m.last_event = "I/O keys land in GC-PR3"
+            elseif c == 'i' || c == 'I'
+                # GC-PR3: path prompt → import_csv_into_model!(…; chart_idx=library_selected)
+                _open_prompt!(m, :import_csv; seed = "")
+                return
+            elseif c == 'e' || c == 'E'
+                _open_prompt!(m, :export_csv; seed = m.last_export_path)
+                return
+            elseif c == 'w'
+                _open_prompt!(m, :save_workbench; seed = m.last_workbench_path)
+                return
+            elseif c == 'W'
+                _open_prompt!(m, :load_workbench; seed = m.last_workbench_path)
                 return
             end
         end
@@ -3490,7 +3535,7 @@ function _render_help_page!(buf, area, m)
         "  q/esc   quit (close library/builder/help first)",
         "",
         "LIBRARY (m): ↑↓ select · Enter activate · a add · c clone · d+y delete · n rename",
-        "  i/e/w/W CSV/JSON I/O keys land in a later slice (message-only for now)",
+        "  i import CSV · e export CSV · w save JSON · W load JSON (path prompts)",
         "",
         "RICH VISUALS:",
         "  ◆ = OOC (WECO violation, accent)",
@@ -3539,7 +3584,7 @@ function _render_keymap_page!(buf, area, m)
         "",
         "Config: Tab WECO↔Lines; ↑↓/digits/space; Esc/c/v close. Lines ●=draw on chart.",
         "Builder: ↑↓ fields; Enter edit/toggle; a apply/materialize; 1-8 WECO; y type.",
-        "Library i/e/w/W: I/O keys message-only until later slice (not wired yet).",
+        "Library i/e/w/W: import CSV / export CSV / save JSON / load JSON (path prompts).",
     ]
     for (i, ln) in enumerate(kbd)
         if y + i - 1 > bottom(area); break; end

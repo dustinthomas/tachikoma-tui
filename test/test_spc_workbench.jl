@@ -2266,7 +2266,7 @@ end
         @test T.find_text(tb, "SPC Workbench") !== nothing
     end
 
-    @testset "library: Esc/q close without quit; I/O keys message-only; add" begin
+    @testset "library: Esc/q close without quit; I/O keys open prompts; add" begin
         m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 1), paused = true)
         _ensure_charts!(m)
 
@@ -2292,14 +2292,43 @@ end
         @test m.library_selected == n0 + 1
         @test isempty(m.charts[end].data.values)
 
-        # I/O keys message-only: do NOT set prompt_kind (GC-PR3 wires Enter)
-        for c in ('i', 'I', 'e', 'E', 'w', 'W')
-            T.update!(m, T.KeyEvent(c))
-            @test m.prompt_kind === nothing
-            @test m.last_event == "I/O keys land in GC-PR3"
-            @test m.view_mode == :library
-            @test m.quit == false
-        end
+        # GC-PR3: I/O keys open path prompts (Enter wired in package-module suite)
+        T.update!(m, T.KeyEvent('i'))
+        @test m.prompt_kind === :import_csv
+        @test m.prompt_buf == ""
+        @test m.view_mode == :library
+        @test m.quit == false
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+
+        m.last_export_path = "/tmp/prev_export.csv"
+        T.update!(m, T.KeyEvent('e'))
+        @test m.prompt_kind === :export_csv
+        @test m.prompt_buf == "/tmp/prev_export.csv"
+        T.update!(m, T.KeyEvent(:escape))
+
+        T.update!(m, T.KeyEvent('E'))
+        @test m.prompt_kind === :export_csv
+        T.update!(m, T.KeyEvent(:escape))
+
+        m.last_workbench_path = "/tmp/prev_session.json"
+        T.update!(m, T.KeyEvent('w'))
+        @test m.prompt_kind === :save_workbench
+        @test m.prompt_buf == "/tmp/prev_session.json"
+        T.update!(m, T.KeyEvent(:escape))
+
+        T.update!(m, T.KeyEvent('W'))
+        @test m.prompt_kind === :load_workbench
+        @test m.prompt_buf == "/tmp/prev_session.json"
+        # q is a buffer character under prompt — never quit
+        T.update!(m, T.KeyEvent('q'))
+        @test m.quit == false
+        @test m.prompt_kind === :load_workbench
+        @test endswith(m.prompt_buf, "q")
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+        @test m.view_mode == :library
+        @test m.quit == false
 
         # empty-name rename Enter → cancel message, name unchanged
         m.library_selected = 1
@@ -2841,6 +2870,327 @@ end
 end
 
 end # module TestSPCWorkbenchCSVImport
+
+# ═══════════════════════════════════════════════════════════════════════
+# GC-PR3: library i/e/w/W path prompts → CSV/JSON I/O APIs (KeyEvent).
+# Package-module path (KD22) so Enter hits TachikomaTUI I/O symbols.
+# ═══════════════════════════════════════════════════════════════════════
+
+module TestSPCWorkbenchLibraryIO
+using Test
+using TachikomaTUI
+using Tachikoma
+using Random
+
+const T = Tachikoma
+const WB = TachikomaTUI
+const _ensure_charts! = WB._ensure_charts!
+const current_chart = WB.current_chart
+
+const FIX_DIR = joinpath(@__DIR__, "fixtures", "spc")
+const SAMPLE = joinpath(FIX_DIR, "sample_value.csv")
+
+"""Type `path` into the active path prompt via KeyEvents (printable chars)."""
+function _type_path!(m, path::AbstractString)
+    for ch in collect(String(path))
+        T.update!(m, T.KeyEvent(ch))
+    end
+end
+
+"""Clear prompt_buf with backspaces then type path."""
+function _set_prompt_path!(m, path::AbstractString)
+    while !isempty(m.prompt_buf)
+        T.update!(m, T.KeyEvent(:backspace))
+    end
+    _type_path!(m, path)
+end
+
+@testset "GC-PR3 library I/O keys (using TachikomaTUI)" begin
+
+    @testset "import i: active≠library_selected mutates selected chart" begin
+        d = generate_spc_workbench_data(20; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        @test length(m.charts) >= 3
+        @test m.seed_demos === :triple
+
+        # Distinct series; keep active on chart 1, select chart 2
+        m.charts[1].data.values = [1.0, 2.0, 3.0]
+        m.charts[2].data.values = [9.0, 8.0]
+        m.charts[3].data.values = [100.0]
+        m.active = 1
+        m.library_selected = 2
+        active_snap = copy(m.charts[1].data.values)
+        other_snap = copy(m.charts[3].data.values)
+        n_charts = length(m.charts)
+
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        m.library_selected = 2
+        @test m.active == 1
+        @test m.active != m.library_selected
+
+        T.update!(m, T.KeyEvent('i'))
+        @test m.prompt_kind === :import_csv
+        @test m.prompt_buf == ""
+        _set_prompt_path!(m, SAMPLE)
+        T.update!(m, T.KeyEvent(:enter))
+
+        @test m.prompt_kind === nothing
+        @test m.view_mode == :library
+        @test m.active == 1  # active unchanged
+        @test length(m.charts) == n_charts
+        @test occursin("imported", m.last_event)
+        @test m.charts[2].live_enabled === false
+        @test length(m.charts[2].data.values) == 10
+        # active chart untouched
+        @test m.charts[1].data.values == active_snap
+        @test m.charts[3].data.values == other_snap
+        # selected series matches fixture
+        r = parse_csv_table(SAMPLE)
+        @test r isa CsvParseOk
+        @test m.charts[2].data.values == r.values
+    end
+
+    @testset "import err: no mutate; last_event import err; stay library" begin
+        d = generate_spc_workbench_data(12; seed = 3)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        m.active = 1
+        m.library_selected = 2
+        snaps = [copy(c.data.values) for c in m.charts]
+        lives = [c.live_enabled for c in m.charts]
+        n0 = length(m.charts)
+        prev_export = m.last_export_path
+        prev_wb = m.last_workbench_path
+
+        T.update!(m, T.KeyEvent('m'))
+        m.library_selected = 2
+        T.update!(m, T.KeyEvent('i'))
+        bad = joinpath(FIX_DIR, "does_not_exist_$(rand(UInt32)).csv")
+        _set_prompt_path!(m, bad)
+        T.update!(m, T.KeyEvent(:enter))
+
+        @test m.prompt_kind === nothing
+        @test m.view_mode == :library
+        @test startswith(m.last_event, "import err:")
+        @test length(m.charts) == n0
+        for i in eachindex(m.charts)
+            @test m.charts[i].data.values == snaps[i]
+            @test m.charts[i].live_enabled === lives[i]
+        end
+        @test m.last_export_path == prev_export
+        @test m.last_workbench_path == prev_wb
+        # buf kept for retry
+        @test m.prompt_buf == bad
+    end
+
+    @testset "export e then re-import: numeric equality; last_export_path on ok" begin
+        d = generate_spc_workbench_data(15; seed = 4)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        known = [11.1, 22.2, 33.3, 44.4]
+        m.charts[2].data.values = copy(known)
+        m.active = 1
+        m.library_selected = 2
+        orig_active = copy(m.charts[1].data.values)
+
+        mktempdir() do dir
+            path = joinpath(dir, "lib_sel.csv")
+            T.update!(m, T.KeyEvent('m'))
+            @test m.view_mode == :library
+            m.library_selected = 2
+            T.update!(m, T.KeyEvent('e'))
+            @test m.prompt_kind === :export_csv
+            _set_prompt_path!(m, path)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === nothing
+            @test occursin("exported $(length(known)) values", m.last_event)
+            @test m.last_export_path == path
+            @test m.view_mode == :library
+            @test m.quit == false
+            @test m.charts[1].data.values == orig_active
+            @test m.active == 1
+
+            r = parse_csv_table(path)
+            @test r isa CsvParseOk
+            @test length(r.values) == length(known)
+            for i in eachindex(known)
+                @test r.values[i] ≈ known[i]
+            end
+
+            # re-import into selected (chart 2 already has known; wipe chart 3 then import)
+            m.library_selected = 3
+            snap3_len = length(m.charts[3].data.values)
+            T.update!(m, T.KeyEvent('i'))
+            _set_prompt_path!(m, path)
+            T.update!(m, T.KeyEvent(:enter))
+            @test occursin("imported", m.last_event)
+            @test length(m.charts[3].data.values) == length(known)
+            for i in eachindex(known)
+                @test m.charts[3].data.values[i] ≈ known[i]
+            end
+            @test length(m.charts[2].data.values) == length(known)  # prior export target intact
+            @test snap3_len != length(m.charts[3].data.values) || snap3_len == length(known)
+        end
+    end
+
+    @testset "export err: last_export_path not updated; charts unchanged" begin
+        d = generate_spc_workbench_data(10; seed = 5)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        m.last_export_path = "/tmp/keep_me.csv"
+        snaps = [copy(c.data.values) for c in m.charts]
+
+        T.update!(m, T.KeyEvent('m'))
+        T.update!(m, T.KeyEvent('e'))
+        @test m.prompt_kind === :export_csv
+        # empty path → fail closed
+        while !isempty(m.prompt_buf)
+            T.update!(m, T.KeyEvent(:backspace))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === nothing
+        @test occursin("export err", m.last_event)
+        @test m.last_export_path == "/tmp/keep_me.csv"
+        @test m.view_mode == :library
+        for i in eachindex(m.charts)
+            @test m.charts[i].data.values == snaps[i]
+        end
+
+        # unwritable path
+        m.last_export_path = "/tmp/keep_me.csv"
+        T.update!(m, T.KeyEvent('e'))
+        _set_prompt_path!(m, "/proc/definitely_unwritable_$(rand(UInt32))/out.csv")
+        T.update!(m, T.KeyEvent(:enter))
+        @test occursin("export err", m.last_event)
+        @test m.last_export_path == "/tmp/keep_me.csv"
+        @test m.view_mode == :library
+    end
+
+    @testset "save w Ok / err: last_workbench_path only on success" begin
+        d = generate_spc_workbench_data(12; seed = 6)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        m.charts[1].usl = 42.0
+        m.last_workbench_path = ""
+
+        mktempdir() do dir
+            path = joinpath(dir, "session.json")
+            T.update!(m, T.KeyEvent('m'))
+            T.update!(m, T.KeyEvent('w'))
+            @test m.prompt_kind === :save_workbench
+            _set_prompt_path!(m, path)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === nothing
+            @test m.last_workbench_path == path
+            @test occursin("saved", m.last_event)
+            @test isfile(path)
+            @test m.view_mode == :library
+
+            # err: unwritable — path not updated
+            m.last_workbench_path = path
+            T.update!(m, T.KeyEvent('w'))
+            bad = "/proc/no_write_$(rand(UInt32))/wb.json"
+            _set_prompt_path!(m, bad)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === nothing
+            @test occursin("save err", m.last_event)
+            @test m.last_workbench_path == path  # unchanged
+            @test m.view_mode == :library
+        end
+    end
+
+    @testset "load W round-trip KeyEvent; err stay library no mutate" begin
+        d = generate_spc_workbench_data(14; seed = 8)
+        src = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(src)
+        src.charts[1].data.values = [7.0, 8.0, 9.0]
+        src.charts[1].usl = 55.0
+        src.active = 2
+
+        mktempdir() do dir
+            path = joinpath(dir, "roundtrip.json")
+            @test save_workbench(src, path) === nothing
+
+            # Fresh model → library → W load
+            m = SPCWorkbenchModel(
+                data = generate_spc_workbench_data(5; seed = 1),
+                paused = true,
+                seed_demos = :triple,
+            )
+            _ensure_charts!(m)
+            m.rng = MersenneTwister(4242)
+            rng0 = m.rng
+            tick0 = m.tick
+            live_max0 = m.live_max
+            n_before = length(m.charts)
+            @test n_before >= 1
+            T.update!(m, T.KeyEvent('m'))
+            @test m.view_mode == :library
+            T.update!(m, T.KeyEvent('W'))
+            @test m.prompt_kind === :load_workbench
+            _set_prompt_path!(m, path)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === nothing
+            @test m.view_mode == :dashboard  # load clears to dashboard
+            @test occursin("loaded", m.last_event)
+            @test m.last_workbench_path == path
+            @test length(m.charts) == length(src.charts)
+            @test m.active == src.active
+            @test m.charts[1].data.values == [7.0, 8.0, 9.0]
+            @test m.charts[1].usl == 55.0
+            # load_workbench! preserves rng/tick/live_max identity
+            @test m.rng === rng0
+            @test m.tick == tick0
+            @test m.live_max == live_max0
+
+            # load err: missing file — stay library, no chart mutate, last path kept
+            m.view_mode = :library
+            snaps = [copy(c.data.values) for c in m.charts]
+            n0 = length(m.charts)
+            prev_path = m.last_workbench_path
+            T.update!(m, T.KeyEvent('W'))
+            bad = joinpath(dir, "missing_$(rand(UInt32)).json")
+            _set_prompt_path!(m, bad)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === nothing
+            @test m.view_mode == :library
+            @test startswith(m.last_event, "load err:")
+            @test length(m.charts) == n0
+            for i in eachindex(m.charts)
+                @test m.charts[i].data.values == snaps[i]
+            end
+            @test m.last_workbench_path == prev_path
+            @test m.prompt_buf == bad  # kept for retry
+            @test m.rng === rng0
+        end
+    end
+
+    @testset "prompt path may contain q; no quit" begin
+        d = generate_spc_workbench_data(8; seed = 2)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        T.update!(m, T.KeyEvent('m'))
+        T.update!(m, T.KeyEvent('i'))
+        @test m.prompt_kind === :import_csv
+        path_with_q = joinpath(tempdir(), "q_path_$(rand(UInt32)).csv")
+        _set_prompt_path!(m, path_with_q)
+        @test occursin("q", m.prompt_buf)
+        @test m.quit == false
+        @test m.view_mode == :library
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.quit == false
+        @test m.prompt_kind === nothing
+    end
+
+    @testset "seed_demos default remains :triple" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 1), paused = true)
+        @test m.seed_demos === :triple
+    end
+end
+
+end # module TestSPCWorkbenchLibraryIO
 
 # JSON session persistence (schema v1) — via package module (KD22)
 # ═══════════════════════════════════════════════════════════════════════
