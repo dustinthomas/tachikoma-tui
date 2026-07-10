@@ -9,11 +9,36 @@ shipped by this project.
 - **SPC Chart** — interactive SPC chart with live mode (`spc_demo()`, `static_spc_demo()`)
 - **SPC Workbench** — multi-chart WECO workbench (`spc_workbench_demo()`, `spc_workbench()`)
 
-## Quick links
+## Quick start
 
-- [SPC Workbench](@ref) — workflow, keys, I/O schema (pages expand in later PRs)
-- [API Reference](@ref) — public API stub (`@autodocs` at PR11)
-- Repository `README.md` — runners, verification gates, formatting
+```julia
+using TachikomaTUI
 
-!!! note "Scaffold"
-    Documenter pages are stubbed in PR0. Full `docs/make.jl` success is a later gate (PR11).
+hello_tachikoma()          # starter counter
+static_spc_demo()          # classic SPC (static / gate-friendly)
+spc_workbench_demo()       # workbench triple-demo dashboard (paused)
+```
+
+Load a saved session:
+
+```julia
+using TachikomaTUI
+spc_workbench(workbench = "session.json")
+# or construct without launching:
+m = load_workbench("session.json")
+```
+
+## Documentation map
+
+- [SPC Workbench](@ref) — runners, keys, live toggle, CSV format, JSON schema v1
+- [API Reference](@ref) — public exports via Documenter `@autodocs`
+- Repository `README.md` — verification gates, formatting, agent workflow
+
+## Conventions (locks)
+
+| Topic | Rule |
+|-------|------|
+| Live toggle | **`g` / `G` only** — never `L` (`L` is LSL edit) |
+| Seed demos | Default `seed_demos = :triple` — never flip without product decision |
+| I/O tests | `using TachikomaTUI` only — do not raw-include `spc_workbench_io.jl` |
+| Excel | **Out of scope** — CSV + JSON only long-term |

@@ -1,20 +1,22 @@
 name = "TachikomaTUI"
 uuid = "d5bda6e0-da7d-4e51-9834-c5c3e507adf0"
-authors = ["Grok Agentic Experiments"]
 version = "0.1.0"
+authors = ["Grok Agentic Experiments"]
 description = "Tachikoma.jl TUI project with full Grok agentic workflow (Tiered single-agent + verifier)."
 
 [deps]
-Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
-Supposition = "5a0628fe-1738-4658-9b6d-0b7605a9755b"
+PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+Supposition = "5a0628fe-1738-4658-9b6d-0b7605a9755b"
+Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
 
 [compat]
-julia = "1.10"
-Tachikoma = "2"
 JSON = "0.21"
+PrecompileTools = "1"
+Tachikoma = "2"
+julia = "1.10"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

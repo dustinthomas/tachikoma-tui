@@ -81,17 +81,16 @@ repo in a feature PR.
 
 ## Documentation
 
-Documenter scaffold lives under `docs/` (separate env, not a runtime dep):
+Documenter lives under `docs/` (separate env, not a runtime dep):
 
 ```bash
-# Optional: instantiate docs env (build success is a later PR11 gate)
 julia --project=docs -e 'using Pkg; Pkg.instantiate()'
-# Later: julia --project=docs docs/make.jl
+julia --project=docs docs/make.jl   # must exit 0
 ```
 
-Pages: `docs/src/index.md`, `docs/src/spc-workbench.md`, `docs/src/api.md`
-(stubs expand with feature PRs). Path dep for TachikomaTUI is declared in
-`docs/Project.toml` (`[sources]`).
+Pages: `docs/src/index.md` (home), `docs/src/spc-workbench.md` (keys, CSV,
+JSON schema v1), `docs/src/api.md` (`@autodocs`). Path dep for TachikomaTUI is
+declared in `docs/Project.toml` (`[sources]`).
 
 ## Grok Agentic Workflow (2026-07)
 
