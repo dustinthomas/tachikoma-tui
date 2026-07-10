@@ -47,6 +47,32 @@ end
 _import_err_event(err::CsvParseErr) = "import err: $(_import_err_suffix(err))"
 
 """
+Sync Phase B column maps on a chart after successful CSV ingress so a later
+builder apply / materialize_chart_from_table! targets the same column as Phase A.
+Leaves `source=:series` until explicit materialize (copy-on-map provenance).
+Optionally sets col_tool / col_time when those headers exist in the table.
+"""
+function _sync_chart_col_maps_from_csv!(ch::ChartSpec, parsed::CsvParseOk)
+    ch.col_value = String(parsed.value_col)
+    cols = parsed.columns
+    # Prefer exact Tool/Timestamp headers when present (fab CSV); keep defaults otherwise
+    if any(==("Tool"), cols)
+        ch.col_tool = "Tool"
+    elseif any(==("tool"), cols)
+        ch.col_tool = "tool"
+    end
+    if any(==("Timestamp"), cols)
+        ch.col_time = "Timestamp"
+    elseif any(==("Time"), cols)
+        ch.col_time = "Time"
+    elseif any(==("timestamp"), cols)
+        ch.col_time = "timestamp"
+    end
+    # source stays :series until materialize (Phase A series-owned after import)
+    return nothing
+end
+
+"""
     parse_csv_table(path; value_col="Value", max_rows=50_000)
 
 Phase A series-first CSV parser.
@@ -255,6 +281,8 @@ function import_csv_new_chart!(
     end
     # PR6 / KD25: CSV ingress fills in-memory SharedTable once (no re-read on materialize)
     fill_shared_table!(m, parsed.columns, parsed.rows)
+    # Align Phase B col maps so materialize/builder apply hit the same column as Phase A
+    _sync_chart_col_maps_from_csv!(ch, parsed)
     # Safety: never leave charts shorter than before on success path
     @assert length(m.charts) == n_before + 1
     # Focus imported series (runner load= / CLI ingress surfaces CSV, not Primary demo)
@@ -301,6 +329,7 @@ function import_csv_into_model!(
     end
     # PR6 / KD25: refresh in-memory SharedTable from this CSV ingress
     fill_shared_table!(m, parsed.columns, parsed.rows)
+    _sync_chart_col_maps_from_csv!(ch, parsed)
     m.paused = true
     m.last_event = "imported $(length(parsed.values)) values from $path"
     if idx == clamp(m.active, 1, length(m.charts))
@@ -672,6 +701,12 @@ end
 
 Serialize workbench session to JSON-ready Dict (schema v1).
 Always writes per-chart `live_enabled`. Never writes admins/passcodes.
+
+**PR6 known limit (schema v1):** `m.table::SharedTable` is **not** persisted.
+Charts keep copy-on-map series in `values` + `source`/`col_*` maps, so display
+works after load; builder re-materialize needs an empty table until CSV re-import
+(or a future schema bump that stores `table: {columns, rows}`). KD25: table is
+in-memory after import only.
 """
 function workbench_to_dict(m::SPCWorkbenchModel)::Dict
     _ensure_charts!(m)

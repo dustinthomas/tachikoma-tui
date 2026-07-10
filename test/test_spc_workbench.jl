@@ -966,6 +966,84 @@ end
         @test occursin("b/B", htxt) || occursin("builder", lowercase(htxt))
     end
 
+    @testset "builder: Enter-edit manual CL/UCL/LCL + invalid number keeps prior" begin
+        d = generate_spc_workbench_data(10; seed = 11)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        ch0 = current_chart(m)
+        ch0.manual_cl = 50.0  # prior value that invalid edit must not clear
+        T.update!(m, T.KeyEvent('b'))
+        @test m.view_mode === :builder
+
+        # BUILDER_FIELDS: 1 name, 2 col_value, 3 col_tool, 4 tools, 5 limits_mode,
+        # 6 manual_cl, 7 manual_ucl, 8 manual_lcl, 9 chart_type
+        # Navigate to limits_mode (field 5) and toggle to manual
+        for _ in 1:4
+            T.update!(m, T.KeyEvent(:down))
+        end
+        @test m.builder_selected == 5
+        T.update!(m, T.KeyEvent(:enter))  # toggle auto → manual
+        @test current_chart(m).limits_mode === :manual
+
+        # manual_cl (field 6): edit to 100
+        T.update!(m, T.KeyEvent(:down))
+        @test m.builder_selected == 6
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.builder_editing === true
+        # clear any prefilled buf and type 100
+        m.builder_buf = ""
+        for c in "100"
+            T.update!(m, T.KeyEvent(c))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test current_chart(m).manual_cl == 100.0
+        @test m.last_event == "field set"
+
+        # manual_ucl = 106
+        T.update!(m, T.KeyEvent(:down))
+        T.update!(m, T.KeyEvent(:enter))
+        m.builder_buf = ""
+        for c in "106"
+            T.update!(m, T.KeyEvent(c))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test current_chart(m).manual_ucl == 106.0
+
+        # manual_lcl = 94
+        T.update!(m, T.KeyEvent(:down))
+        T.update!(m, T.KeyEvent(:enter))
+        m.builder_buf = ""
+        for c in "94"
+            T.update!(m, T.KeyEvent(c))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test current_chart(m).manual_lcl == 94.0
+
+        # invalid number keeps prior CL
+        for _ in 1:2
+            T.update!(m, T.KeyEvent(:up))  # back to manual_cl
+        end
+        @test m.builder_selected == 6
+        T.update!(m, T.KeyEvent(:enter))
+        m.builder_buf = ""
+        for c in "nope"
+            T.update!(m, T.KeyEvent(c))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test current_chart(m).manual_cl == 100.0  # unchanged
+        @test m.last_event == "invalid number"
+        @test m.view_mode === :builder
+        @test m.quit === false
+
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
+        @test m.quit === false
+        @test current_chart(m).limits_mode === :manual
+        @test current_chart(m).manual_cl == 100.0
+        @test current_chart(m).manual_ucl == 106.0
+        @test current_chart(m).manual_lcl == 94.0
+    end
+
     @testset "dashboard multi-chart text + multiple plots visible simultaneously" begin
         # use default ctor that will populate multi in impl
         m = SPCWorkbenchModel(data=generate_spc_workbench_data(15;seed=99), paused=true)
@@ -1876,6 +1954,9 @@ end
         @test length(m.table.rows) == 10
         # table cells are strings; series already on chart
         @test m.table.rows[1]["Value"] == "100.1" || tryparse(Float64, m.table.rows[1]["Value"]) ≈ 100.1
+        # default Value path: col_value synced to used column
+        @test current_chart(m).col_value == "Value"
+        @test current_chart(m).source === :series  # until explicit materialize
 
         # materialize from table (in-memory) without re-opening CSV path
         ch = ChartSpec(name = "FromTable", col_value = "Value", tools = String[])
@@ -1893,9 +1974,51 @@ end
             @test r2 isa CsvParseOk
             @test length(m.table.rows) == 3
             @test "Tool" in m.table.columns
+            @test current_chart(m).col_value == "Value"
+            @test current_chart(m).col_tool == "Tool"
             ch2 = ChartSpec(col_value = "Value", col_tool = "Tool", tools = ["X"])
             materialize_chart_from_table!(ch2, m.table)
             @test ch2.data.values == [1.0, 3.0]
+        end
+    end
+
+    @testset "non-default value_col syncs chart col_value (Issue 1; no materialize wipe)" begin
+        d = generate_spc_workbench_data(6; seed = 4)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        mktempdir() do dir
+            p = _write_csv(joinpath(dir, "thk.csv"),
+                "Timestamp,Tool,Thickness\n" *
+                "t1,Film-A,1.5\n" *
+                "t2,Film-A,2.5\n" *
+                "t3,Film-B,9.0\n")
+            r = import_csv_new_chart!(m, p; name = "Thk", value_col = "Thickness")
+            @test r isa CsvParseOk
+            ch = current_chart(m)
+            @test ch.name == "Thk"
+            @test ch.data.values == [1.5, 2.5, 9.0]
+            @test ch.col_value == "Thickness"  # NOT stuck at default "Value"
+            @test ch.col_tool == "Tool"
+            @test ch.col_time == "Timestamp"
+            @test ch.source === :series
+            @test ch.live_enabled === false
+            # materialize must not wipe series when col maps match table headers
+            n0 = length(ch.data.values)
+            materialize_chart_from_table!(ch, m.table)
+            @test ch.source === :table
+            @test ch.live_enabled === false
+            @test ch.data.values == [1.5, 2.5, 9.0]
+            @test length(ch.data.values) == n0
+
+            # into_model path also syncs
+            p2 = _write_csv(joinpath(dir, "thk2.csv"), "Tool,Reading\nA,10\nB,20\n")
+            r2 = import_csv_into_model!(m, p2; value_col = "Reading")
+            @test r2 isa CsvParseOk
+            ch2 = current_chart(m)
+            @test ch2.col_value == "Reading"
+            @test ch2.col_tool == "Tool"
+            materialize_chart_from_table!(ch2, m.table)
+            @test ch2.data.values == [10.0, 20.0]
         end
     end
 end

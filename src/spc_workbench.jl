@@ -1477,17 +1477,26 @@ function _builder_field_value(ch::ChartSpec, field::Symbol)::String
     return ""
 end
 
-function _builder_apply_buf!(ch::ChartSpec, field::Symbol, buf::AbstractString)
+"""
+Apply builder edit buffer to chart field.
+Returns event message. Invalid numeric text keeps prior value and returns `"invalid number"`.
+Empty string on manual_* intentionally clears to `nothing`.
+"""
+function _builder_apply_buf!(ch::ChartSpec, field::Symbol, buf::AbstractString)::String
     s = String(buf)
     if field === :name
         ch.name = isempty(strip(s)) ? ch.name : String(strip(s))
+        return "field set"
     elseif field === :col_value
         ch.col_value = String(strip(s))
+        return "field set"
     elseif field === :col_tool
         ch.col_tool = String(strip(s))
+        return "field set"
     elseif field === :tools
         parts = [String(strip(p)) for p in split(s, ',')]
         ch.tools = filter(!isempty, parts)
+        return "field set"
     elseif field === :limits_mode
         ls = lowercase(strip(s))
         if ls == "manual"
@@ -1495,17 +1504,38 @@ function _builder_apply_buf!(ch::ChartSpec, field::Symbol, buf::AbstractString)
         elseif ls == "auto"
             ch.limits_mode = :auto
         end
-    elseif field === :manual_cl
-        ch.manual_cl = isempty(strip(s)) ? nothing : tryparse(Float64, strip(s))
-    elseif field === :manual_ucl
-        ch.manual_ucl = isempty(strip(s)) ? nothing : tryparse(Float64, strip(s))
-    elseif field === :manual_lcl
-        ch.manual_lcl = isempty(strip(s)) ? nothing : tryparse(Float64, strip(s))
+        return "field set"
+    elseif field === :manual_cl || field === :manual_ucl || field === :manual_lcl
+        st = strip(s)
+        if isempty(st)
+            if field === :manual_cl
+                ch.manual_cl = nothing
+            elseif field === :manual_ucl
+                ch.manual_ucl = nothing
+            else
+                ch.manual_lcl = nothing
+            end
+            return "field set"
+        end
+        v = tryparse(Float64, st)
+        if v === nothing
+            # keep prior value — do not clear on garbage
+            return "invalid number"
+        end
+        if field === :manual_cl
+            ch.manual_cl = v
+        elseif field === :manual_ucl
+            ch.manual_ucl = v
+        else
+            ch.manual_lcl = v
+        end
+        return "field set"
     elseif field === :chart_type
         ct = parse_chart_type(strip(s))
         ct !== nothing && (ch.chart_type = ct)
+        return "field set"
     end
-    return nothing
+    return "field set"
 end
 
 function _builder_toggle_or_start_edit!(m::SPCWorkbenchModel, ch::ChartSpec)
@@ -1531,9 +1561,13 @@ function _builder_apply_and_materialize!(m::SPCWorkbenchModel)
     ch = current_chart(m)
     if m.builder_editing
         field = BUILDER_FIELDS[clamp(m.builder_selected, 1, length(BUILDER_FIELDS))]
-        _builder_apply_buf!(ch, field, m.builder_buf)
+        msg = _builder_apply_buf!(ch, field, m.builder_buf)
         m.builder_editing = false
         m.builder_buf = ""
+        if msg == "invalid number"
+            m.last_event = msg
+            return nothing  # stay in builder; do not materialize on bad number mid-edit flush
+        end
     end
     nrows = length(m.table.rows)
     if nrows > 0
@@ -1569,10 +1603,10 @@ function _handle_builder_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
             return
         elseif evt.key == :enter
             field = BUILDER_FIELDS[clamp(m.builder_selected, 1, nfields)]
-            _builder_apply_buf!(ch, field, m.builder_buf)
+            msg = _builder_apply_buf!(ch, field, m.builder_buf)
             m.builder_editing = false
             m.builder_buf = ""
-            m.last_event = "field set"
+            m.last_event = msg
             return
         elseif evt.key == :backspace
             m.builder_buf = isempty(m.builder_buf) ? "" : chop(m.builder_buf)
