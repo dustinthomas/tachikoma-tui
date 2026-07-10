@@ -456,11 +456,274 @@ include("../src/spc_workbench.jl")
         @test lz_a.sigma == lz_b.sigma
         @test lz_a.ucl == lz_b.ucl
 
-        # limits_mode :manual with all set still resolves (PR1 falls through to auto until PR5)
+        # limits_mode :manual with all set uses manual sigma = (ucl - cl) / 3 (PR5)
         ch_m = ChartSpec(data = WorkbenchData(values = vs, cl = 3.0, sigma = 1.0),
             limits_mode = :manual, manual_cl = 10.0, manual_ucl = 13.0, manual_lcl = 7.0)
         ctx_m = resolve_chart_render_context(ch_m)
-        @test ctx_m.lz.cl == lz_b.cl  # auto path until PR5
+        @test ctx_m.lz.cl == 10.0
+        @test ctx_m.lz.ucl == 13.0
+        @test ctx_m.lz.lcl == 7.0
+        @test ctx_m.lz.sigma == 1.0  # (13-10)/3
+        @test ctx_m.lz.ucl2 == 12.0  # cl + 2σ
+        @test ctx_m.lz.lcl2 == 8.0
+        @test ctx_m.lz.ucl1 == 11.0
+        @test ctx_m.lz.lcl1 == 9.0
+    end
+
+    @testset "manual CL/UCL/LCL resolver: pure sigma + WECO zones (PR5)" begin
+        # Distinct from auto mean so we can prove manual path is taken
+        vs = [0.0, 0.5, 1.0, 0.0, 0.5, 1.0, 0.0, 0.5, 1.0, 0.0]
+        cl_m, ucl_m, lcl_m = 0.0, 3.0, -3.0
+        ch = ChartSpec(
+            data = WorkbenchData(values = vs, cl = mean(vs), sigma = 1.0),
+            limits_mode = :manual,
+            manual_cl = cl_m,
+            manual_ucl = ucl_m,
+            manual_lcl = lcl_m,
+            enabled_rules = Dict("WECO-1" => true),
+        )
+        ctx = resolve_chart_render_context(ch)
+        @test ctx.lz.cl == cl_m
+        @test ctx.lz.ucl == ucl_m
+        @test ctx.lz.lcl == lcl_m
+        @test isapprox(ctx.lz.sigma, (ucl_m - cl_m) / 3; atol = 1e-12)
+        # Point beyond +3σ of manual limits triggers WECO-1
+        vs2 = copy(vs)
+        vs2[5] = 3.5  # beyond UCL=3
+        ch2 = ChartSpec(
+            data = WorkbenchData(values = vs2, cl = 0.0, sigma = 1.0),
+            limits_mode = :manual,
+            manual_cl = cl_m,
+            manual_ucl = ucl_m,
+            manual_lcl = lcl_m,
+            enabled_rules = Dict("WECO-1" => true),
+        )
+        ctx2 = resolve_chart_render_context(ch2)
+        @test 5 in ctx2.viol_indices
+        # Incomplete manual falls back to auto
+        ch_partial = ChartSpec(
+            data = WorkbenchData(values = vs, cl = 0.0, sigma = 1.0),
+            limits_mode = :manual,
+            manual_cl = 10.0,
+            manual_ucl = 13.0,
+            manual_lcl = nothing,
+        )
+        ctx_p = resolve_chart_render_context(ch_partial)
+        lz_auto = auto_limits(vs; sigma_method = :mr)
+        @test ctx_p.lz.cl == lz_auto.cl
+        @test ctx_p.lz.sigma == lz_auto.sigma
+        @test _manual_limits_effective(ch_partial) === false
+        # Non-positive sigma (ucl <= cl) falls through to auto
+        ch_zero = ChartSpec(
+            data = WorkbenchData(values = vs, cl = 0.0, sigma = 1.0),
+            limits_mode = :manual,
+            manual_cl = 10.0,
+            manual_ucl = 10.0,
+            manual_lcl = 7.0,
+        )
+        ctx_z = resolve_chart_render_context(ch_zero)
+        @test _manual_limits_effective(ch_zero) === false
+        @test ctx_z.lz.cl == lz_auto.cl
+        @test ctx_z.lz.sigma == lz_auto.sigma
+        ch_neg = ChartSpec(
+            data = WorkbenchData(values = vs, cl = 0.0, sigma = 1.0),
+            limits_mode = :manual,
+            manual_cl = 10.0,
+            manual_ucl = 7.0,
+            manual_lcl = 4.0,
+        )
+        @test _manual_limits_effective(ch_neg) === false
+        ctx_n = resolve_chart_render_context(ch_neg)
+        @test ctx_n.lz.cl == lz_auto.cl
+        # Auto path still ignores manual_* when mode is :auto
+        ch_auto = ChartSpec(
+            data = WorkbenchData(values = vs, cl = 0.0, sigma = 1.0),
+            limits_mode = :auto,
+            manual_cl = 99.0,
+            manual_ucl = 199.0,
+            manual_lcl = -1.0,
+        )
+        ctx_a = resolve_chart_render_context(ch_auto)
+        @test ctx_a.lz.cl == lz_auto.cl
+        @test ctx_a.lz.cl != 99.0
+        @test _manual_limits_effective(ch) === true
+        # Last-N WECO msgs policy: by sample index (most recent), not rule-number tail
+        fake = [
+            WECOViolation("WECO-1", 2, "early"),
+            WECOViolation("WECO-8", 10, "late-rule8"),
+            WECOViolation("WECO-1", 9, "late-w1"),
+            WECOViolation("WECO-2", 5, "mid"),
+            WECOViolation("WECO-3", 8, "mid-late"),
+            WECOViolation("WECO-1", 1, "oldest"),
+        ]
+        last3 = _side_viol_msgs_by_index(fake; n = 3)
+        @test length(last3) == 3
+        @test [v.index for v in last3] == [8, 9, 10]
+        @test last3[2].rule == "WECO-1" && last3[3].rule == "WECO-8"
+    end
+
+    @testset "SS_FACTORS table (HTML n=2..25)" begin
+        @test haskey(SS_FACTORS, 2) && haskey(SS_FACTORS, 25)
+        @test !haskey(SS_FACTORS, 1) && !haskey(SS_FACTORS, 26)
+        # Spot-check vs HTML SS_FACTORS
+        f2 = SS_FACTORS[2]
+        @test f2.A2 == 1.880
+        @test f2.A3 == 2.659
+        @test f2.d2 == 1.128
+        @test f2.c4 == 0.7979
+        @test f2.D3 == 0.0
+        @test f2.D4 == 3.267
+        @test f2.B3 == 0.0
+        @test f2.B4 == 3.267
+        f5 = SS_FACTORS[5]
+        @test f5.A2 == 0.577
+        @test f5.A3 == 1.427
+        @test f5.d2 == 2.326
+        @test f5.c4 == 0.9400
+        f10 = SS_FACTORS[10]
+        @test f10.A2 == 0.308
+        @test f10.A3 == 0.975
+        @test f10.d2 == 3.078
+        @test f10.c4 == 0.9727
+        f25 = SS_FACTORS[25]
+        @test f25.A2 == 0.153
+        @test f25.A3 == 0.606
+        @test f25.d2 == 3.931
+        @test f25.c4 == 0.9896
+    end
+
+    @testset "subgroup_means_and_ranges / subgroup_means_and_s (series chunks)" begin
+        # 12 values → 4 complete groups of n=3; remainder dropped
+        vals = [10.0, 12.0, 11.0,  20.0, 22.0, 18.0,  30.0, 28.0, 32.0,  40.0, 41.0]
+        xbar, ranges, groups = subgroup_means_and_ranges(vals, 3)
+        @test length(xbar) == 3
+        @test length(ranges) == 3
+        @test length(groups) == 3
+        @test xbar[1] ≈ mean([10.0, 12.0, 11.0])
+        @test ranges[1] ≈ 2.0  # 12-10
+        @test xbar[2] ≈ mean([20.0, 22.0, 18.0])
+        @test ranges[2] ≈ 4.0  # 22-18
+        @test xbar[3] ≈ mean([30.0, 28.0, 32.0])
+        @test ranges[3] ≈ 4.0  # 32-28
+        # incomplete tail (40,41) discarded
+        @test length(groups[1]) == 3
+
+        xbar_s, svals, g2 = subgroup_means_and_s(vals, 3)
+        @test length(xbar_s) == 3
+        @test xbar_s ≈ xbar
+        @test svals[1] ≈ std([10.0, 12.0, 11.0]; corrected = true)
+        @test svals[2] ≈ std([20.0, 22.0, 18.0]; corrected = true)
+
+        # too few for one full subgroup → empty
+        xb0, r0, g0 = subgroup_means_and_ranges([1.0, 2.0], 5)
+        @test isempty(xb0) && isempty(r0) && isempty(g0)
+
+        # n clamped by helpers to [2,25]
+        xb2, r2, _ = subgroup_means_and_ranges(collect(1.0:10.0), 1)  # treat as 2
+        @test length(xb2) == 5
+    end
+
+    @testset "auto_limits Xbar_R / Xbar_S (HTML formulas)" begin
+        # Crafted series: 3 subgroups of size 5
+        # SG1 mean=10, R=4; SG2 mean=12, R=2; SG3 mean=11, R=6
+        raw = Float64[
+            8, 10, 12, 9, 11,   # mean 10, R=4
+            11, 12, 13, 12, 12, # mean 12, R=2
+            8, 14, 10, 11, 12,  # mean 11, R=6
+        ]
+        n = 5
+        f = SS_FACTORS[n]
+        xbar, ranges, _ = subgroup_means_and_ranges(raw, n)
+        @test length(xbar) == 3
+        rbar = mean(ranges)
+        xbb = mean(xbar)
+        lz_r = auto_limits(raw; chart_type = Xbar_R, subgroup_size = n)
+        @test lz_r.cl ≈ xbb
+        @test lz_r.sigma ≈ rbar / f.d2
+        @test lz_r.ucl ≈ xbb + f.A2 * rbar
+        @test lz_r.lcl ≈ xbb - f.A2 * rbar
+        # intermediate zones from process σ (WECO scale)
+        @test lz_r.ucl1 ≈ xbb + 1 * lz_r.sigma
+        @test lz_r.ucl2 ≈ xbb + 2 * lz_r.sigma
+        @test lz_r.lcl1 ≈ xbb - 1 * lz_r.sigma
+        @test lz_r.lcl2 ≈ xbb - 2 * lz_r.sigma
+
+        xbar_s, svals, _ = subgroup_means_and_s(raw, n)
+        sbar = mean(svals)
+        lz_s = auto_limits(raw; chart_type = Xbar_S, subgroup_size = n)
+        @test lz_s.cl ≈ mean(xbar_s)
+        @test lz_s.sigma ≈ sbar  # HTML: sigma = sBar
+        @test lz_s.ucl ≈ mean(xbar_s) + f.A3 * sbar
+        @test lz_s.lcl ≈ mean(xbar_s) - f.A3 * sbar
+
+        # empty / incomplete → zero limits
+        lz0 = auto_limits(Float64[1, 2, 3]; chart_type = Xbar_R, subgroup_size = 5)
+        @test lz0.cl == 0.0 && lz0.sigma == 0.0 && lz0.ucl == 0.0
+
+        # I_MR path unchanged
+        vs = [1.0, 2.0, 3.0, 4.0, 5.0]
+        @test auto_limits(vs; chart_type = I_MR, sigma_method = :mr).sigma ==
+              compute_limits_and_zones(vs; sigma_method = :mr).sigma
+    end
+
+    @testset "resolve Xbar_R / Xbar_S primary series + Cpk c4 + secondary stats" begin
+        raw = Float64[
+            8, 10, 12, 9, 11,
+            11, 12, 13, 12, 12,
+            8, 14, 10, 11, 12,
+        ]
+        n = 5
+        f = SS_FACTORS[n]
+        usl, lsl = 20.0, 0.0
+
+        ch_r = ChartSpec(
+            name = "XbarR test",
+            chart_type = Xbar_R,
+            data = WorkbenchData(values = raw, cl = 0.0, sigma = 0.0),
+            subgroup_size = n,
+            usl = usl,
+            lsl = lsl,
+        )
+        ctx_r = resolve_chart_render_context(ch_r)
+        xbar, ranges, _ = subgroup_means_and_ranges(raw, n)
+        @test ctx_r.primary_values ≈ xbar
+        @test length(ctx_r.primary_values) == 3
+        @test ctx_r.lz.ucl ≈ mean(xbar) + f.A2 * mean(ranges)
+        @test ctx_r.secondary_name == "R"
+        @test ctx_r.secondary_bar ≈ mean(ranges)
+        # Xbar-R Cpk uses process σ = R̄/d2 (already lz.sigma)
+        cr_r = compute_capability(xbar, ctx_r.lz.cl, ctx_r.lz.sigma; usl = usl, lsl = lsl)
+        @test ctx_r.cpk ≈ cr_r.cpk
+
+        ch_s = ChartSpec(
+            name = "XbarS test",
+            chart_type = Xbar_S,
+            data = WorkbenchData(values = raw, cl = 0.0, sigma = 0.0),
+            subgroup_size = n,
+            usl = usl,
+            lsl = lsl,
+        )
+        ctx_s = resolve_chart_render_context(ch_s)
+        xbar_s, svals, _ = subgroup_means_and_s(raw, n)
+        sbar = mean(svals)
+        @test ctx_s.primary_values ≈ xbar_s
+        @test ctx_s.secondary_name == "s"
+        @test ctx_s.secondary_bar ≈ sbar
+        # Xbar-S Cpk unbiases s̄ with c4 (HTML)
+        cpk_sigma = sbar / f.c4
+        cr_s = compute_capability(xbar_s, ctx_s.lz.cl, cpk_sigma; usl = usl, lsl = lsl)
+        @test ctx_s.cpk ≈ cr_s.cpk
+        # c4-unbiased sigma differs from raw s̄
+        cr_wrong = compute_capability(xbar_s, ctx_s.lz.cl, sbar; usl = usl, lsl = lsl)
+        @test ctx_s.cpk !== nothing && cr_wrong.cpk !== nothing
+        @test abs(ctx_s.cpk - cr_wrong.cpk) > 1e-9
+
+        # I_MR primary is raw values; no secondary bar
+        ch_i = ChartSpec(data = WorkbenchData(values = raw, cl = 0.0, sigma = 0.0))
+        ctx_i = resolve_chart_render_context(ch_i)
+        @test ctx_i.primary_values ≈ raw
+        @test ctx_i.secondary_name == ""
+        @test ctx_i.secondary_bar === nothing
     end
 
     @testset "pure chart library CRUD + seed_demos" begin
@@ -1070,6 +1333,60 @@ end
         if found3 !== nothing
             @test found3.bubbles == "○●●●●●○○"
         end
+    end
+
+    @testset "side panel mode badge + last-N WECO messages when violations present (PR5)" begin
+        # Craft series that triggers WECO-1 under known CL/σ (manual limits)
+        cl, s = 0.0, 1.0
+        vals = [0.0, 0.1, 0.0, 3.5, -0.1, 0.0, 0.2, 0.0, -0.1, 0.0]  # idx 4 beyond +3σ
+        d = WorkbenchData(values = vals, cl = cl, sigma = s)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        # Ensure single chart + manual limits on the active chart
+        _ensure_charts!(m)
+        ch = current_chart(m)
+        ch.limits_mode = :manual
+        ch.manual_cl = cl
+        ch.manual_ucl = cl + 3 * s
+        ch.manual_lcl = cl - 3 * s
+        ch.enabled_rules = Dict(
+            "WECO-1" => true, "WECO-2" => false, "WECO-3" => false, "WECO-4" => false,
+            "WECO-5" => false, "WECO-6" => false, "WECO-7" => false, "WECO-8" => false,
+        )
+        m.enabled_rules = ch.enabled_rules
+        # Tall side panel so Viols list is not clipped by chart list / gauges
+        tb = T.TestBackend(100, 36); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 36), [], []))
+        @test m.side_area.width > 0
+        side = join([T.row_text(tb, i) for i = 1:36 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("limits:manual", side)
+        @test occursin("Viols:", side)
+        # WECO-1 message from weco_detect should appear (rule tag + beyond)
+        @test occursin("WECO-1", side)
+        @test occursin("beyond", side) || occursin("#4", side) || occursin("3.5", side)
+        # Pure resolver agrees there is a violation at index 4
+        ctx = resolve_chart_render_context(ch)
+        @test 4 in ctx.viol_indices
+        @test isapprox(ctx.lz.sigma, 1.0; atol = 1e-12)
+
+        # Auto badge when limits_mode is auto
+        ch.limits_mode = :auto
+        tb2 = T.TestBackend(100, 36); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 36), [], []))
+        side2 = join([T.row_text(tb2, i) for i = 1:36 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("limits:auto", side2)
+        @test !occursin("limits:manual", side2)
+
+        # Incomplete manual (missing lcl) → effective auto badge (same gateway predicate)
+        ch.limits_mode = :manual
+        ch.manual_cl = cl
+        ch.manual_ucl = cl + 3 * s
+        ch.manual_lcl = nothing
+        @test _manual_limits_effective(ch) === false
+        tb3 = T.TestBackend(100, 36); T.reset!(tb3.buf)
+        T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 100, 36), [], []))
+        side3 = join([T.row_text(tb3, i) for i = 1:36 if T.row_text(tb3, i) !== nothing], "\n")
+        @test occursin("limits:auto", side3)
+        @test !occursin("limits:manual", side3)
     end
 
     @testset "side stats WECO: blank gap after Specs + rule numbers under bubbles" begin
