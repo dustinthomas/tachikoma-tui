@@ -1497,6 +1497,12 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.edit_buf = m.lsl === nothing ? "" : string(m.lsl)
             m.last_event = "edit lsl: $(m.edit_buf)"
             return
+        elseif c == 'g' || c == 'G'
+            # PR3: per-chart live toggle (NOT L — L remains LSL)
+            chg = current_chart(m)
+            chg.live_enabled = !chg.live_enabled
+            m.last_event = chg.live_enabled ? "live on" : "live off"
+            return
         elseif c == 's' || c == 'S'
             m.usl = m.target = m.lsl = nothing
             ch.usl = ch.target = ch.lsl = nothing
@@ -1624,8 +1630,8 @@ function view(m::SPCWorkbenchModel, f::Frame)
     ch = current_chart(m)
     n = length(m.data.values)
 
-    # live (slice 6) — on active
-    if !m.paused && m.editing === nothing && !m.config_open && (m.tick % 4 == 0)
+    # live (slice 6 / PR3) — on active; shared gate with advance_live!
+    if _live_may_advance(m) && (m.tick % 4 == 0)
         advance_live!(m)
         if n > 0 && m.viewport.x1 >= n - 1
             m.viewport.x1 = n
@@ -1691,7 +1697,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     end
 
     # header
-    hdr = "SPC Workbench [dashboard]  [p]pause [r]reset [c]config [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
+    hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
 
     if m.config_open
@@ -2244,7 +2250,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     else
         " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
     end
-    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p r c v o u t l s] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
 end
 
 # small helper for fmt
@@ -2263,6 +2269,7 @@ function _render_help_page!(buf, area, m)
     lines = [
         "QUICK START (TUI):",
         "  p/P     toggle pause / live append",
+        "  g/G     toggle live append on active chart (live on/off)",
         "  r/R/z/Z reset viewport to full data",
         "  c/C     open/close WECO rule config (1-8 toggle; Tab→Lines→Visual)",
         "  v/V     open chart-line visibility config (CL/±σ/specs)",
@@ -2302,6 +2309,7 @@ function _render_keymap_page!(buf, area, m)
     kbd = [
         "KEYS:",
         "  p/P         Pause/Resume live mode",
+        "  g/G         Toggle live_enabled on active chart",
         "  r R z Z     Reset view (full range + auto y)",
         "  c C / v V / o O  Config WECO / Lines / Visual prefs",
         "  u t l / s   Edit USL/Target/LSL / clear specs",
@@ -2342,12 +2350,28 @@ const WECO_RULE_DESCS = [
     "8 outside 1σ",
 ]
 
-# ── Live (slice 6) ──────────────────────────────────────────────────────
+# ── Live (slice 6) — PR3: per-chart live_enabled + modal gates ─────────
+
+"""Shared predicate for view tick path and advance_live! (defensive)."""
+function _live_may_advance(m::SPCWorkbenchModel)::Bool
+    m.paused && return false
+    m.editing !== nothing && return false
+    m.config_open && return false
+    # Optional fields from library/prompt PR (PR2b+); skip if not present yet
+    if hasfield(typeof(m), :prompt_kind) && getfield(m, :prompt_kind) !== nothing
+        return false
+    end
+    if hasfield(typeof(m), :pending_delete) && getfield(m, :pending_delete) === true
+        return false
+    end
+    m.view_mode in (:help, :keymap, :library, :builder) && return false
+    ch = current_chart(m)
+    (isempty(ch.data.values) || !ch.live_enabled) && return false
+    return true
+end
 
 function advance_live!(m::SPCWorkbenchModel)
-    if m.paused || m.editing !== nothing || m.config_open
-        return
-    end
+    _live_may_advance(m) || return
     n = length(m.data.values)
     if n >= m.live_max || n == 0
         return
@@ -2410,7 +2434,11 @@ end
 
 Static/paused public runner.
 """
-function spc_workbench_demo()
+function spc_workbench_demo(;
+    load::Union{Nothing,AbstractString} = nothing,
+    seed_demos::Symbol = :triple,
+    value_col::String = "Value",
+)
     d = generate_spc_workbench_data(40; seed=42)
     n = length(d.values)
     vp = Viewport(x0 = n > 0 ? 1 : 0, x1 = n > 0 ? n : 0)
@@ -2418,22 +2446,34 @@ function spc_workbench_demo()
         lz = compute_limits_and_zones(d.values; sigma_method = :mr)
         auto_fit_viewport_y!(vp, d.values, lz)
     end
-    m = SPCWorkbenchModel(data = d, viewport = vp, paused = true)
+    m = SPCWorkbenchModel(data = d, viewport = vp, paused = true, seed_demos = seed_demos)
     if n > 0
         clamp_viewport!(m.viewport, n)
     end
     _ensure_charts!(m)
+    if load !== nothing
+        import_csv_new_chart!(m, load; value_col = value_col)
+        # import forces paused=true; keep demo static
+        m.paused = true
+    end
     app(m)
 end
 
 const run_spc_workbench = spc_workbench_demo
 
 """
-    spc_workbench(; paused=false)
+    spc_workbench(; paused=false, load=nothing, seed_demos=:triple, value_col="Value")
 
-Live/interactive.
+Live/interactive workbench. `load=` imports a CSV series as a new chart
+(that chart live_enabled=false, activated as current, model paused=true on success).
+`seed_demos` default remains `:triple` — never flip.
 """
-function spc_workbench(; paused::Bool = false)
+function spc_workbench(;
+    paused::Bool = false,
+    load::Union{Nothing,AbstractString} = nothing,
+    seed_demos::Symbol = :triple,
+    value_col::String = "Value",
+)
     d = generate_spc_workbench_data(40; seed=42)
     n = length(d.values)
     vp = Viewport(x0 = n > 0 ? 1 : 0, x1 = n > 0 ? n : 0)
@@ -2441,11 +2481,15 @@ function spc_workbench(; paused::Bool = false)
         lz = compute_limits_and_zones(d.values; sigma_method = :mr)
         auto_fit_viewport_y!(vp, d.values, lz)
     end
-    m = SPCWorkbenchModel(data = d, viewport = vp, paused = paused)
+    m = SPCWorkbenchModel(data = d, viewport = vp, paused = paused, seed_demos = seed_demos)
     if n > 0
         clamp_viewport!(m.viewport, n)
     end
     _ensure_charts!(m)
+    if load !== nothing
+        import_csv_new_chart!(m, load; value_col = value_col)
+        # successful import sets paused=true; failed import leaves seed charts
+    end
     app(m)
 end
 
