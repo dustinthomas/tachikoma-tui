@@ -89,18 +89,19 @@ const CHART_TYPE_WIRE = Dict(
     u_chart => "u",
 )
 
+# Reverse wire lookup + Julia enum-name aliases (string(t) for each ChartType)
+const CHART_TYPE_FROM_WIRE = let d = Dict{String,ChartType}()
+    for (t, w) in CHART_TYPE_WIRE
+        d[w] = t
+        d[string(t)] = t  # e.g. "I_MR", "Xbar_R", "p_chart"
+    end
+    d
+end
+
 chart_type_to_string(t::ChartType) = CHART_TYPE_WIRE[t]
 
 function parse_chart_type(s::AbstractString)::Union{ChartType,Nothing}
-    s == "I-MR" && return I_MR
-    s == "Xbar-R" && return Xbar_R
-    s == "Xbar-S" && return Xbar_S
-    s == "I_MR" && return I_MR
-    s == "p" && return p_chart
-    s == "np" && return np_chart
-    s == "c" && return c_chart
-    s == "u" && return u_chart
-    return nothing
+    get(CHART_TYPE_FROM_WIRE, String(s), nothing)
 end
 
 """Empty but valid series — always a legal ChartSpec.data."""
@@ -1058,9 +1059,18 @@ function _boot_viewport(d::WorkbenchData; usl=nothing, lsl=nothing, show_lines=D
     return vp
 end
 
+function _normalize_seed_demos(seed::Symbol)::Symbol
+    if seed === :triple || seed === :single || seed === :none
+        return seed
+    end
+    @warn "unknown seed_demos=$(seed); treating as :triple"
+    return :triple
+end
+
 function _ensure_charts!(m::SPCWorkbenchModel)
     if isempty(m.charts)
-        if m.seed_demos === :none
+        seed = _normalize_seed_demos(m.seed_demos)
+        if seed === :none
             push!(m.charts, ChartSpec(
                 name = "Primary",
                 data = empty_workbench_data(),
@@ -1084,7 +1094,7 @@ function _ensure_charts!(m::SPCWorkbenchModel)
                 usl = m.usl, target = m.target, lsl = m.lsl,
                 enabled_rules = copy(m.enabled_rules),
             ))
-            if m.seed_demos === :triple
+            if seed === :triple
                 d2 = generate_spc_workbench_data(n; seed=123)
                 push!(m.charts, ChartSpec(name="Secondary (demo)", data=d2,
                     viewport = _boot_viewport(d2; show_lines = m.show_chart_lines)))
@@ -1139,7 +1149,7 @@ function add_chart!(
         values = copy(data.values),
         cl = data.cl,
         sigma = data.sigma,
-        meta = copy(data.meta),
+        meta = deepcopy(data.meta),
     )
     ch = ChartSpec(
         name = String(name),
@@ -1211,6 +1221,10 @@ function delete_chart!(m::SPCWorkbenchModel, idx::Int)::Bool
     n = length(m.charts)
     n <= 1 && return false
     (idx < 1 || idx > n) && return false
+    # Persist unsynced legacy mirror edits on the current active chart before removal
+    # (same pattern as set_active_chart!). Without this, delete of a *different* chart
+    # would drop m.usl/target/lsl/rules via _ensure_charts! overwrite.
+    _sync_active_back!(m)
     deleteat!(m.charts, idx)
     # clamp active
     if m.active > length(m.charts)

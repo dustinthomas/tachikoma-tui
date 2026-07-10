@@ -410,6 +410,10 @@ include("../src/spc_workbench.jl")
         @test parse_chart_type("I-MR") === I_MR
         @test parse_chart_type("Xbar-S") === Xbar_S
         @test parse_chart_type("u") === u_chart
+        @test parse_chart_type("I_MR") === I_MR
+        @test parse_chart_type("Xbar_R") === Xbar_R
+        @test parse_chart_type("Xbar_S") === Xbar_S
+        @test parse_chart_type("p_chart") === p_chart
         @test parse_chart_type("nope") === nothing
 
         ed = empty_workbench_data()
@@ -523,6 +527,27 @@ include("../src/spc_workbench.jl")
         @test m_del.active == 2
         @test m_del.library_selected == 2
 
+        # delete syncs active mirror edits before removing a different chart
+        m_sync = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_sync)
+        set_active_chart!(m_sync, 1)
+        m_sync.usl = 77.0
+        @test delete_chart!(m_sync, 2) === true
+        @test m_sync.active == 1
+        @test m_sync.usl == 77.0
+        @test m_sync.charts[1].usl == 77.0
+
+        # add_chart! deep-copies nested meta
+        nested = Dict{String,Any}("nested" => Dict{String,Any}("k" => 1))
+        src_d = WorkbenchData(values = [1.0, 2.0], cl = 1.5, sigma = 0.5, meta = nested)
+        m_meta = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_meta)
+        aidx = add_chart!(m_meta; name = "Meta", data = src_d)
+        @test m_meta.charts[aidx].data.meta !== nested
+        @test m_meta.charts[aidx].data.meta["nested"] !== nested["nested"]
+        nested["nested"]["k"] = 99
+        @test m_meta.charts[aidx].data.meta["nested"]["k"] == 1
+
         # seed :single
         m_s = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
         _ensure_charts!(m_s)
@@ -539,6 +564,14 @@ include("../src/spc_workbench.jl")
         ctx_n = resolve_chart_render_context(m_n.charts[1])
         @test ctx_n.cpk === nothing
         @test m_n.charts[1].live_enabled === true
+
+        # unknown seed_demos falls back to :triple (safe default)
+        m_bad = SPCWorkbenchModel(data = d, paused = true, seed_demos = :foo)
+        _ensure_charts!(m_bad)
+        @test length(m_bad.charts) == 3
+        @test m_bad.charts[1].name == "Primary"
+        @test occursin("Secondary", m_bad.charts[2].name)
+        @test m_bad.charts[3].name == "Tertiary"
 
         # ToolEntry exists on model
         @test m.tools isa Vector{ToolEntry}
