@@ -1254,3 +1254,49 @@ export save_workbench, load_workbench, load_workbench!
 export extract_html_spc_state, extract_html_spc_state_file
 export html_state_to_workbench, html_state_to_workbench!
 export load_html_archive, load_html_archive!
+
+# ── CSV export (PR4b) ─────────────────────────────────────────
+
+"""
+    export_csv_series(path, values; col_name="Value") -> Union{Nothing,String}
+
+Write a simple single-column CSV: header `col_name` then one float per line.
+Returns `nothing` on success, or an error message string (fail-closed).
+Symmetric with `parse_csv_table` / import (no RFC4180 quoting).
+"""
+function export_csv_series(
+    path::AbstractString,
+    values;
+    col_name::AbstractString = "Value",
+)::Union{Nothing,String}
+    p = strip(String(path))
+    isempty(p) && return "empty path"
+    try
+        open(p, "w") do io
+            println(io, String(col_name))
+            for v in values
+                println(io, Float64(v))
+            end
+        end
+    catch e
+        return "unwritable: $(sprint(showerror, e))"
+    end
+    return nothing
+end
+
+"""
+    chart_for_export(m) -> ChartSpec
+
+When `view_mode == :library`, export the `library_selected` chart series;
+otherwise fall back to the active chart (`current_chart`).
+"""
+function chart_for_export(m::SPCWorkbenchModel)::ChartSpec
+    _ensure_charts!(m)
+    if m.view_mode == :library && 1 <= m.library_selected <= length(m.charts)
+        return m.charts[m.library_selected]
+    end
+    return current_chart(m)
+end
+
+export export_csv_series, chart_for_export
+
