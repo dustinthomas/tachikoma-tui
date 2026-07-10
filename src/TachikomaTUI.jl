@@ -25,6 +25,7 @@ export weco_detect, compute_limits_and_zones, compute_capability
 export detect_oos, cpk_band, cpk_color_for_band
 export compute_fit_y_range, y_extras_from_limits, fit_viewport_y!, auto_fit_viewport_y!
 export ChartRenderContext, resolve_chart_render_context, point_status, auto_limits
+export SS_FACTORS, subgroup_means_and_ranges, subgroup_means_and_s
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS
 export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_type, chart_type_to_string
@@ -34,9 +35,9 @@ export shared_table_from_columns_rows, fill_shared_table!
 export ToolEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
 export workbench_to_dict, workbench_from_dict, workbench_from_dict!
 export save_workbench, load_workbench, load_workbench!
-export visible_charts, dashboard_pane_charts
-export set_filter_tool!, set_filter_type!, set_filter_owner!, clear_filters!, apply_chart_filters!
-export add_tool!, delete_tool!
+export extract_html_spc_state, extract_html_spc_state_file
+export html_state_to_workbench, html_state_to_workbench!
+export load_html_archive, load_html_archive!
 export spc_workbench_demo, run_spc_workbench, spc_workbench, advanced_spc, run_advanced_spc
 
 # SPC Workbench I/O (PR3 CSV import)
