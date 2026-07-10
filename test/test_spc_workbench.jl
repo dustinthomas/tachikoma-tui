@@ -438,12 +438,14 @@ include("../src/spc_workbench.jl")
         @test ch.col_n == ""
         @test ch.col_tool == "Tool"
         @test ch.col_time == "Timestamp"
+        @test ch.col_lot == ""  # PR7b: empty → series-chunk path
         # backward-compat construction still works
         ch2 = ChartSpec(name = "legacy", data = WorkbenchData(values=[1.0], cl=1.0, sigma=0.1))
         @test ch2.name == "legacy"
         @test ch2.chart_type === I_MR
         @test ch2.live_enabled === true
         @test ch2.source === :series
+        @test ch2.col_lot == ""
     end
 
     @testset "SharedTable + compute_chart_series + materialize copy-on-map (PR6)" begin
@@ -795,6 +797,191 @@ include("../src/spc_workbench.jl")
         @test ctx_i.primary_values ≈ raw
         @test ctx_i.secondary_name == ""
         @test ctx_i.secondary_bar === nothing
+    end
+
+    @testset "PR7b: table-sourced Xbar subgroups by column (pure fixtures)" begin
+        # Pure group helpers: first-seen order; size-1 groups dropped for stats
+        vals = [10.0, 12.0, 11.0,  20.0, 22.0, 18.0,  30.0]
+        keys = ["W01", "W01", "W01", "W02", "W02", "W02", "W03"]  # W03 alone
+        groups, order = group_values_by_keys(vals, keys)
+        @test order == ["W01", "W02", "W03"]
+        @test groups[1] == [10.0, 12.0, 11.0]
+        @test groups[2] == [20.0, 22.0, 18.0]
+        @test groups[3] == [30.0]
+
+        xbar, ranges, kept = subgroup_means_and_ranges_from_groups(groups)
+        @test length(xbar) == 2  # W03 dropped (n=1)
+        @test length(kept) == 2
+        @test xbar[1] ≈ mean([10.0, 12.0, 11.0])
+        @test ranges[1] ≈ 2.0
+        @test xbar[2] ≈ mean([20.0, 22.0, 18.0])
+        @test ranges[2] ≈ 4.0
+
+        xbar_s, svals, kept_s = subgroup_means_and_s_from_groups(groups)
+        @test length(xbar_s) == 2
+        @test svals[1] ≈ std([10.0, 12.0, 11.0]; corrected = true)
+        @test svals[2] ≈ std([20.0, 22.0, 18.0]; corrected = true)
+
+        # auto_limits with precomputed secondary (no re-chunk)
+        n = 3
+        f = SS_FACTORS[n]
+        rbar = mean(ranges)
+        xbb = mean(xbar)
+        lz = auto_limits(xbar; chart_type = Xbar_R, subgroup_size = n, secondary = ranges)
+        @test lz.cl ≈ xbb
+        @test lz.sigma ≈ rbar / f.d2
+        @test lz.ucl ≈ xbb + f.A2 * rbar
+        @test lz.lcl ≈ xbb - f.A2 * rbar
+
+        # SharedTable fixture: multi-site per wafer, interleaved tools
+        # W01 sites: 8,10,12 → mean 10, R=4
+        # W02 sites: 11,12,13 → mean 12, R=2
+        # W03 sites: 9,11,13 → mean 11, R=4
+        table = SharedTable(
+            columns = ["Timestamp", "Tool", "Wafer", "Value"],
+            rows = [
+                Dict("Timestamp" => "t1", "Tool" => "ETCH-A", "Wafer" => "W01", "Value" => "8"),
+                Dict("Timestamp" => "t2", "Tool" => "ETCH-A", "Wafer" => "W01", "Value" => "10"),
+                Dict("Timestamp" => "t3", "Tool" => "ETCH-A", "Wafer" => "W01", "Value" => "12"),
+                Dict("Timestamp" => "t4", "Tool" => "ETCH-A", "Wafer" => "W02", "Value" => "11"),
+                Dict("Timestamp" => "t5", "Tool" => "ETCH-B", "Wafer" => "W02", "Value" => "12"),  # filtered out
+                Dict("Timestamp" => "t6", "Tool" => "ETCH-A", "Wafer" => "W02", "Value" => "12"),
+                Dict("Timestamp" => "t7", "Tool" => "ETCH-A", "Wafer" => "W02", "Value" => "13"),
+                Dict("Timestamp" => "t8", "Tool" => "ETCH-A", "Wafer" => "W03", "Value" => "9"),
+                Dict("Timestamp" => "t9", "Tool" => "ETCH-A", "Wafer" => "W03", "Value" => "11"),
+                Dict("Timestamp" => "t10", "Tool" => "ETCH-A", "Wafer" => "W03", "Value" => "13"),
+            ],
+        )
+        ch_r = ChartSpec(
+            name = "CD-XbarR",
+            chart_type = Xbar_R,
+            tools = ["ETCH-A"],
+            col_value = "Value",
+            col_tool = "Tool",
+            col_time = "Timestamp",
+            col_lot = "Wafer",
+            subgroup_size = 3,
+            usl = 20.0,
+            lsl = 0.0,
+        )
+        # compute_chart_series still returns individuals + lot key in meta
+        raw_v, raw_lab, raw_pm = compute_chart_series(table, ch_r)
+        @test length(raw_v) == 9  # ETCH-B row dropped
+        @test all(haskey(pm, "lot") for pm in raw_pm)
+        @test raw_pm[1]["lot"] == "W01"
+
+        materialize_chart_from_table!(ch_r, table)
+        @test ch_r.source === :table
+        @test ch_r.live_enabled === false
+        @test get(ch_r.data.meta, "table_subgroups", false) === true
+        @test ch_r.data.values ≈ [10.0, 12.0, 11.0]  # three wafer means
+        @test ch_r.data.meta["labels"] == ["W01", "W02", "W03"]
+        @test ch_r.data.meta["secondary_name"] == "R"
+        @test ch_r.data.meta["secondary_vals"] ≈ [4.0, 2.0, 4.0]
+        @test ch_r.data.meta["subgroup_n"] == 3
+        @test ch_r.viewport.x0 == 1
+        @test ch_r.viewport.x1 == 3
+
+        ctx_r = resolve_chart_render_context(ch_r)
+        @test ctx_r.primary_values ≈ [10.0, 12.0, 11.0]
+        @test ctx_r.secondary_name == "R"
+        @test ctx_r.secondary_bar ≈ mean([4.0, 2.0, 4.0])
+        f3 = SS_FACTORS[3]
+        rbar = mean([4.0, 2.0, 4.0])
+        xbb = mean([10.0, 12.0, 11.0])
+        @test ctx_r.lz.cl ≈ xbb
+        @test ctx_r.lz.sigma ≈ rbar / f3.d2
+        @test ctx_r.lz.ucl ≈ xbb + f3.A2 * rbar
+        # Must NOT re-chunk the three means as if they were individuals
+        # (series-chunk of n=3 on [10,12,11] would yield one group of mean 11)
+        @test length(ctx_r.primary_values) == 3
+
+        # Xbar_S same table
+        ch_s = ChartSpec(
+            name = "CD-XbarS",
+            chart_type = Xbar_S,
+            tools = ["ETCH-A"],
+            col_value = "Value",
+            col_tool = "Tool",
+            col_lot = "Wafer",
+            subgroup_size = 3,
+            usl = 20.0,
+            lsl = 0.0,
+        )
+        materialize_chart_from_table!(ch_s, table)
+        @test get(ch_s.data.meta, "table_subgroups", false) === true
+        @test ch_s.data.meta["secondary_name"] == "s"
+        ctx_s = resolve_chart_render_context(ch_s)
+        @test ctx_s.primary_values ≈ [10.0, 12.0, 11.0]
+        @test ctx_s.secondary_name == "s"
+        s_w01 = std([8.0, 10.0, 12.0]; corrected = true)
+        s_w02 = std([11.0, 12.0, 13.0]; corrected = true)
+        s_w03 = std([9.0, 11.0, 13.0]; corrected = true)
+        sbar = mean([s_w01, s_w02, s_w03])
+        @test ctx_s.secondary_bar ≈ sbar
+        @test ctx_s.lz.sigma ≈ sbar
+        @test ctx_s.lz.ucl ≈ mean([10.0, 12.0, 11.0]) + f3.A3 * sbar
+        # Cpk uses s̄/c4
+        cpk_sigma = sbar / f3.c4
+        cr = compute_capability(ctx_s.primary_values, ctx_s.lz.cl, cpk_sigma; usl = 20.0, lsl = 0.0)
+        @test ctx_s.cpk ≈ cr.cpk
+
+        # Empty col_lot → individuals materialize; series-chunk at resolve (PR7 path)
+        ch_chunk = ChartSpec(
+            chart_type = Xbar_R,
+            tools = ["ETCH-A"],
+            col_value = "Value",
+            col_tool = "Tool",
+            col_lot = "",
+            subgroup_size = 3,
+        )
+        materialize_chart_from_table!(ch_chunk, table)
+        @test get(ch_chunk.data.meta, "table_subgroups", false) !== true
+        @test length(ch_chunk.data.values) == 9  # raw individuals
+        ctx_chunk = resolve_chart_render_context(ch_chunk)
+        @test length(ctx_chunk.primary_values) == 3  # 9/3 series chunks
+        # First chunk is first three ETCH-A rows (W01 sites) — same as column group
+        @test ctx_chunk.primary_values[1] ≈ 10.0
+
+        # Group by Tool column (col_lot points at Tool) — two tools with multi-row
+        table2 = SharedTable(
+            columns = ["Tool", "Value"],
+            rows = [
+                Dict("Tool" => "A", "Value" => "1"),
+                Dict("Tool" => "A", "Value" => "3"),
+                Dict("Tool" => "B", "Value" => "10"),
+                Dict("Tool" => "B", "Value" => "14"),
+                Dict("Tool" => "B", "Value" => "12"),
+            ],
+        )
+        ch_tool = ChartSpec(
+            chart_type = Xbar_R,
+            col_value = "Value",
+            col_tool = "Tool",
+            col_lot = "Tool",
+            tools = String[],
+            subgroup_size = 2,
+        )
+        materialize_chart_from_table!(ch_tool, table2)
+        @test ch_tool.data.values ≈ [2.0, 12.0]  # means of A and B
+        @test ch_tool.data.meta["labels"] == ["A", "B"]
+        @test ch_tool.data.meta["secondary_vals"] ≈ [2.0, 4.0]  # R: 3-1=2, 14-10=4
+        ctx_tool = resolve_chart_render_context(ch_tool)
+        @test length(ctx_tool.primary_values) == 2
+        @test ctx_tool.secondary_bar ≈ 3.0
+
+        # I_MR + col_lot: no table_subgroups; individuals only; lot in point_meta
+        ch_i = ChartSpec(
+            chart_type = I_MR,
+            col_value = "Value",
+            col_lot = "Wafer",
+            tools = ["ETCH-A"],
+            col_tool = "Tool",
+        )
+        materialize_chart_from_table!(ch_i, table)
+        @test get(ch_i.data.meta, "table_subgroups", false) !== true
+        @test length(ch_i.data.values) == 9
+        @test ch_i.data.meta["point_meta"][1]["lot"] == "W01"
     end
 
     @testset "pure chart library CRUD + seed_demos" begin

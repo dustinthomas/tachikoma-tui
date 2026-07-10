@@ -180,6 +180,84 @@ function subgroup_means_and_s(values::AbstractVector{<:Real}, n::Int)
     return (xbar, svals, groups)
 end
 
+# ── Table-sourced subgroups (PR7b): group by column key, not fixed chunks ──
+
+"""
+    group_values_by_keys(values, keys) -> (groups, order)
+
+Partition `values` by parallel `keys` in first-seen key order.
+Empty keys are kept as a single group (key `\"\"`).
+"""
+function group_values_by_keys(
+    values::AbstractVector{<:Real},
+    keys::AbstractVector{<:AbstractString},
+)
+    length(values) == length(keys) ||
+        throw(ArgumentError("values and keys must have the same length"))
+    order = String[]
+    buckets = Dict{String,Vector{Float64}}()
+    for (v, k) in zip(values, keys)
+        ks = String(k)
+        if !haskey(buckets, ks)
+            push!(order, ks)
+            buckets[ks] = Float64[]
+        end
+        push!(buckets[ks], Float64(v))
+    end
+    groups = [buckets[k] for k in order]
+    return (groups, order)
+end
+
+"""
+    subgroup_means_and_ranges_from_groups(groups) -> (xbar, ranges, kept)
+
+Stats from already-partitioned groups. Groups with length < 2 are dropped
+(range undefined / not useful for X̄-R factors).
+"""
+function subgroup_means_and_ranges_from_groups(groups::AbstractVector{<:AbstractVector{<:Real}})
+    xbar = Float64[]
+    ranges = Float64[]
+    kept = Vector{Vector{Float64}}()
+    for g0 in groups
+        g = Float64.(g0)
+        length(g) < 2 && continue
+        push!(kept, g)
+        push!(xbar, mean(g))
+        push!(ranges, maximum(g) - minimum(g))
+    end
+    return (xbar, ranges, kept)
+end
+
+"""
+    subgroup_means_and_s_from_groups(groups) -> (xbar, svals, kept)
+
+Like `subgroup_means_and_ranges_from_groups` but secondary is sample std (corrected=true).
+"""
+function subgroup_means_and_s_from_groups(groups::AbstractVector{<:AbstractVector{<:Real}})
+    xbar = Float64[]
+    svals = Float64[]
+    kept = Vector{Vector{Float64}}()
+    for g0 in groups
+        g = Float64.(g0)
+        length(g) < 2 && continue
+        push!(kept, g)
+        push!(xbar, mean(g))
+        push!(svals, std(g; corrected = true))
+    end
+    return (xbar, svals, kept)
+end
+
+"""Median group size, clamped to [2, 25]; empty → fallback (also clamped)."""
+function _effective_subgroup_n(
+    groups::AbstractVector{<:AbstractVector{<:Real}},
+    fallback::Int,
+)::Int
+    isempty(groups) && return _clamp_subgroup_n(fallback)
+    sizes = sort([length(g) for g in groups])
+    mid = sizes[div(length(sizes) + 1, 2)]
+    return _clamp_subgroup_n(Int(mid))
+end
+
 """Empty but valid series — always a legal ChartSpec.data."""
 empty_workbench_data() = WorkbenchData(values = Float64[], cl = 0.0, sigma = 0.0)
 
@@ -210,6 +288,9 @@ empty_workbench_data() = WorkbenchData(values = Float64[], cl = 0.0, sigma = 0.0
     col_n::String = ""
     col_tool::String = "Tool"
     col_time::String = "Timestamp"
+    # PR7b: optional Lot/Wafer/Chip (or Tool/Timestamp) column for table Xbar subgroups.
+    # Empty → series-chunk of `subgroup_size` on materialized individuals (PR7).
+    col_lot::String = ""
 end
 
 # ── SharedTable + copy-on-map materialize (PR6 / KD25) ──────────────────
@@ -228,6 +309,7 @@ std_or_0(vs) = length(vs) < 2 ? 0.0 : std(vs; corrected = true)
 
 Pure. Operates on the in-memory SharedTable only (no file I/O).
 Filter rows by `ch.tools` when non-empty (via `ch.col_tool`); map `ch.col_value`.
+When `ch.col_lot` is set, each point_meta includes `"lot"` (group key for PR7b Xbar).
 """
 function compute_chart_series(table::SharedTable, ch::ChartSpec)
     values = Float64[]
@@ -236,6 +318,7 @@ function compute_chart_series(table::SharedTable, ch::ChartSpec)
     col_v = ch.col_value
     col_t = ch.col_tool
     col_time = ch.col_time
+    col_lot = ch.col_lot
     filter_tools = !isempty(ch.tools) && !isempty(col_t)
     for row in table.rows
         if filter_tools
@@ -257,12 +340,21 @@ function compute_chart_series(table::SharedTable, ch::ChartSpec)
             string(length(values))
         end
         push!(labels, lab)
-        push!(point_meta, Dict{String,String}(
+        pm = Dict{String,String}(
             "tool" => String(get(row, col_t, "")),
             "timestamp" => String(get(row, col_time, "")),
-        ))
+        )
+        if !isempty(col_lot)
+            pm["lot"] = String(get(row, col_lot, ""))
+        end
+        push!(point_meta, pm)
     end
     return (values, labels, point_meta)
+end
+
+"""True when materialize stored column-grouped X̄ primary (not raw individuals)."""
+function _has_table_subgroups(ch::ChartSpec)::Bool
+    get(ch.data.meta, "table_subgroups", false) === true
 end
 
 """
@@ -270,6 +362,11 @@ end
 
 Copy-on-map: compute series from in-memory table into `ch.data` (WorkbenchData).
 Sets `ch.source = :table`, `ch.live_enabled = false`, resets viewport. No CSV re-read.
+
+PR7b: when `chart_type` is Xbar_R/Xbar_S and `col_lot` is non-empty, group rows by that
+column (Lot/Wafer/Tool/Timestamp/…), store subgroup means as `data.values`, and put
+R or s series + `table_subgroups=true` in meta so the resolver does not re-chunk.
+Otherwise individuals are stored and series-chunk math (PR7) applies at resolve time.
 """
 function materialize_chart_from_table!(
     ch::ChartSpec,
@@ -277,22 +374,79 @@ function materialize_chart_from_table!(
     show_lines = nothing,
 )
     values, labels, pmeta = compute_chart_series(table, ch)
-    ch.data = WorkbenchData(
-        values = values,
-        cl = mean_or_0(values),
-        sigma = std_or_0(values),
-        meta = Dict{String,Any}("labels" => labels, "point_meta" => pmeta),
-    )
+    lines = show_lines === nothing ? DEFAULT_CHART_LINES : show_lines
+    use_col_groups = (ch.chart_type == Xbar_R || ch.chart_type == Xbar_S) &&
+                     !isempty(ch.col_lot) && !isempty(values)
+
+    if use_col_groups
+        keys = [get(pm, "lot", "") for pm in pmeta]
+        groups, order = group_values_by_keys(values, keys)
+        if ch.chart_type == Xbar_R
+            xbar, secondary, kept = subgroup_means_and_ranges_from_groups(groups)
+            sec_name = "R"
+        else
+            xbar, secondary, kept = subgroup_means_and_s_from_groups(groups)
+            sec_name = "s"
+        end
+        # labels/meta only for kept groups (size ≥ 2); match first-seen order of kept keys
+        kept_labels = String[]
+        kept_pmeta = Dict{String,String}[]
+        ki = 0
+        for (g, key) in zip(groups, order)
+            length(g) < 2 && continue
+            ki += 1
+            push!(kept_labels, isempty(key) ? "SG $ki" : key)
+            push!(kept_pmeta, Dict{String,String}(
+                "lot" => key,
+                "is_subgroup" => "true",
+                "size" => string(length(g)),
+            ))
+        end
+        n_eff = _effective_subgroup_n(kept, ch.subgroup_size)
+        ch.data = WorkbenchData(
+            values = xbar,
+            cl = mean_or_0(xbar),
+            sigma = isempty(secondary) ? 0.0 : mean(secondary),
+            meta = Dict{String,Any}(
+                "labels" => kept_labels,
+                "point_meta" => kept_pmeta,
+                "table_subgroups" => true,
+                "secondary_vals" => secondary,
+                "secondary_name" => sec_name,
+                "subgroup_n" => n_eff,
+            ),
+        )
+        plot_vs = xbar
+    else
+        ch.data = WorkbenchData(
+            values = values,
+            cl = mean_or_0(values),
+            sigma = std_or_0(values),
+            meta = Dict{String,Any}("labels" => labels, "point_meta" => pmeta),
+        )
+        plot_vs = values
+    end
+
     ch.source = :table
     ch.live_enabled = false
-    n = length(values)
-    lines = show_lines === nothing ? DEFAULT_CHART_LINES : show_lines
+    n = length(plot_vs)
     if n > 0
         ch.viewport.x0 = 1
         ch.viewport.x1 = n
-        lz = compute_limits_and_zones(values; sigma_method = :mr)
+        if use_col_groups
+            sec = get(ch.data.meta, "secondary_vals", Float64[])
+            n_sg = Int(get(ch.data.meta, "subgroup_n", ch.subgroup_size))
+            lz = auto_limits(
+                plot_vs;
+                chart_type = ch.chart_type,
+                subgroup_size = n_sg,
+                secondary = sec,
+            )
+        else
+            lz = compute_limits_and_zones(plot_vs; sigma_method = :mr)
+        end
         auto_fit_viewport_y!(
-            ch.viewport, values, lz;
+            ch.viewport, plot_vs, lz;
             usl = ch.usl, lsl = ch.lsl, show_lines = lines,
         )
     else
@@ -800,11 +954,14 @@ end
 
 """
     auto_limits(values; chart_type=I_MR, subgroup_size=5, sigma_method=:mr,
-                limits_mode=:auto, manual_cl=nothing, manual_ucl=nothing, manual_lcl=nothing)
+                limits_mode=:auto, manual_cl=nothing, manual_ucl=nothing, manual_lcl=nothing,
+                secondary=nothing)
         -> LimitsAndZones
 
 Type-aware control limits. I_MR uses existing :mr / :std paths.
-Xbar_R / Xbar_S use SS_FACTORS on consecutive series chunks (incomplete tail dropped).
+Xbar_R / Xbar_S use SS_FACTORS on consecutive series chunks (incomplete tail dropped)
+unless `secondary` is provided (PR7b table-column groups): then `values` are already
+subgroup means and `secondary` is the R or s series.
 Attribute p/np/c/u deferred to PR8 (fall back to I_MR).
 Manual kwargs reserved for PR5 (ignored here — do not rewrite manual branch).
 """
@@ -817,11 +974,17 @@ function auto_limits(
     manual_cl = nothing,
     manual_ucl = nothing,
     manual_lcl = nothing,
+    secondary = nothing,
 )::LimitsAndZones
     # manual kwargs intentionally unused (PR5 owns manual branch in resolver)
     if chart_type == Xbar_R
         n = _clamp_subgroup_n(subgroup_size)
-        xbar, ranges, _ = subgroup_means_and_ranges(values, n)
+        if secondary === nothing
+            xbar, ranges, _ = subgroup_means_and_ranges(values, n)
+        else
+            xbar = Float64.(values)
+            ranges = Float64.(secondary)
+        end
         if isempty(xbar)
             return _limits_from_cl_sigma(0.0, 0.0)
         end
@@ -833,7 +996,12 @@ function auto_limits(
         return _limits_xbar(cl, process_sigma, half)
     elseif chart_type == Xbar_S
         n = _clamp_subgroup_n(subgroup_size)
-        xbar, svals, _ = subgroup_means_and_s(values, n)
+        if secondary === nothing
+            xbar, svals, _ = subgroup_means_and_s(values, n)
+        else
+            xbar = Float64.(values)
+            svals = Float64.(secondary)
+        end
         if isempty(xbar)
             return _limits_from_cl_sigma(0.0, 0.0)
         end
@@ -853,10 +1021,16 @@ end
     _primary_and_secondary(ch) -> (primary, secondary_name, secondary_bar)
 
 Series-chunk primary for plotting/WECO; R̄/s̄ for side panel.
+PR7b: when `meta["table_subgroups"]`, `data.values` are already X̄ and secondary is in meta.
 """
 function _primary_and_secondary(ch::ChartSpec)
     vs = ch.data.values
-    if ch.chart_type == Xbar_R
+    if _has_table_subgroups(ch) && (ch.chart_type == Xbar_R || ch.chart_type == Xbar_S)
+        sec = get(ch.data.meta, "secondary_vals", Float64[])
+        name = String(get(ch.data.meta, "secondary_name", ch.chart_type == Xbar_R ? "R" : "s"))
+        bar = isempty(sec) ? nothing : mean(Float64.(sec))
+        return (Float64.(vs), name, bar)
+    elseif ch.chart_type == Xbar_R
         n = _clamp_subgroup_n(ch.subgroup_size)
         xbar, ranges, _ = subgroup_means_and_ranges(vs, n)
         bar = isempty(ranges) ? nothing : mean(ranges)
@@ -916,14 +1090,30 @@ and secondary (R̄/s̄) side-panel stats.
 
 Manual branch (PR5): when `_manual_limits_effective` (mode + all three set + σ>0),
 sigma = (ucl - cl) / 3. Non-positive σ and incomplete manual fall through to auto.
-Auto path: PR7 type-aware auto for Xbar_R / Xbar_S (series chunks); else I_MR/:mr.
+Auto path: PR7 type-aware auto for Xbar_R / Xbar_S (series chunks); PR7b table-column
+subgroups pass precomputed secondary so means are not re-chunked; else I_MR/:mr.
 """
 function resolve_chart_render_context(ch::ChartSpec; sigma_method::Symbol = :mr)::ChartRenderContext
     vs = ch.data.values
     primary, sec_name, sec_bar = _primary_and_secondary(ch)
+    table_sg = _has_table_subgroups(ch)
+    n_sg = if table_sg
+        _clamp_subgroup_n(Int(get(ch.data.meta, "subgroup_n", ch.subgroup_size)))
+    else
+        _clamp_subgroup_n(ch.subgroup_size)
+    end
 
     if _manual_limits_effective(ch)
         lz = _limits_from_manual(ch)
+    elseif table_sg && (ch.chart_type == Xbar_R || ch.chart_type == Xbar_S)
+        sec = get(ch.data.meta, "secondary_vals", Float64[])
+        lz = auto_limits(
+            primary;
+            chart_type = ch.chart_type,
+            subgroup_size = n_sg,
+            sigma_method = sigma_method,
+            secondary = sec,
+        )
     else
         lz = auto_limits(vs; chart_type = ch.chart_type, subgroup_size = ch.subgroup_size,
                          sigma_method = sigma_method)
@@ -935,8 +1125,7 @@ function resolve_chart_render_context(ch::ChartSpec; sigma_method::Symbol = :mr)
 
     # Cpk: Xbar-S unbiases s̄ with c4 (HTML ~2388–2392); Xbar-R/I-MR already process σ̂
     cpk_sigma = if ch.chart_type == Xbar_S && sec_bar !== nothing
-        n = _clamp_subgroup_n(ch.subgroup_size)
-        c4 = SS_FACTORS[n].c4
+        c4 = SS_FACTORS[n_sg].c4
         c4 > 0 ? sec_bar / c4 : lz.sigma
     else
         lz.sigma
@@ -1030,6 +1219,7 @@ export detect_oos, cpk_band, cpk_color_for_band
 export compute_fit_y_range, y_extras_from_limits, fit_viewport_y!, auto_fit_viewport_y!
 export ChartRenderContext, resolve_chart_render_context, point_status, auto_limits
 export SS_FACTORS, subgroup_means_and_ranges, subgroup_means_and_s
+export group_values_by_keys, subgroup_means_and_ranges_from_groups, subgroup_means_and_s_from_groups
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS
 export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_type, chart_type_to_string
@@ -1553,6 +1743,7 @@ function clone_chart!(m::SPCWorkbenchModel, idx::Int)::Int
         col_n = src.col_n,
         col_tool = src.col_tool,
         col_time = src.col_time,
+        col_lot = src.col_lot,
     )
     push!(m.charts, cloned)
     new_idx = length(m.charts)
