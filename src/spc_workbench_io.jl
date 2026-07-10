@@ -264,9 +264,11 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
         push!(charts, ch)
     end
 
-    active_raw = get(d, "active", 1)
+    # Required key (schema v1) — same class as version/charts
+    haskey(d, "active") || return "missing active"
+    active_raw = d["active"]
     active = try
-        Int(active_raw === nothing ? 1 : active_raw)
+        Int(active_raw)
     catch
         return "active must be integer"
     end
@@ -394,10 +396,34 @@ function workbench_from_dict!(m::SPCWorkbenchModel, d)::Union{Nothing,String}
     return nothing
 end
 
+# ── Load/save UX helpers (A4 last_event prefixes) ───────────────────────
+
+function _normalize_load_err(msg::AbstractString)::String
+    s = String(msg)
+    startswith(s, "load err:") && return s
+    return "load err: $s"
+end
+
+function _clear_prompt_kind_keep_buf!(m::SPCWorkbenchModel)
+    # On load err: clear prompt_kind when present; keep prompt_buf for path edit
+    if hasfield(typeof(m), :prompt_kind)
+        setfield!(m, :prompt_kind, nothing)
+    end
+    return nothing
+end
+
+function _set_load_err!(m::SPCWorkbenchModel, msg::AbstractString)::String
+    out = _normalize_load_err(msg)
+    m.last_event = out
+    _clear_prompt_kind_keep_buf!(m)
+    return out
+end
+
 """
     save_workbench(m, path) -> nothing | String
 
-Write schema-v1 JSON to `path`. Sets `m.last_workbench_path` on success.
+Write schema-v1 JSON to `path`. Sets `m.last_workbench_path` and
+`m.last_event = "saved …"` on success; `"save err: …"` on failure.
 """
 function save_workbench(m::SPCWorkbenchModel, path::AbstractString)::Union{Nothing,String}
     try
@@ -408,9 +434,12 @@ function save_workbench(m::SPCWorkbenchModel, path::AbstractString)::Union{Nothi
         if hasfield(typeof(m), :last_workbench_path)
             m.last_workbench_path = String(path)
         end
+        m.last_event = "saved $(basename(String(path)))"
         return nothing
     catch e
-        return "save err: $(sprint(showerror, e))"
+        msg = "save err: $(sprint(showerror, e))"
+        m.last_event = msg
+        return msg
     end
 end
 
@@ -425,20 +454,23 @@ function load_workbench(path::AbstractString)::Union{SPCWorkbenchModel,String}
         text = read(path, String)
         d = JSON.parse(text)
     catch e
-        return "load err: unreadable ($(sprint(showerror, e)))"
+        return _normalize_load_err("unreadable ($(sprint(showerror, e)))")
     end
     m = workbench_from_dict(d)
-    m isa String && return m
+    m isa String && return _normalize_load_err(m)
     if hasfield(typeof(m), :last_workbench_path)
         m.last_workbench_path = String(path)
     end
+    m.last_event = "loaded $(basename(String(path)))"
     return m
 end
 
 """
     load_workbench!(m, path) -> nothing | String
 
-In-session reload into existing model (library W). Fail closed on error.
+In-session reload into existing model (library W). Fail closed on chart mutate.
+Sets `m.last_event` to `"loaded …"` or `"load err: …"`; clears `prompt_kind`
+on err (keeps `prompt_buf` when present).
 """
 function load_workbench!(m::SPCWorkbenchModel, path::AbstractString)::Union{Nothing,String}
     local d
@@ -446,13 +478,16 @@ function load_workbench!(m::SPCWorkbenchModel, path::AbstractString)::Union{Noth
         text = read(path, String)
         d = JSON.parse(text)
     catch e
-        return "load err: unreadable ($(sprint(showerror, e)))"
+        return _set_load_err!(m, "unreadable ($(sprint(showerror, e)))")
     end
     err = workbench_from_dict!(m, d)
-    err !== nothing && return err
+    if err !== nothing
+        return _set_load_err!(m, err)
+    end
     if hasfield(typeof(m), :last_workbench_path)
         m.last_workbench_path = String(path)
     end
+    m.last_event = "loaded $(basename(String(path)))"
     return nothing
 end
 

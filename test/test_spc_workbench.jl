@@ -1422,16 +1422,17 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
         m.charts[1].data.values[1] = 123.456
         m.active = 1
         m.rng = MersenneTwister(4242)
+        rng_before = m.rng
         m.tick = 7
         m.quit = false
         m.live_max = 321
         m.config_open = true
         m.editing = :usl
         m.edit_buf = "partial"
+        m.last_event = "prior"
         snapshot_vals = copy(m.charts[1].data.values)
         snapshot_usl = m.charts[1].usl
         snapshot_n = length(m.charts)
-        snapshot_rng_state = copy(m.rng)
         snapshot_tick = m.tick
         snapshot_live_max = m.live_max
 
@@ -1441,12 +1442,13 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
         err = workbench_from_dict!(m, bad)
         @test err isa AbstractString
         @test occursin("version", err) || occursin("unsupported", err)
-        # unchanged
+        # unchanged charts + preserved rng identity
         @test length(m.charts) == snapshot_n
         @test m.charts[1].data.values == snapshot_vals
         @test m.charts[1].usl == snapshot_usl
         @test m.tick == snapshot_tick
         @test m.live_max == snapshot_live_max
+        @test m.rng === rng_before
         @test m.config_open == true  # fail closed: no partial apply / no clear
         @test m.editing === :usl
 
@@ -1455,13 +1457,27 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
         @test err2 isa AbstractString
         @test length(m.charts) == snapshot_n
         @test m.charts[1].usl == snapshot_usl
+        @test m.rng === rng_before
 
         # missing version
-        err3 = workbench_from_dict!(m, Dict{String,Any}("charts" => [
+        err3 = workbench_from_dict!(m, Dict{String,Any}("active" => 1, "charts" => [
             Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0]),
         ]))
         @test err3 isa AbstractString
         @test length(m.charts) == snapshot_n
+        @test m.rng === rng_before
+
+        # missing active (required key)
+        err_active = workbench_from_dict!(m, Dict{String,Any}(
+            "version" => 1,
+            "charts" => [Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0])],
+        ))
+        @test err_active isa AbstractString
+        @test occursin("active", err_active)
+        @test length(m.charts) == snapshot_n
+        @test m.charts[1].usl == snapshot_usl
+        @test m.charts[1].data.values == snapshot_vals
+        @test m.rng === rng_before
 
         # unknown chart_type
         err4 = workbench_from_dict!(m, Dict{String,Any}(
@@ -1471,13 +1487,36 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
         @test err4 isa AbstractString
         @test length(m.charts) == snapshot_n
         @test m.charts[1].data.values == snapshot_vals
+        @test m.rng === rng_before
 
-        # unreadable path
+        # unreadable path via load_workbench! — last_event prefixed; charts untouched
         err5 = load_workbench!(m, "/tmp/definitely_missing_spc_wb_$(rand(UInt32)).json")
         @test err5 isa AbstractString
-        @test occursin("load err", err5) || occursin("unreadable", err5)
+        @test startswith(err5, "load err:")
+        @test occursin("unreadable", err5)
+        @test startswith(m.last_event, "load err:")
         @test length(m.charts) == snapshot_n
         @test m.charts[1].usl == snapshot_usl
+        @test m.rng === rng_before
+        @test m.config_open == true
+
+        # schema err via load_workbench! also prefixes last_event (path readable)
+        path_bad = joinpath(tempdir(), "spc_wb_bad_$(rand(UInt32)).json")
+        try
+            open(path_bad, "w") do io
+                write(io, """{"version":99,"active":1,"charts":[{"id":"x","name":"y","chart_type":"I-MR","values":[1.0]}]}""")
+            end
+            err6 = load_workbench!(m, path_bad)
+            @test err6 isa AbstractString
+            @test startswith(err6, "load err:")
+            @test occursin("version", err6)
+            @test startswith(m.last_event, "load err:")
+            @test length(m.charts) == snapshot_n
+            @test m.charts[1].usl == snapshot_usl
+            @test m.rng === rng_before
+        finally
+            isfile(path_bad) && rm(path_bad; force = true)
+        end
     end
 
     @testset "load_workbench! replaces charts + clears ephemerals + preserves rng/tick/live_max" begin
@@ -1486,6 +1525,7 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
         _ensure_charts!(m)
         @test length(m.charts) == 3
         m.rng = MersenneTwister(777)
+        rng_before = m.rng
         m.tick = 42
         m.live_max = 150
         m.quit = false
@@ -1495,11 +1535,13 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
         m.hovered = 2
         m.selected = 1
         m.drag_start = (x = 1, y = 2, vp = Viewport())
+        m.last_event = "prior"
 
         path = joinpath(tempdir(), "spc_wb_inplace_$(rand(UInt32)).json")
         try
             src = _make_session()
             @test save_workbench(src, path) === nothing
+            @test startswith(src.last_event, "saved ")
 
             err = load_workbench!(m, path)
             @test err === nothing
@@ -1508,6 +1550,7 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
             @test m.charts[1].usl == 110.0
             @test m.charts[1].enabled_rules["WECO-6"] === true
             @test m.last_workbench_path == path
+            @test startswith(m.last_event, "loaded ")
             # ephemerals cleared
             @test m.config_open == false
             @test m.editing === nothing
@@ -1521,7 +1564,8 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
             @test m.tick == 42
             @test m.live_max == 150
             @test m.quit == false
-            # rng identity preserved (same object)
+            # rng object identity preserved (same object)
+            @test m.rng === rng_before
             @test m.rng isa MersenneTwister
         finally
             isfile(path) && rm(path; force = true)
