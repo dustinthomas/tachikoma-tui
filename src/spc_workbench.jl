@@ -585,11 +585,24 @@ function auto_limits(
 end
 
 """
+    _manual_limits_effective(ch) -> Bool
+
+Same predicate as the resolver manual branch: mode is :manual, all three
+manual_cl/ucl/lcl set, and sigma = (ucl - cl) / 3 is strictly positive.
+Incomplete or non-positive-σ manual falls through to auto (badge + gateway).
+"""
+function _manual_limits_effective(ch::ChartSpec)::Bool
+    ch.limits_mode == :manual || return false
+    (ch.manual_cl === nothing || ch.manual_ucl === nothing || ch.manual_lcl === nothing) && return false
+    return Float64(ch.manual_ucl) > Float64(ch.manual_cl)  # σ = (ucl-cl)/3 > 0
+end
+
+"""
     _limits_from_manual(ch) -> LimitsAndZones
 
 HTML computeChart manual path (~2369–2371): sigma = (ucl - cl) / 3; zones from that sigma.
 Uses provided CL/UCL/LCL as control limits; zone A/B/C from sigma (cl ± kσ).
-Requires manual_cl, manual_ucl, manual_lcl all set (caller checks).
+Requires `_manual_limits_effective(ch)` (caller checks).
 """
 function _limits_from_manual(ch::ChartSpec)::LimitsAndZones
     cl = Float64(ch.manual_cl)
@@ -614,13 +627,13 @@ end
 Pure resolver gateway. Returns canonical lz (with chosen sigma), WECO viol set, cpk, band.
 All OOC/OOS/Cpk decisions and labels must derive from this to guarantee consistency.
 
-Manual branch (PR5): when limits_mode==:manual and manual_cl/ucl/lcl all set,
-sigma = (ucl - cl) / 3. Auto path stays I_MR/:mr until PR7 fills type-aware auto.
+Manual branch (PR5): when `_manual_limits_effective` (mode + all three set + σ>0),
+sigma = (ucl - cl) / 3. Non-positive σ and incomplete manual fall through to auto.
+Auto path stays I_MR/:mr until PR7 fills type-aware auto.
 """
 function resolve_chart_render_context(ch::ChartSpec; sigma_method::Symbol = :mr)::ChartRenderContext
     vs = ch.data.values
-    if ch.limits_mode == :manual &&
-       ch.manual_cl !== nothing && ch.manual_ucl !== nothing && ch.manual_lcl !== nothing
+    if _manual_limits_effective(ch)
         lz = _limits_from_manual(ch)
     else
         # PR7 fills type-aware auto; until then always I_MR :mr path via auto_limits
@@ -2097,8 +2110,8 @@ function view(m::SPCWorkbenchModel, f::Frame)
         act_ch = current_chart(m)
         act_ctx = resolve_chart_render_context(act_ch; sigma_method=:mr)
         lz = act_ctx.lz
-        # Mode badge on n= row (compact; avoids pushing WECO off short side panels)
-        mode_lbl = act_ch.limits_mode === :manual ? "limits:manual" : "limits:auto"
+        # Mode badge = effective gateway path (same predicate as resolve_chart_render_context)
+        mode_lbl = _manual_limits_effective(act_ch) ? "limits:manual" : "limits:auto"
         set_string!(buf, x, y, "n=$n $mode_lbl", tstyle(:text)); y += 1
         set_string!(buf, x, y, "cl=$(round(lz.cl;digits=2)) σ=$(round(lz.sigma;digits=2))", tstyle(:text_dim)); y += 1
         cpk_s = act_ctx.cpk === nothing ? "—" : _fmt(act_ctx.cpk)
@@ -2114,10 +2127,8 @@ function view(m::SPCWorkbenchModel, f::Frame)
         # Hover first (priority over long line list when side is short)
         if (hi = m.hovered) !== nothing && 1 <= hi <= n
             if y <= bottom(side_inner) - 1
-                v = m.data.values[hi]
-                ach = current_chart(m)
-                actx = resolve_chart_render_context(ach; sigma_method=:mr)
-                st = point_status(hi, actx, ach)
+                v = act_ch.data.values[hi]
+                st = point_status(hi, act_ctx, act_ch)
                 stat = st == :oos ? "OOS" : (st == :ooc ? "OOC" : "OK")
                 set_string!(buf, x, y, "h[$hi]=$(round(v;digits=2)) $stat", tstyle(:accent, bold=true))
                 y += 1
@@ -2160,7 +2171,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 bx = bx0
                 for i in 1:8
                     rid = "WECO-$i"
-                    on = get(m.enabled_rules, rid, false)
+                    on = get(act_ch.enabled_rules, rid, false)
                     if bx <= right(side_inner)
                         set_char!(buf, bx, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
                     end
@@ -2179,19 +2190,18 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 end
             end
         end
-        # Last-N WECO violation messages (P1.8 / PR5 — side panel list)
-        side_viols = weco_detect(m.data.values, lz.cl, lz.sigma; enabled_rules = m.enabled_rules)
+        # Last-N WECO msgs by sample index (most recent); chart-scoped data/rules (PR5 / P1.8)
+        side_viols = weco_detect(act_ch.data.values, lz.cl, lz.sigma; enabled_rules = act_ch.enabled_rules)
+        show_viols = _side_viol_msgs_by_index(side_viols; n = SIDE_VIOL_MSG_MAX)
         nv = length(side_viols)
         if y <= bot
             set_string!(buf, x, y, "Viols: $nv", nv > 0 ? tstyle(:warning) : tstyle(:text_dim))
             y += 1
         end
-        if nv > 0
+        if !isempty(show_viols)
             maxw = max(4, side_inner.width - 1)
-            start_i = max(1, nv - SIDE_VIOL_MSG_MAX + 1)
-            for vi in start_i:nv
+            for v in show_viols
                 y > bot && break
-                v = side_viols[vi]
                 line = _side_trunc("$(v.rule) $(v.msg)", maxw)
                 set_string!(buf, x, y, line, tstyle(:warning))
                 y += 1
@@ -2264,7 +2274,7 @@ function _fmt(x)
     x < 1 ? string(round(x; digits=3)) : string(round(x; digits=2))
 end
 
-# Side-panel WECO violation message list (last N; PR5 / P1.8)
+# Side-panel WECO violation message list (last N by sample index; PR5 / P1.8)
 const SIDE_VIOL_MSG_MAX = 5
 
 function _side_trunc(s::AbstractString, maxw::Int)::String
@@ -2277,6 +2287,24 @@ function _side_trunc(s::AbstractString, maxw::Int)::String
         print(io, c)
     end
     String(take!(io))
+end
+
+"""
+    _side_viol_msgs_by_index(viols; n=SIDE_VIOL_MSG_MAX) -> Vector{WECOViolation}
+
+Policy: last-N by **sample index** (most recent points), not rule-number tail of
+`weco_detect` order. Stable secondary key is rule name. Returns ascending index
+order for display (oldest of the selected window first).
+"""
+function _side_viol_msgs_by_index(
+    viols::AbstractVector{WECOViolation};
+    n::Int = SIDE_VIOL_MSG_MAX,
+)::Vector{WECOViolation}
+    isempty(viols) && return WECOViolation[]
+    n <= 0 && return WECOViolation[]
+    sorted = sort(collect(viols); by = v -> (v.index, v.rule))
+    start = max(1, length(sorted) - n + 1)
+    return sorted[start:end]
 end
 
 # ── Dedicated Help page (adapted from HTML quickstart + WECO defs + workflow) ──

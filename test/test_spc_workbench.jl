@@ -512,6 +512,29 @@ include("../src/spc_workbench.jl")
         lz_auto = auto_limits(vs; sigma_method = :mr)
         @test ctx_p.lz.cl == lz_auto.cl
         @test ctx_p.lz.sigma == lz_auto.sigma
+        @test _manual_limits_effective(ch_partial) === false
+        # Non-positive sigma (ucl <= cl) falls through to auto
+        ch_zero = ChartSpec(
+            data = WorkbenchData(values = vs, cl = 0.0, sigma = 1.0),
+            limits_mode = :manual,
+            manual_cl = 10.0,
+            manual_ucl = 10.0,
+            manual_lcl = 7.0,
+        )
+        ctx_z = resolve_chart_render_context(ch_zero)
+        @test _manual_limits_effective(ch_zero) === false
+        @test ctx_z.lz.cl == lz_auto.cl
+        @test ctx_z.lz.sigma == lz_auto.sigma
+        ch_neg = ChartSpec(
+            data = WorkbenchData(values = vs, cl = 0.0, sigma = 1.0),
+            limits_mode = :manual,
+            manual_cl = 10.0,
+            manual_ucl = 7.0,
+            manual_lcl = 4.0,
+        )
+        @test _manual_limits_effective(ch_neg) === false
+        ctx_n = resolve_chart_render_context(ch_neg)
+        @test ctx_n.lz.cl == lz_auto.cl
         # Auto path still ignores manual_* when mode is :auto
         ch_auto = ChartSpec(
             data = WorkbenchData(values = vs, cl = 0.0, sigma = 1.0),
@@ -523,6 +546,20 @@ include("../src/spc_workbench.jl")
         ctx_a = resolve_chart_render_context(ch_auto)
         @test ctx_a.lz.cl == lz_auto.cl
         @test ctx_a.lz.cl != 99.0
+        @test _manual_limits_effective(ch) === true
+        # Last-N WECO msgs policy: by sample index (most recent), not rule-number tail
+        fake = [
+            WECOViolation("WECO-1", 2, "early"),
+            WECOViolation("WECO-8", 10, "late-rule8"),
+            WECOViolation("WECO-1", 9, "late-w1"),
+            WECOViolation("WECO-2", 5, "mid"),
+            WECOViolation("WECO-3", 8, "mid-late"),
+            WECOViolation("WECO-1", 1, "oldest"),
+        ]
+        last3 = _side_viol_msgs_by_index(fake; n = 3)
+        @test length(last3) == 3
+        @test [v.index for v in last3] == [8, 9, 10]
+        @test last3[2].rule == "WECO-1" && last3[3].rule == "WECO-8"
     end
 
     @testset "pure chart library CRUD + seed_demos" begin
@@ -1044,6 +1081,18 @@ end
         side2 = join([T.row_text(tb2, i) for i = 1:36 if T.row_text(tb2, i) !== nothing], "\n")
         @test occursin("limits:auto", side2)
         @test !occursin("limits:manual", side2)
+
+        # Incomplete manual (missing lcl) → effective auto badge (same gateway predicate)
+        ch.limits_mode = :manual
+        ch.manual_cl = cl
+        ch.manual_ucl = cl + 3 * s
+        ch.manual_lcl = nothing
+        @test _manual_limits_effective(ch) === false
+        tb3 = T.TestBackend(100, 36); T.reset!(tb3.buf)
+        T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 100, 36), [], []))
+        side3 = join([T.row_text(tb3, i) for i = 1:36 if T.row_text(tb3, i) !== nothing], "\n")
+        @test occursin("limits:auto", side3)
+        @test !occursin("limits:manual", side3)
     end
 
     @testset "side stats WECO: blank gap after Specs + rule numbers under bubbles" begin
