@@ -1143,12 +1143,14 @@ include("../src/spc_workbench.jl")
         @test length(m_del.charts) == 2
         # After delete of chart before active: active clamps to former chart2 now at index 1
         panes_del = dashboard_pane_charts(m_del; k = 3)
-        @test length(panes_del) >= 1
-        # Must not throw and must only reference remaining charts
+        # Must not throw and must only reference remaining charts in order
         remaining_ids = Set(c.id for c in m_del.charts)
         @test all(c -> c.id in remaining_ids, panes_del)
-        # former charts[3] still present as neighbor when active is former-2
-        @test any(c -> c.id == id_next || c.id == id_active, panes_del)
+        # Exact neighborhood: primary = former-active, secondary = former next neighbor
+        @test length(panes_del) == 2
+        @test panes_del[1].id == id_active
+        @test panes_del[2].id == id_next
+        @test m_del.active == 1
 
         # delete last remaining extra while active is last → single primary, no charts[3]
         m_two = SPCWorkbenchModel(data = d, paused = true)
