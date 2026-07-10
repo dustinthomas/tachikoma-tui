@@ -128,6 +128,126 @@ empty_workbench_data() = WorkbenchData(values = Float64[], cl = 0.0, sigma = 0.0
     manual_lcl::Union{Float64,Nothing} = nothing
     subgroup_size::Int = 5
     live_enabled::Bool = true
+    # Phase B (PR6): SharedTable provenance + column maps (copy-on-map into data)
+    source::Symbol = :series   # :series | :table
+    col_value::String = "Value"
+    col_n::String = ""
+    col_tool::String = "Tool"
+    col_time::String = "Timestamp"
+end
+
+# ── SharedTable + copy-on-map materialize (PR6 / KD25) ──────────────────
+
+"""In-memory shared tabular dataset. CSV is ingress only — never re-read on materialize."""
+@kwdef mutable struct SharedTable
+    columns::Vector{String} = String[]
+    rows::Vector{Dict{String,String}} = Dict{String,String}[]
+end
+
+mean_or_0(vs) = isempty(vs) ? 0.0 : mean(vs)
+std_or_0(vs) = length(vs) < 2 ? 0.0 : std(vs; corrected = true)
+
+"""
+    compute_chart_series(table, ch) -> (values, labels, point_meta)
+
+Pure. Operates on the in-memory SharedTable only (no file I/O).
+Filter rows by `ch.tools` when non-empty (via `ch.col_tool`); map `ch.col_value`.
+"""
+function compute_chart_series(table::SharedTable, ch::ChartSpec)
+    values = Float64[]
+    labels = String[]
+    point_meta = Vector{Dict{String,String}}()
+    col_v = ch.col_value
+    col_t = ch.col_tool
+    col_time = ch.col_time
+    filter_tools = !isempty(ch.tools) && !isempty(col_t)
+    for row in table.rows
+        if filter_tools
+            tool_val = get(row, col_t, "")
+            if !(String(tool_val) in ch.tools)
+                continue
+            end
+        end
+        isempty(col_v) && continue
+        cell = get(row, col_v, "")
+        isempty(cell) && continue
+        v = tryparse(Float64, cell)
+        v === nothing && continue
+        push!(values, Float64(v))
+        lab = if !isempty(col_time)
+            tcell = get(row, col_time, "")
+            isempty(tcell) ? string(length(values)) : String(tcell)
+        else
+            string(length(values))
+        end
+        push!(labels, lab)
+        push!(point_meta, Dict{String,String}(
+            "tool" => String(get(row, col_t, "")),
+            "timestamp" => String(get(row, col_time, "")),
+        ))
+    end
+    return (values, labels, point_meta)
+end
+
+"""
+    materialize_chart_from_table!(ch, table; show_lines=...)
+
+Copy-on-map: compute series from in-memory table into `ch.data` (WorkbenchData).
+Sets `ch.source = :table`, `ch.live_enabled = false`, resets viewport. No CSV re-read.
+"""
+function materialize_chart_from_table!(
+    ch::ChartSpec,
+    table::SharedTable;
+    show_lines = nothing,
+)
+    values, labels, pmeta = compute_chart_series(table, ch)
+    ch.data = WorkbenchData(
+        values = values,
+        cl = mean_or_0(values),
+        sigma = std_or_0(values),
+        meta = Dict{String,Any}("labels" => labels, "point_meta" => pmeta),
+    )
+    ch.source = :table
+    ch.live_enabled = false
+    n = length(values)
+    lines = show_lines === nothing ? DEFAULT_CHART_LINES : show_lines
+    if n > 0
+        ch.viewport.x0 = 1
+        ch.viewport.x1 = n
+        lz = compute_limits_and_zones(values; sigma_method = :mr)
+        auto_fit_viewport_y!(
+            ch.viewport, values, lz;
+            usl = ch.usl, lsl = ch.lsl, show_lines = lines,
+        )
+    else
+        ch.viewport.x0 = 0
+        ch.viewport.x1 = 0
+        ch.viewport.ylo = 0.0
+        ch.viewport.yhi = 1.0
+    end
+    return ch
+end
+
+"""Build SharedTable from CsvParseOk-like columns + row vectors (in-memory only)."""
+function shared_table_from_columns_rows(
+    columns::Vector{String},
+    rows::Vector{<:AbstractVector{<:AbstractString}},
+)::SharedTable
+    out_rows = Dict{String,String}[]
+    for row in rows
+        d = Dict{String,String}()
+        for (i, c) in enumerate(columns)
+            d[c] = i <= length(row) ? String(row[i]) : ""
+        end
+        push!(out_rows, d)
+    end
+    return SharedTable(columns = copy(columns), rows = out_rows)
+end
+
+"""Replace `m.table` from parsed CSV columns/rows (ingress only; KD25)."""
+function fill_shared_table!(m, columns::Vector{String}, rows::Vector{<:AbstractVector{<:AbstractString}})
+    m.table = shared_table_from_columns_rows(columns, rows)
+    return m.table
 end
 
 # Chart limit-line visibility (side panel params + which lines are drawn on the plot)
@@ -734,6 +854,8 @@ export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS
 export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_type, chart_type_to_string
 export I_MR, Xbar_R, Xbar_S, p_chart, np_chart, c_chart, u_chart
+export SharedTable, mean_or_0, std_or_0, compute_chart_series, materialize_chart_from_table!
+export shared_table_from_columns_rows, fill_shared_table!
 
 # UI requires Tachikoma (slices 2+). Pure tests include will pull it in.
 using Tachikoma
@@ -1075,12 +1197,18 @@ end
     charts::Vector{ChartSpec} = ChartSpec[]
     active::Int = 1
     library_selected::Int = 1
-    view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap
+    view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder
     # Seed policy when charts empty — NEVER flip default from :triple
     seed_demos::Symbol = :triple     # :triple | :single | :none
     tools::Vector{ToolEntry} = ToolEntry[]
     # Prefill only for save/load prompts — never silent write to default path
     last_workbench_path::String = ""
+    # Phase B (PR6 / KD25): in-memory SharedTable after CSV ingress
+    table::SharedTable = SharedTable()
+    # Builder form state (keyboard-only modal)
+    builder_selected::Int = 1
+    builder_editing::Bool = false
+    builder_buf::String = ""
 end
 
 should_quit(m::SPCWorkbenchModel) = m.quit
@@ -1240,6 +1368,11 @@ function clone_chart!(m::SPCWorkbenchModel, idx::Int)::Int
         manual_lcl = src.manual_lcl,
         subgroup_size = src.subgroup_size,
         live_enabled = src.live_enabled,
+        source = src.source,
+        col_value = src.col_value,
+        col_n = src.col_n,
+        col_tool = src.col_tool,
+        col_time = src.col_time,
     )
     push!(m.charts, cloned)
     new_idx = length(m.charts)
@@ -1303,12 +1436,211 @@ end
 
 export ToolEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
 
+# Builder form field order (PR6 minimal form)
+const BUILDER_FIELDS = [
+    :name, :col_value, :col_tool, :tools, :limits_mode,
+    :manual_cl, :manual_ucl, :manual_lcl, :chart_type,
+]
+const BUILDER_FIELD_LABELS = Dict{Symbol,String}(
+    :name => "Name",
+    :col_value => "Value col",
+    :col_tool => "Tool col",
+    :tools => "Tools (csv)",
+    :limits_mode => "Limits mode",
+    :manual_cl => "Manual CL",
+    :manual_ucl => "Manual UCL",
+    :manual_lcl => "Manual LCL",
+    :chart_type => "Chart type",
+)
+const _CHART_TYPE_CYCLE = ChartType[I_MR, Xbar_R, Xbar_S, p_chart, np_chart, c_chart, u_chart]
+
+function _builder_field_value(ch::ChartSpec, field::Symbol)::String
+    if field === :name
+        return ch.name
+    elseif field === :col_value
+        return ch.col_value
+    elseif field === :col_tool
+        return ch.col_tool
+    elseif field === :tools
+        return join(ch.tools, ",")
+    elseif field === :limits_mode
+        return String(ch.limits_mode)
+    elseif field === :manual_cl
+        return ch.manual_cl === nothing ? "" : string(ch.manual_cl)
+    elseif field === :manual_ucl
+        return ch.manual_ucl === nothing ? "" : string(ch.manual_ucl)
+    elseif field === :manual_lcl
+        return ch.manual_lcl === nothing ? "" : string(ch.manual_lcl)
+    elseif field === :chart_type
+        return chart_type_to_string(ch.chart_type)
+    end
+    return ""
+end
+
+function _builder_apply_buf!(ch::ChartSpec, field::Symbol, buf::AbstractString)
+    s = String(buf)
+    if field === :name
+        ch.name = isempty(strip(s)) ? ch.name : String(strip(s))
+    elseif field === :col_value
+        ch.col_value = String(strip(s))
+    elseif field === :col_tool
+        ch.col_tool = String(strip(s))
+    elseif field === :tools
+        parts = [String(strip(p)) for p in split(s, ',')]
+        ch.tools = filter(!isempty, parts)
+    elseif field === :limits_mode
+        ls = lowercase(strip(s))
+        if ls == "manual"
+            ch.limits_mode = :manual
+        elseif ls == "auto"
+            ch.limits_mode = :auto
+        end
+    elseif field === :manual_cl
+        ch.manual_cl = isempty(strip(s)) ? nothing : tryparse(Float64, strip(s))
+    elseif field === :manual_ucl
+        ch.manual_ucl = isempty(strip(s)) ? nothing : tryparse(Float64, strip(s))
+    elseif field === :manual_lcl
+        ch.manual_lcl = isempty(strip(s)) ? nothing : tryparse(Float64, strip(s))
+    elseif field === :chart_type
+        ct = parse_chart_type(strip(s))
+        ct !== nothing && (ch.chart_type = ct)
+    end
+    return nothing
+end
+
+function _builder_toggle_or_start_edit!(m::SPCWorkbenchModel, ch::ChartSpec)
+    field = BUILDER_FIELDS[clamp(m.builder_selected, 1, length(BUILDER_FIELDS))]
+    if field === :limits_mode
+        ch.limits_mode = ch.limits_mode === :auto ? :manual : :auto
+        m.last_event = "limits $(ch.limits_mode)"
+        return
+    elseif field === :chart_type
+        idx = findfirst(==(ch.chart_type), _CHART_TYPE_CYCLE)
+        idx = idx === nothing ? 1 : (idx % length(_CHART_TYPE_CYCLE)) + 1
+        ch.chart_type = _CHART_TYPE_CYCLE[idx]
+        m.last_event = "type $(chart_type_to_string(ch.chart_type))"
+        return
+    end
+    m.builder_editing = true
+    m.builder_buf = _builder_field_value(ch, field)
+    m.last_event = "edit $(get(BUILDER_FIELD_LABELS, field, string(field)))"
+end
+
+function _builder_apply_and_materialize!(m::SPCWorkbenchModel)
+    _ensure_charts!(m)
+    ch = current_chart(m)
+    if m.builder_editing
+        field = BUILDER_FIELDS[clamp(m.builder_selected, 1, length(BUILDER_FIELDS))]
+        _builder_apply_buf!(ch, field, m.builder_buf)
+        m.builder_editing = false
+        m.builder_buf = ""
+    end
+    nrows = length(m.table.rows)
+    if nrows > 0
+        materialize_chart_from_table!(ch, m.table; show_lines = m.show_chart_lines)
+        m.last_event = "materialized $(length(ch.data.values)) pts from table"
+    else
+        m.last_event = "applied builder (empty table)"
+    end
+    # Push chart → legacy mirrors (materialize owns ch.data; do NOT _sync_active_back!)
+    m.data = ch.data
+    m.viewport = ch.viewport
+    m.usl = ch.usl
+    m.target = ch.target
+    m.lsl = ch.lsl
+    m.enabled_rules = ch.enabled_rules
+    m.view_mode = :dashboard
+    m.builder_editing = false
+    m.builder_buf = ""
+    return nothing
+end
+
+function _handle_builder_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
+    _ensure_charts!(m)
+    ch = current_chart(m)
+    nfields = length(BUILDER_FIELDS)
+
+    # Close mode — never quit (Esc/q) when not mid-edit; mid-edit Esc cancels edit only
+    if m.builder_editing
+        if evt.key == :escape
+            m.builder_editing = false
+            m.builder_buf = ""
+            m.last_event = "edit cancel"
+            return
+        elseif evt.key == :enter
+            field = BUILDER_FIELDS[clamp(m.builder_selected, 1, nfields)]
+            _builder_apply_buf!(ch, field, m.builder_buf)
+            m.builder_editing = false
+            m.builder_buf = ""
+            m.last_event = "field set"
+            return
+        elseif evt.key == :backspace
+            m.builder_buf = isempty(m.builder_buf) ? "" : chop(m.builder_buf)
+            m.last_event = "edit: $(m.builder_buf)"
+            return
+        elseif evt.key == :char
+            # q during edit is literal (or we allow cancel with empty — treat as char)
+            m.builder_buf *= string(evt.char)
+            m.last_event = "edit: $(m.builder_buf)"
+            return
+        end
+        return
+    end
+
+    if evt.key == :escape || (evt.key == :char && (evt.char == 'q' || evt.char == 'Q' || evt.char == 'b' || evt.char == 'B'))
+        m.view_mode = :dashboard
+        m.builder_editing = false
+        m.builder_buf = ""
+        m.last_event = "builder closed"
+        return
+    end
+
+    if evt.key == :up
+        m.builder_selected = max(1, m.builder_selected - 1)
+        m.last_event = "builder up"
+        return
+    elseif evt.key == :down
+        m.builder_selected = min(nfields, m.builder_selected + 1)
+        m.last_event = "builder down"
+        return
+    elseif evt.key == :enter || (evt.key == :char && evt.char == ' ')
+        _builder_toggle_or_start_edit!(m, ch)
+        return
+    elseif evt.key == :char
+        c = evt.char
+        if c == 'a' || c == 'A'
+            _builder_apply_and_materialize!(m)
+            return
+        elseif '1' <= c <= '8'
+            rid = "WECO-$(parse(Int, string(c)))"
+            ch.enabled_rules[rid] = !get(ch.enabled_rules, rid, false)
+            m.enabled_rules[rid] = ch.enabled_rules[rid]
+            m.last_event = "toggle $rid"
+            return
+        elseif c == 'y' || c == 'Y'
+            # cycle chart type shortcut
+            idx = findfirst(==(ch.chart_type), _CHART_TYPE_CYCLE)
+            idx = idx === nothing ? 1 : (idx % length(_CHART_TYPE_CYCLE)) + 1
+            ch.chart_type = _CHART_TYPE_CYCLE[idx]
+            m.last_event = "type $(chart_type_to_string(ch.chart_type))"
+            return
+        end
+    end
+    return
+end
+
 # ── Update (Key + Mouse, full fidelity) ─────────────────────────────────
 
 function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     _ensure_charts!(m)
     ch = current_chart(m)
     n = length(m.data.values)
+
+    # Builder modal — Esc/q close without quit (before global quit handler)
+    if m.view_mode == :builder
+        _handle_builder_keys!(m, evt)
+        return
+    end
 
     # view mode overlays (help/keymap) close on esc/q or re-toggle
     if m.view_mode == :help || m.view_mode == :keymap
@@ -1526,6 +1858,14 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.view_mode = :keymap
             m.last_event = "keymap open"
             return
+        elseif c == 'b' || c == 'B'
+            # PR6: open chart builder for active chart (manual limits + mapping)
+            m.view_mode = :builder
+            m.builder_selected = 1
+            m.builder_editing = false
+            m.builder_buf = ""
+            m.last_event = "builder open"
+            return
         elseif c == ']' || c == '>'
             m.active = min(length(m.charts), m.active + 1)
             _ensure_charts!(m)
@@ -1557,7 +1897,9 @@ end
 
 function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     _ensure_charts!(m)
-    if m.config_open || m.editing !== nothing || m.view_mode == :help || m.view_mode == :keymap
+    if m.config_open || m.editing !== nothing ||
+       m.view_mode == :help || m.view_mode == :keymap ||
+       m.view_mode == :library || m.view_mode == :builder
         m.last_event = string(evt.action, " ", evt.button, " (modal)")
         m.hover_x = nothing
         m.hovered = nothing
@@ -1653,12 +1995,15 @@ function view(m::SPCWorkbenchModel, f::Frame)
         return
     end
 
-    # Mode overlays: help / keymap (new dedicated pages)
+    # Mode overlays: help / keymap / builder (dedicated pages; no dashboard bleed)
     if m.view_mode == :help
         _render_help_page!(buf, area, m)
         return
     elseif m.view_mode == :keymap
         _render_keymap_page!(buf, area, m)
+        return
+    elseif m.view_mode == :builder
+        _render_builder_page!(buf, area, m)
         return
     end
 
@@ -2328,6 +2673,7 @@ function _render_help_page!(buf, area, m)
         "  c/C     open/close WECO rule config (1-8 toggle; Tab→Lines→Visual)",
         "  v/V     open chart-line visibility config (CL/±σ/specs)",
         "  o/O     open Visual Preferences (solid series line, …)",
+        "  b/B     open chart builder (name, cols, tools, manual limits, WECO)",
         "  u/U t/T l/L  edit USL / Target / LSL (enter to set, esc cancel)",
         "  s/S     clear all spec limits",
         "  1..8    toggle WECO rule directly (or 1-5 line keys in Lines tab)",
@@ -2338,7 +2684,7 @@ function _render_help_page!(buf, area, m)
         "  [ ]     switch active chart (multi-dashboard)",
         "  h/?     this help",
         "  k       keyboard map page",
-        "  q/esc   quit",
+        "  q/esc   quit (close builder/help first)",
         "",
         "RICH VISUALS:",
         "  ◆ = OOC (WECO violation, accent)",
@@ -2366,12 +2712,13 @@ function _render_keymap_page!(buf, area, m)
         "  g/G         Toggle live_enabled on active chart",
         "  r R z Z     Reset view (full range + auto y)",
         "  c C / v V / o O  Config WECO / Lines / Visual prefs",
+        "  b B         Chart builder (manual limits, cols, tools)",
         "  u t l / s   Edit USL/Target/LSL / clear specs",
         "  1-8         Toggle WECO-N (or 1-5 in Lines tab)",
         "  [ ] < >     Prev / Next chart (dashboard)",
         "  ← →         Pan left/right",
         "  h ? / k     Help / This keymap",
-        "  q Esc       Quit",
+        "  q Esc       Quit (in builder: close mode, not quit)",
         "",
         "MOUSE:",
         "  Move        Hover + vertical follow │ + tooltip",
@@ -2382,10 +2729,60 @@ function _render_keymap_page!(buf, area, m)
         "  Wheel down  Zoom out",
         "",
         "Config: Tab WECO↔Lines; ↑↓/digits/space; Esc/c/v close. Lines ●=draw on chart.",
+        "Builder: ↑↓ fields; Enter edit/toggle; a apply/materialize; 1-8 WECO; y type.",
     ]
     for (i, ln) in enumerate(kbd)
         if y + i - 1 > bottom(area); break; end
         set_string!(buf, area.x + 2, y + i - 1, ln, tstyle(i==1 || startswith(ln,"MOUSE") ? :accent : :text))
+    end
+end
+
+# ── Builder page (PR6) — keyboard form; no dashboard chrome ─────────────
+function _render_builder_page!(buf, area, m)
+    _ensure_charts!(m)
+    ch = current_chart(m)
+    set_string!(buf, area.x + 1, area.y,
+        "BUILDER — $(ch.name)  (Esc/q close · ↑↓ · Enter edit · a apply · 1-8 WECO · y type)",
+        tstyle(:title, bold = true))
+    y = area.y + 2
+    nfields = length(BUILDER_FIELDS)
+    for (i, field) in enumerate(BUILDER_FIELDS)
+        y > bottom(area) - 2 && break
+        sel = i == m.builder_selected ? "▶ " : "  "
+        lbl = get(BUILDER_FIELD_LABELS, field, string(field))
+        val = if m.builder_editing && i == m.builder_selected
+            m.builder_buf * "▌"
+        else
+            v = _builder_field_value(ch, field)
+            isempty(v) ? "—" : v
+        end
+        sty = i == m.builder_selected ? tstyle(:accent, bold = true) : tstyle(:text)
+        set_string!(buf, area.x + 2, y, "$sel$i $lbl: $val", sty)
+        y += 1
+    end
+    y += 1
+    if y <= bottom(area) - 1
+        weco_parts = String[]
+        for i in 1:8
+            rid = "WECO-$i"
+            on = get(ch.enabled_rules, rid, false)
+            push!(weco_parts, on ? "$(i)●" : "$(i)○")
+        end
+        set_string!(buf, area.x + 2, y, "WECO: " * join(weco_parts, " "), tstyle(:text))
+        y += 1
+    end
+    if y <= bottom(area) - 1
+        nrows = length(m.table.rows)
+        ncols = length(m.table.columns)
+        set_string!(buf, area.x + 2, y,
+            "Table: $nrows rows · $ncols cols · source=$(ch.source) · live=$(ch.live_enabled)",
+            tstyle(:text_dim))
+        y += 1
+    end
+    if y <= bottom(area) - 1
+        set_string!(buf, area.x + 2, y,
+            "last=$(m.last_event)",
+            tstyle(:text_dim))
     end
 end
 

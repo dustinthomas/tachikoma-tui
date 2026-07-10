@@ -253,6 +253,8 @@ function import_csv_new_chart!(
             usl = ch.usl, lsl = ch.lsl, show_lines = m.show_chart_lines,
         )
     end
+    # PR6 / KD25: CSV ingress fills in-memory SharedTable once (no re-read on materialize)
+    fill_shared_table!(m, parsed.columns, parsed.rows)
     # Safety: never leave charts shorter than before on success path
     @assert length(m.charts) == n_before + 1
     # Focus imported series (runner load= / CLI ingress surfaces CSV, not Primary demo)
@@ -297,6 +299,8 @@ function import_csv_into_model!(
         m.last_event = _import_err_event(parsed)
         return parsed
     end
+    # PR6 / KD25: refresh in-memory SharedTable from this CSV ingress
+    fill_shared_table!(m, parsed.columns, parsed.rows)
     m.paused = true
     m.last_event = "imported $(length(parsed.values)) values from $path"
     if idx == clamp(m.active, 1, length(m.charts))
@@ -433,6 +437,11 @@ function _chart_to_dict(ch::ChartSpec)::Dict{String,Any}
         "manual_lcl" => ch.manual_lcl,
         "subgroup_size" => ch.subgroup_size,
         "live_enabled" => ch.live_enabled,  # always write
+        "source" => String(ch.source),
+        "col_value" => ch.col_value,
+        "col_n" => ch.col_n,
+        "col_tool" => ch.col_tool,
+        "col_time" => ch.col_time,
         "viewport" => Dict{String,Any}(
             "x0" => ch.viewport.x0,
             "x1" => ch.viewport.x1,
@@ -508,6 +517,19 @@ function _chart_from_dict(cd)::Union{ChartSpec,String}
     # Safe default: omitted live_enabled → false (always written by workbench_to_dict)
     live_enabled = _json_bool(get(cd, "live_enabled", nothing), false)
 
+    src_raw = get(cd, "source", "series")
+    source = if src_raw === nothing || src_raw == "series" || src_raw === :series
+        :series
+    elseif src_raw == "table" || src_raw === :table
+        :table
+    else
+        :series  # unknown → safe series provenance
+    end
+    col_value = String(get(cd, "col_value", "Value") === nothing ? "Value" : get(cd, "col_value", "Value"))
+    col_n = String(get(cd, "col_n", "") === nothing ? "" : get(cd, "col_n", ""))
+    col_tool = String(get(cd, "col_tool", "Tool") === nothing ? "Tool" : get(cd, "col_tool", "Tool"))
+    col_time = String(get(cd, "col_time", "Timestamp") === nothing ? "Timestamp" : get(cd, "col_time", "Timestamp"))
+
     vp = _viewport_from_json(get(cd, "viewport", nothing), data; usl = usl, lsl = lsl)
     vp isa String && return vp
 
@@ -531,6 +553,11 @@ function _chart_from_dict(cd)::Union{ChartSpec,String}
         manual_lcl = manual_lcl,
         subgroup_size = subgroup_size,
         live_enabled = live_enabled,
+        source = source,
+        col_value = col_value isa AbstractString ? String(col_value) : "Value",
+        col_n = col_n isa AbstractString ? String(col_n) : "",
+        col_tool = col_tool isa AbstractString ? String(col_tool) : "Tool",
+        col_time = col_time isa AbstractString ? String(col_time) : "Timestamp",
     )
 end
 

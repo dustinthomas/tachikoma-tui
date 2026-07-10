@@ -432,11 +432,82 @@ include("../src/spc_workbench.jl")
         @test ch.owner == ""
         @test ch.tools == String[]
         @test ch.manual_cl === nothing
+        # Phase B column maps / provenance defaults (PR6)
+        @test ch.source === :series
+        @test ch.col_value == "Value"
+        @test ch.col_n == ""
+        @test ch.col_tool == "Tool"
+        @test ch.col_time == "Timestamp"
         # backward-compat construction still works
         ch2 = ChartSpec(name = "legacy", data = WorkbenchData(values=[1.0], cl=1.0, sigma=0.1))
         @test ch2.name == "legacy"
         @test ch2.chart_type === I_MR
         @test ch2.live_enabled === true
+        @test ch2.source === :series
+    end
+
+    @testset "SharedTable + compute_chart_series + materialize copy-on-map (PR6)" begin
+        @test mean_or_0(Float64[]) == 0.0
+        @test mean_or_0([1.0, 3.0]) == 2.0
+        @test std_or_0(Float64[]) == 0.0
+        @test std_or_0([1.0]) == 0.0
+        @test std_or_0([1.0, 3.0]) ≈ std([1.0, 3.0]; corrected = true)
+
+        # Multi-tool filter against in-memory table (Film-PTPECVD01 style)
+        table = SharedTable(
+            columns = ["Timestamp", "Tool", "Value"],
+            rows = [
+                Dict("Timestamp" => "t1", "Tool" => "Film-PTPECVD01", "Value" => "1303"),
+                Dict("Timestamp" => "t2", "Tool" => "Film-PTPECVD01", "Value" => "1305"),
+                Dict("Timestamp" => "t3", "Tool" => "OtherTool", "Value" => "999"),
+                Dict("Timestamp" => "t4", "Tool" => "Film-PTPECVD01", "Value" => "1299"),
+                Dict("Timestamp" => "t5", "Tool" => "Film-PTPECVD01", "Value" => ""),  # skip empty
+                Dict("Timestamp" => "t6", "Tool" => "Film-PTPECVD01", "Value" => "x"),  # skip non-numeric
+            ],
+        )
+        ch = ChartSpec(
+            name = "Film-Thickness-1.3um",
+            tools = ["Film-PTPECVD01"],
+            col_value = "Value",
+            col_tool = "Tool",
+            col_time = "Timestamp",
+            live_enabled = true,
+        )
+        vals, labels, pmeta = compute_chart_series(table, ch)
+        @test vals == [1303.0, 1305.0, 1299.0]
+        @test labels == ["t1", "t2", "t4"]
+        @test length(pmeta) == 3
+        @test pmeta[1]["tool"] == "Film-PTPECVD01"
+
+        # empty tools → all numeric Value rows
+        ch_all = ChartSpec(col_value = "Value", col_tool = "Tool", tools = String[])
+        vals_all, _, _ = compute_chart_series(table, ch_all)
+        @test vals_all == [1303.0, 1305.0, 999.0, 1299.0]
+
+        materialize_chart_from_table!(ch, table)
+        @test ch.source === :table
+        @test ch.live_enabled === false
+        @test ch.data.values == [1303.0, 1305.0, 1299.0]
+        @test ch.data.cl ≈ mean([1303.0, 1305.0, 1299.0])
+        @test ch.data.sigma ≈ std([1303.0, 1305.0, 1299.0]; corrected = true)
+        @test ch.viewport.x0 == 1
+        @test ch.viewport.x1 == 3
+        @test haskey(ch.data.meta, "labels")
+        @test ch.data.meta["labels"] == ["t1", "t2", "t4"]
+
+        # Copy-on-map: mutating table after materialize does not auto-refresh series
+        push!(table.rows, Dict("Timestamp" => "t7", "Tool" => "Film-PTPECVD01", "Value" => "1310"))
+        @test length(ch.data.values) == 3
+        # re-materialize picks up new row
+        materialize_chart_from_table!(ch, table)
+        @test ch.data.values == [1303.0, 1305.0, 1299.0, 1310.0]
+        @test ch.live_enabled === false
+
+        # Model carries empty SharedTable by default
+        m = SPCWorkbenchModel(data = empty_workbench_data(), paused = true, seed_demos = :none)
+        @test m.table isa SharedTable
+        @test isempty(m.table.rows)
+        @test isempty(m.table.columns)
     end
 
     @testset "empty chart resolve + auto_limits alias" begin
@@ -819,10 +890,80 @@ end
         @test occursin("p/P", kfull)
         @test occursin("Pause/Resume", kfull)
         @test occursin("MOUSE:", kfull)  # mouse section header always rendered early
+        @test occursin("b B", kfull) || occursin("builder", lowercase(kfull))
         T.update!(m, T.KeyEvent(:escape))
         tb2 = T.TestBackend(80, 18); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1,1,80,18),[],[]))
         @test T.find_text(tb2, "KEYBOARD MAP") === nothing
+    end
+
+    @testset "builder mode (b): no-bleed + Esc/q close without quit + mouse no-op" begin
+        d = generate_spc_workbench_data(12; seed = 3)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        @test m.view_mode === :dashboard
+        @test m.quit === false
+
+        T.update!(m, T.KeyEvent('b'))
+        @test m.view_mode === :builder
+        @test m.quit === false
+        @test m.last_event == "builder open"
+
+        tb = T.TestBackend(90, 22); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 22), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:22 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("BUILDER", full)
+        @test occursin("Value col", full) || occursin("Value", full)
+        # strict no-bleed
+        @test T.find_text(tb, "SPC Workbench [dashboard]") === nothing
+        @test T.find_text(tb, "Side Stats") === nothing
+        @test T.find_text(tb, "Dashboard:") === nothing
+
+        # mouse early-return (no pan/hover) — same ctor as other TestBackend mouse tests
+        T.update!(m, T.MouseEvent(20, 10, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.view_mode === :builder
+        @test occursin("modal", m.last_event)
+
+        # Esc closes without quit
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
+        @test m.quit === false
+
+        # q closes without quit
+        T.update!(m, T.KeyEvent('b'))
+        @test m.view_mode === :builder
+        T.update!(m, T.KeyEvent('q'))
+        @test m.view_mode === :dashboard
+        @test m.quit === false
+
+        # apply materialize from in-memory table
+        m.table = SharedTable(
+            columns = ["Tool", "Value"],
+            rows = [
+                Dict("Tool" => "A", "Value" => "10.0"),
+                Dict("Tool" => "B", "Value" => "20.0"),
+                Dict("Tool" => "A", "Value" => "30.0"),
+            ],
+        )
+        ch = current_chart(m)
+        ch.tools = ["A"]
+        ch.col_value = "Value"
+        ch.col_tool = "Tool"
+        T.update!(m, T.KeyEvent('b'))
+        T.update!(m, T.KeyEvent('a'))
+        @test m.view_mode === :dashboard
+        @test m.quit === false
+        @test current_chart(m).source === :table
+        @test current_chart(m).live_enabled === false
+        @test current_chart(m).data.values == [10.0, 30.0]
+        @test occursin("materialized", m.last_event)
+
+        # help mentions builder
+        T.update!(m, T.KeyEvent('h'))
+        tbh = T.TestBackend(90, 24); T.reset!(tbh.buf)
+        T.view(m, T.Frame(tbh.buf, T.Rect(1, 1, 90, 24), [], []))
+        htxt = join([string(T.row_text(tbh, i)) for i in 1:24 if T.row_text(tbh, i) !== nothing], "\n")
+        @test occursin("b/B", htxt) || occursin("builder", lowercase(htxt))
     end
 
     @testset "dashboard multi-chart text + multiple plots visible simultaneously" begin
@@ -1720,6 +1861,42 @@ end
     @testset "seed_demos default remains :triple" begin
         m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 1), paused = true)
         @test m.seed_demos === :triple
+    end
+
+    @testset "CSV import fills in-memory SharedTable (KD25; no re-read on materialize)" begin
+        d = generate_spc_workbench_data(8; seed = 2)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        @test isempty(m.table.rows)
+
+        r = import_csv_new_chart!(m, SAMPLE; name = "TblCSV")
+        @test r isa CsvParseOk
+        @test !isempty(m.table.rows)
+        @test "Value" in m.table.columns
+        @test length(m.table.rows) == 10
+        # table cells are strings; series already on chart
+        @test m.table.rows[1]["Value"] == "100.1" || tryparse(Float64, m.table.rows[1]["Value"]) ≈ 100.1
+
+        # materialize from table (in-memory) without re-opening CSV path
+        ch = ChartSpec(name = "FromTable", col_value = "Value", tools = String[])
+        materialize_chart_from_table!(ch, m.table)
+        @test ch.source === :table
+        @test ch.live_enabled === false
+        @test length(ch.data.values) == 10
+        @test ch.data.values[1] ≈ 100.1
+        @test ch.data.values[end] ≈ 99.7
+
+        # import_csv_into_model! also refreshes table
+        mktempdir() do dir
+            p = _write_csv(joinpath(dir, "t2.csv"), "Tool,Value\nX,1.0\nY,2.0\nX,3.0\n")
+            r2 = import_csv_into_model!(m, p; value_col = "Value")
+            @test r2 isa CsvParseOk
+            @test length(m.table.rows) == 3
+            @test "Tool" in m.table.columns
+            ch2 = ChartSpec(col_value = "Value", col_tool = "Tool", tools = ["X"])
+            materialize_chart_from_table!(ch2, m.table)
+            @test ch2.data.values == [1.0, 3.0]
+        end
     end
 end
 
