@@ -585,23 +585,43 @@ function auto_limits(
 end
 
 """
+    _limits_from_manual(ch) -> LimitsAndZones
+
+HTML computeChart manual path (~2369–2371): sigma = (ucl - cl) / 3; zones from that sigma.
+Uses provided CL/UCL/LCL as control limits; zone A/B/C from sigma (cl ± kσ).
+Requires manual_cl, manual_ucl, manual_lcl all set (caller checks).
+"""
+function _limits_from_manual(ch::ChartSpec)::LimitsAndZones
+    cl = Float64(ch.manual_cl)
+    ucl = Float64(ch.manual_ucl)
+    lcl = Float64(ch.manual_lcl)
+    sigma = (ucl - cl) / 3
+    LimitsAndZones(
+        cl,
+        sigma,
+        ucl,
+        lcl,
+        cl + 2 * sigma,
+        cl - 2 * sigma,
+        cl + 1 * sigma,
+        cl - 1 * sigma,
+    )
+end
+
+"""
     resolve_chart_render_context(ch; sigma_method=:mr)
 
 Pure resolver gateway. Returns canonical lz (with chosen sigma), WECO viol set, cpk, band.
 All OOC/OOS/Cpk decisions and labels must derive from this to guarantee consistency.
 
-PR1 skeleton: branches on `limits_mode` / `chart_type` but all paths still I_MR/:mr.
-PR5 fills manual limits; PR7 fills type-aware auto.
+Manual branch (PR5): when limits_mode==:manual and manual_cl/ucl/lcl all set,
+sigma = (ucl - cl) / 3. Auto path stays I_MR/:mr until PR7 fills type-aware auto.
 """
 function resolve_chart_render_context(ch::ChartSpec; sigma_method::Symbol = :mr)::ChartRenderContext
     vs = ch.data.values
-    # PR1 skeleton — all paths currently reduce to I_MR/:mr behavior:
     if ch.limits_mode == :manual &&
        ch.manual_cl !== nothing && ch.manual_ucl !== nothing && ch.manual_lcl !== nothing
-        # PR5 fills: sigma = (ucl - cl) / 3; zones from that sigma
-        # Until PR5: fall through to auto
-        lz = auto_limits(vs; chart_type = ch.chart_type, subgroup_size = ch.subgroup_size,
-                         sigma_method = sigma_method)
+        lz = _limits_from_manual(ch)
     else
         # PR7 fills type-aware auto; until then always I_MR :mr path via auto_limits
         lz = auto_limits(vs; chart_type = ch.chart_type, subgroup_size = ch.subgroup_size,
@@ -2077,7 +2097,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
         act_ch = current_chart(m)
         act_ctx = resolve_chart_render_context(act_ch; sigma_method=:mr)
         lz = act_ctx.lz
-        set_string!(buf, x, y, "n=$n", tstyle(:text)); y += 1
+        # Mode badge on n= row (compact; avoids pushing WECO off short side panels)
+        mode_lbl = act_ch.limits_mode === :manual ? "limits:manual" : "limits:auto"
+        set_string!(buf, x, y, "n=$n $mode_lbl", tstyle(:text)); y += 1
         set_string!(buf, x, y, "cl=$(round(lz.cl;digits=2)) σ=$(round(lz.sigma;digits=2))", tstyle(:text_dim)); y += 1
         cpk_s = act_ctx.cpk === nothing ? "—" : _fmt(act_ctx.cpk)
         band = act_ctx.band
@@ -2157,6 +2179,24 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 end
             end
         end
+        # Last-N WECO violation messages (P1.8 / PR5 — side panel list)
+        side_viols = weco_detect(m.data.values, lz.cl, lz.sigma; enabled_rules = m.enabled_rules)
+        nv = length(side_viols)
+        if y <= bot
+            set_string!(buf, x, y, "Viols: $nv", nv > 0 ? tstyle(:warning) : tstyle(:text_dim))
+            y += 1
+        end
+        if nv > 0
+            maxw = max(4, side_inner.width - 1)
+            start_i = max(1, nv - SIDE_VIOL_MSG_MAX + 1)
+            for vi in start_i:nv
+                y > bot && break
+                v = side_viols[vi]
+                line = _side_trunc("$(v.rule) $(v.msg)", maxw)
+                set_string!(buf, x, y, line, tstyle(:warning))
+                y += 1
+            end
+        end
         # dashboard multi hint (lowest priority when cramped)
         if length(m.charts) > 1
             if y <= bottom(side_inner) - 1
@@ -2222,6 +2262,21 @@ function _fmt(x)
         return "—"
     end
     x < 1 ? string(round(x; digits=3)) : string(round(x; digits=2))
+end
+
+# Side-panel WECO violation message list (last N; PR5 / P1.8)
+const SIDE_VIOL_MSG_MAX = 5
+
+function _side_trunc(s::AbstractString, maxw::Int)::String
+    maxw <= 0 && return ""
+    io = IOBuffer()
+    n = 0
+    for c in s
+        n += 1
+        n > maxw && break
+        print(io, c)
+    end
+    String(take!(io))
 end
 
 # ── Dedicated Help page (adapted from HTML quickstart + WECO defs + workflow) ──
