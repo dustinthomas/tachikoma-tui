@@ -2152,6 +2152,34 @@ end
 
 # ── Update (Key + Mouse, full fidelity) ─────────────────────────────────
 
+"""Rows available for the chart list (title/summary/footer reserved)."""
+function _library_visible_capacity(m::SPCWorkbenchModel)::Int
+    a = m.library_area
+    h = (a.height > 0) ? a.height : 20
+    # title + blank + summary + blank ≈ 4; footer/prompt reserve ≈ 4
+    return max(1, h - 8)
+end
+
+"""Keep `library_selected` in range and `library_scroll` so selection is visible."""
+function _sync_library_scroll!(m::SPCWorkbenchModel, nch::Int = length(m.charts), vis::Int = _library_visible_capacity(m))
+    vis = max(1, vis)
+    if nch <= 0
+        m.library_selected = 1
+        m.library_scroll = 0
+        return
+    end
+    m.library_selected = clamp(m.library_selected, 1, nch)
+    sel = m.library_selected
+    max_scroll = max(0, nch - vis)
+    scroll = clamp(m.library_scroll, 0, max_scroll)
+    if sel < scroll + 1
+        scroll = sel - 1
+    elseif sel > scroll + vis
+        scroll = sel - vis
+    end
+    m.library_scroll = clamp(scroll, 0, max_scroll)
+end
+
 """Apply prompt Enter. GC-PR2: rename fully wired; I/O kinds not opened until GC-PR3."""
 function _apply_prompt!(m::SPCWorkbenchModel)
     kind = m.prompt_kind
@@ -2161,8 +2189,14 @@ function _apply_prompt!(m::SPCWorkbenchModel)
         if isempty(name)
             m.last_event = "rename cancel: empty name"
         else
-            rename_chart!(m, m.library_selected, name)
-            m.last_event = "renamed → $name"
+            nch = length(m.charts)
+            if nch >= 1
+                m.library_selected = clamp(m.library_selected, 1, nch)
+                rename_chart!(m, m.library_selected, name)
+                m.last_event = "renamed → $name"
+            else
+                m.last_event = "rename cancel: no charts"
+            end
         end
         m.prompt_kind = nothing
         m.prompt_buf = ""
@@ -2170,6 +2204,7 @@ function _apply_prompt!(m::SPCWorkbenchModel)
     else
         # GC-PR2: I/O prompts are not opened (message-only keys). Defensive clear.
         m.prompt_kind = nothing
+        m.prompt_buf = ""
         m.last_event = "prompt cancel"
     end
 end
@@ -2349,8 +2384,13 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     # pending_delete: y confirms; any other key (incl Esc) clears — never quit
     if m.pending_delete
         if evt.key == :char && (evt.char == 'y' || evt.char == 'Y')
-            ok = delete_chart!(m, m.library_selected)
+            nch = length(m.charts)
+            if nch >= 1
+                m.library_selected = clamp(m.library_selected, 1, nch)
+            end
+            ok = nch >= 1 && delete_chart!(m, m.library_selected)
             m.pending_delete = false
+            _sync_library_scroll!(m)
             m.last_event = ok ? "deleted chart" : "delete refused (last chart)"
             return
         else
@@ -2363,6 +2403,10 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     # Library mode (before global quit — Esc/q close mode, never quit)
     if m.view_mode == :library
         nch = length(m.charts)
+        # Clamp once so corrupt/out-of-range selection cannot crash helpers
+        if nch >= 1
+            m.library_selected = clamp(m.library_selected, 1, nch)
+        end
         if evt.key == :escape || (evt.key == :char && evt.char == 'q')
             m.view_mode = :dashboard
             m.pending_delete = false
@@ -2370,10 +2414,12 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             return
         elseif evt.key == :up
             m.library_selected = max(1, m.library_selected - 1)
+            _sync_library_scroll!(m, nch)
             m.last_event = "library sel $(m.library_selected)"
             return
         elseif evt.key == :down
             m.library_selected = min(nch, m.library_selected + 1)
+            _sync_library_scroll!(m, nch)
             m.last_event = "library sel $(m.library_selected)"
             return
         elseif evt.key == :enter
@@ -2385,10 +2431,12 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             c = evt.char
             if c == 'a' || c == 'A'
                 idx = add_chart!(m)
+                _sync_library_scroll!(m, length(m.charts))
                 m.last_event = "added chart $idx"
                 return
             elseif c == 'c' || c == 'C'
                 idx = clone_chart!(m, m.library_selected)
+                _sync_library_scroll!(m, length(m.charts))
                 m.last_event = "cloned → $idx"
                 return
             elseif c == 'd' || c == 'D'
@@ -2400,7 +2448,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                 end
                 return
             elseif c == 'n' || c == 'N'
-                seed = m.charts[clamp(m.library_selected, 1, max(1, nch))].name
+                seed = nch >= 1 ? m.charts[m.library_selected].name : ""
                 _open_prompt!(m, :rename_chart; seed = seed)
                 return
             elseif c == 'i' || c == 'I' || c == 'e' || c == 'E' || c == 'w' || c == 'W'
@@ -2423,9 +2471,10 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         if c == 'm' || c == 'M'
             # Open chart library (GC-PR2)
             m.view_mode = :library
-            m.library_selected = clamp(m.active, 1, length(m.charts))
+            m.library_selected = clamp(m.active, 1, max(1, length(m.charts)))
             m.pending_delete = false
             m.prompt_kind = nothing
+            _sync_library_scroll!(m)
             m.last_event = "library open"
             return
         elseif c == 'p' || c == 'P'
@@ -3353,18 +3402,25 @@ end
 
 # ── Chart Library page (GC-PR2 / A5) ────────────────────────────────────
 function _render_library_page!(buf, area, m)
+    m.library_area = area
     set_string!(buf, area.x + 1, area.y, "CHART LIBRARY  (Esc/q close → dashboard)", tstyle(:title, bold=true))
     y = area.y + 2
     nch = length(m.charts)
+    if nch >= 1
+        m.library_selected = clamp(m.library_selected, 1, nch)
+    end
     set_string!(buf, area.x + 2, y,
         "Charts: $nch   active=$(m.active)   selected=$(m.library_selected)",
         tstyle(:text_dim))
     y += 2
-    # List charts
-    for (i, c) in enumerate(m.charts)
-        if y > bottom(area) - 4
-            break
-        end
+    # Visible window: keep selected row on-screen via library_scroll
+    list_bottom = bottom(area) - 4
+    vis = max(1, list_bottom - y + 1)
+    _sync_library_scroll!(m, nch, vis)
+    first_i = m.library_scroll + 1
+    last_i = min(nch, m.library_scroll + vis)
+    for i in first_i:last_i
+        c = m.charts[i]
         marker = i == m.library_selected ? "▶" : " "
         act = i == m.active ? "*" : " "
         nvals = length(c.data.values)
@@ -3376,8 +3432,8 @@ function _render_library_page!(buf, area, m)
     end
     y = min(y + 1, bottom(area) - 3)
     # Prompt / pending delete status
-    if m.pending_delete
-        nm = m.charts[clamp(m.library_selected, 1, max(1, nch))].name
+    if m.pending_delete && nch >= 1
+        nm = m.charts[m.library_selected].name
         set_string!(buf, area.x + 2, y,
             "DELETE \"$nm\"?  press y to confirm, any other key cancel",
             tstyle(:error, bold=true))

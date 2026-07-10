@@ -2293,13 +2293,40 @@ end
         @test isempty(m.charts[end].data.values)
 
         # I/O keys message-only: do NOT set prompt_kind (GC-PR3 wires Enter)
-        for c in ('i', 'e', 'w', 'W')
+        for c in ('i', 'I', 'e', 'E', 'w', 'W')
             T.update!(m, T.KeyEvent(c))
             @test m.prompt_kind === nothing
             @test m.last_event == "I/O keys land in GC-PR3"
             @test m.view_mode == :library
             @test m.quit == false
         end
+
+        # empty-name rename Enter → cancel message, name unchanged
+        m.library_selected = 1
+        name0 = m.charts[1].name
+        T.update!(m, T.KeyEvent('n'))
+        @test m.prompt_kind === :rename_chart
+        for _ in 1:length(m.prompt_buf)
+            T.update!(m, T.KeyEvent(:backspace))
+        end
+        @test isempty(m.prompt_buf)
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === nothing
+        @test m.last_event == "rename cancel: empty name"
+        @test m.charts[1].name == name0
+
+        # last-chart delete refuse
+        while length(m.charts) > 1
+            m.library_selected = length(m.charts)
+            T.update!(m, T.KeyEvent('d'))
+            T.update!(m, T.KeyEvent('y'))
+        end
+        @test length(m.charts) == 1
+        T.update!(m, T.KeyEvent('d'))
+        @test m.pending_delete == false
+        @test m.last_event == "cannot delete last chart"
+        @test m.view_mode == :library
+        @test m.quit == false
     end
 
     @testset "library: left/right no-op under library/prompt; no dashboard key bleed" begin
@@ -2384,6 +2411,49 @@ end
         T.update!(m, T.KeyEvent(:escape))
         @test m.pending_delete == false
         @test m.quit == false
+    end
+
+    @testset "library: scroll keeps selection visible; corrupt sel clamps" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 2), paused = true)
+        _ensure_charts!(m)
+        # Pad library past a short page height
+        for i in 1:12
+            add_chart!(m; name = "Extra-$i")
+        end
+        nch = length(m.charts)
+        @test nch >= 15
+
+        T.update!(m, T.KeyEvent('m'))
+        # Short height so only a few rows fit → scroll must advance
+        tb = T.TestBackend(80, 14); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 14), [], []))
+        vis = max(1, m.library_area.height - 8)
+        m.library_selected = 1
+        m.library_scroll = 0
+        for _ in 1:(nch - 1)
+            T.update!(m, T.KeyEvent(:down))
+        end
+        @test m.library_selected == nch
+        @test m.library_scroll >= max(0, nch - vis)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 14), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:14 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("▶", full)
+        @test occursin(string(nch) * ".", full) || occursin("Extra-", full)
+
+        # Corrupt selection: clamp on next library key; rename Enter must not BoundsError
+        m.library_selected = 0
+        T.update!(m, T.KeyEvent('n'))
+        @test m.library_selected >= 1
+        @test m.prompt_kind === :rename_chart
+        T.update!(m, T.KeyEvent(:enter))  # apply existing seed name
+        @test m.prompt_kind === nothing
+        @test m.quit == false
+
+        m.library_selected = 9999
+        T.update!(m, T.KeyEvent('c'))
+        @test m.library_selected == length(m.charts)
+        @test m.view_mode == :library
     end
 
     @testset "library: help/keymap mention m/library; live blocked by prompt" begin
