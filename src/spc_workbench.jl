@@ -1046,6 +1046,8 @@ end
     # Seed policy when charts empty — NEVER flip default from :triple
     seed_demos::Symbol = :triple     # :triple | :single | :none
     tools::Vector{ToolEntry} = ToolEntry[]
+    # Prefill only for save/load prompts — never silent write to default path
+    last_workbench_path::String = ""
 end
 
 should_quit(m::SPCWorkbenchModel) = m.quit
@@ -2431,18 +2433,34 @@ end
 const run_spc_workbench = spc_workbench_demo
 
 """
-    spc_workbench(; paused=false, load=nothing, seed_demos=:triple, value_col="Value")
+    spc_workbench(; paused=false, load=nothing, workbench=nothing, seed_demos=:triple, value_col="Value")
 
-Live/interactive workbench. `load=` imports a CSV series as a new chart
-(that chart live_enabled=false, activated as current, model paused=true on success).
+Live/interactive workbench.
+- `workbench=` loads schema-v1 JSON via `load_workbench` (construct) before `app(m)`.
+- `load=` imports a CSV series as a new chart (live_enabled=false, activated, paused=true).
 `seed_demos` default remains `:triple` — never flip.
 """
 function spc_workbench(;
     paused::Bool = false,
     load::Union{Nothing,AbstractString} = nothing,
+    workbench::Union{Nothing,AbstractString} = nothing,
     seed_demos::Symbol = :triple,
     value_col::String = "Value",
 )
+    if workbench !== nothing
+        m_or_err = load_workbench(workbench)
+        m_or_err isa AbstractString && error(m_or_err)
+        m = m_or_err
+        if paused
+            m.paused = true
+        end
+        if load !== nothing
+            import_csv_new_chart!(m, load; value_col = value_col)
+            m.paused = true
+        end
+        app(m)
+        return
+    end
     d = generate_spc_workbench_data(40; seed=42)
     n = length(d.values)
     vp = Viewport(x0 = n > 0 ? 1 : 0, x1 = n > 0 ? n : 0)
