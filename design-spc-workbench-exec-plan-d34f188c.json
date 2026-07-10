@@ -1,0 +1,270 @@
+{
+  "plan_id": "d34f188c",
+  "design_doc_path": "/tmp/grok-design-doc-1442427c.md",
+  "status": "completed",
+  "created_at": "2026-07-08T00:00:00Z",
+  "effort": 1,
+  "max_concurrent": 4,
+  "linearized_order": [
+    "pr-1",
+    "pr-2",
+    "pr-3",
+    "pr-4",
+    "pr-5",
+    "pr-6",
+    "pr-7"
+  ],
+  "dag": {
+    "nodes": [
+      {
+        "id": "pr-1",
+        "title": "Add pure WECO + stats functions + generator + wire tests into runtests.jl (no UI)",
+        "slug": "add-pure-weco-stats-functions-generator-wire-tests-into-runtestsjl-no-ui",
+        "description": "Implement `weco_detect` (full port), `compute_limits_and_zones`, `compute_capability`, `generate_spc_workbench_data` (richer data, OOC that hits rules). 100% unit/PBT coverage. Red-first: tests that assert exact violations for crafted sequences (e.g. 2/3 in zone A). No Tachikoma dep in this logic. **Critical**: the include edit ensures \"full suite\" gates actually run the new (and existing SPC) code.",
+        "files": [
+          "src/spc_workbench.jl",
+          "test/test_spc_workbench.jl",
+          "test/runtests.jl"
+        ],
+        "dependencies": [],
+        "level": 0,
+        "status": "completed",
+        "branch": "execute-plan/d34f188c-pr-1-add-pure-weco-stats-functions-generator-wire-tests-into-runtestsjl-no-ui",
+        "subagent_id": "019f3f40-cf39-7ec1-9245-953b0f0d5be6",
+        "worktree_path": "/home/dustin/.grok/worktrees/projects-tachikoma-tui/subagent-019f3f40-cf39-7ec1-9245-953b0f0d5be6",
+        "base_sha": "f81f488cf8eb80ae5dd133fc048d08fb042a3ac1",
+        "commit_sha": "43e424c5a7194bf8ef64c5016c5c04c59dd408ad",
+        "error": null,
+        "reviewer_subagent_id": "019f3f45-7ffb-7242-8c04-cad2ad1e428d",
+        "review_rounds": 1,
+        "started_at": "2026-07-08T01:03:59Z",
+        "completed_at": "2026-07-08T01:18:00Z",
+        "worktree_cleaned": false
+      },
+      {
+        "id": "pr-2",
+        "title": "SPCWorkbenchModel skeleton + static render (paused)",
+        "slug": "spcworkbenchmodel-skeleton-static-render-paused",
+        "description": "@kwdef mutable struct ... , should_quit, basic view (header, split, canvas line + limits, side stats stub), Viewport helpers (copy patterns), render_spc_workbench_visual test helper. Use paused static data.",
+        "files": [
+          "src/spc_workbench.jl",
+          "test/test_spc_workbench.jl"
+        ],
+        "dependencies": [
+          "pr-1"
+        ],
+        "level": 1,
+        "status": "completed",
+        "branch": "execute-plan/d34f188c-pr-2-spcworkbenchmodel-skeleton-static-render-paused",
+        "subagent_id": "019f3f4e-4245-7c32-84f6-e72a195b026a",
+        "worktree_path": "/home/dustin/.grok/worktrees/projects-tachikoma-tui/subagent-019f3f4e-4245-7c32-84f6-e72a195b026a",
+        "base_sha": "43e424c5a7194bf8ef64c5016c5c04c59dd408ad",
+        "commit_sha": "a26f5674eda783b507f9588bc87273910afa25c7",
+        "error": null,
+        "reviewer_subagent_id": "019f3f5c-ef4a-7c22-8564-fa8d2db00ab9",
+        "review_rounds": 2,
+        "started_at": "2026-07-08T01:18:41Z",
+        "completed_at": "2026-07-08T01:35:45Z",
+        "worktree_cleaned": false
+      },
+      {
+        "id": "pr-3",
+        "title": "Rich mouse + keyboard interactions (exact fidelity to spc.jl)",
+        "slug": "rich-mouse-keyboard-interactions-exact-fidelity-to-spcjl",
+        "description": "Port compute_hovered_index, nearest_point..._to_cell_x, hover_x vs selected, drag pan, wheel, \u2502 vs \u2503, \u25cf/\u25c6 (now viol-aware), key handlers (p/r + new 1-8, c). Test selected \u2503 persistence while hovering (char_at assertions).",
+        "files": [
+          "src/spc_workbench.jl",
+          "test/test_spc_workbench.jl"
+        ],
+        "dependencies": [
+          "pr-2"
+        ],
+        "level": 2,
+        "status": "completed",
+        "branch": "execute-plan/d34f188c-pr-3-rich-mouse-keyboard-interactions-exact-fidelity-to-spcjl",
+        "subagent_id": "019f3f5e-46b8-7643-a343-82c4fee4e34a",
+        "worktree_path": "/home/dustin/.grok/worktrees/projects-tachikoma-tui/subagent-019f3f5e-46b8-7643-a343-82c4fee4e34a",
+        "base_sha": "a26f5674eda783b507f9588bc87273910afa25c7",
+        "commit_sha": "a3b7d5b5ba9c4f2fab6a478576adc18ed2cbf4f5",
+        "error": null,
+        "reviewer_subagent_id": "019f3f69-d919-7e71-a94a-8befb9d2b73d",
+        "review_rounds": 1,
+        "started_at": "2026-07-08T01:36:10Z",
+        "completed_at": "2026-07-08T01:50:18Z",
+        "worktree_cleaned": false
+      },
+      {
+        "id": "pr-4",
+        "title": "Config overlay + rule toggles",
+        "slug": "config-overlay-rule-toggles",
+        "description": "Modal that does not bleed (test absence of plot text under it), keyboard nav for rules list, toggle via space/1-8 even in overlay, apply recomputes via weco_detect.",
+        "files": [
+          "src/spc_workbench.jl",
+          "test/test_spc_workbench.jl"
+        ],
+        "dependencies": [
+          "pr-3"
+        ],
+        "level": 3,
+        "status": "completed",
+        "branch": "execute-plan/d34f188c-pr-4-config-overlay-rule-toggles",
+        "subagent_id": "019f3f6b-a989-73f3-9c05-3aa7cb238097",
+        "worktree_path": "/home/dustin/.grok/worktrees/projects-tachikoma-tui/subagent-019f3f6b-a989-73f3-9c05-3aa7cb238097",
+        "base_sha": "a3b7d5b5ba9c4f2fab6a478576adc18ed2cbf4f5",
+        "commit_sha": "9374267ab01ede340173e15276976db4e6fc5f88",
+        "error": null,
+        "reviewer_subagent_id": "019f3f78-fe1d-76e0-ade0-0fa9660dd4b3",
+        "review_rounds": 1,
+        "started_at": "2026-07-08T01:50:48Z",
+        "completed_at": "2026-07-08T02:07:28Z",
+        "worktree_cleaned": false
+      },
+      {
+        "id": "pr-5",
+        "title": "Capability (Cpk), spec limits, violations list, zones",
+        "slug": "capability-cpk-spec-limits-violations-list-zones",
+        "description": "usl/lsl/target fields + form entry, compute + display (colors), violations panel (list top N), zone lines or indicators. Update side panel + tooltip.",
+        "files": [
+          "src/spc_workbench.jl",
+          "test/test_spc_workbench.jl"
+        ],
+        "dependencies": [
+          "pr-4"
+        ],
+        "level": 4,
+        "status": "completed",
+        "branch": "execute-plan/d34f188c-pr-5-capability-cpk-spec-limits-violations-list-zones",
+        "subagent_id": "019f3f7b-24b0-71c1-b2a7-2053ebfa6849",
+        "worktree_path": "/home/dustin/.grok/worktrees/projects-tachikoma-tui/subagent-019f3f7b-24b0-71c1-b2a7-2053ebfa6849",
+        "base_sha": null,
+        "commit_sha": "e8c0eaa99d4550a7c0e4473cae3ef69800ef763e",
+        "error": null,
+        "reviewer_subagent_id": "019f3f88-a056-7990-bb39-b23b209fc7e7",
+        "review_rounds": 1,
+        "started_at": "2026-07-08T02:07:42Z",
+        "completed_at": "2026-07-08T02:27:02Z",
+        "worktree_cleaned": false
+      },
+      {
+        "id": "pr-6",
+        "title": "Live mode, gauges, polish + precompile",
+        "slug": "live-mode-gauges-polish-precompile",
+        "description": "advance_live! adapted (respect rules recalc), arc gauges (current + cpk), StatusBar, viewport follow. Add to @compile_workload.",
+        "files": [
+          "src/spc_workbench.jl",
+          "src/precompile.jl",
+          "test/test_spc_workbench.jl"
+        ],
+        "dependencies": [
+          "pr-5"
+        ],
+        "level": 5,
+        "status": "completed",
+        "branch": "execute-plan/d34f188c-pr-6-live-mode-gauges-polish-precompile",
+        "subagent_id": "019f3f8d-32a9-73e1-bddd-fd78ac0f4edf",
+        "worktree_path": "/home/dustin/.grok/worktrees/projects-tachikoma-tui/subagent-019f3f8d-32a9-73e1-bddd-fd78ac0f4edf",
+        "base_sha": "e8c0eaa99d4550a7c0e4473cae3ef69800ef763e",
+        "commit_sha": "237a1b6",
+        "error": null,
+        "reviewer_subagent_id": "019f3f9c-30b7-74e2-a53a-c188c9763142",
+        "review_rounds": 2,
+        "started_at": "2026-07-08T02:27:25Z",
+        "completed_at": "2026-07-08T02:45:43Z",
+        "worktree_cleaned": false
+      },
+      {
+        "id": "pr-7",
+        "title": "Public runners, exports, integration, final gates",
+        "slug": "public-runners-exports-integration-final-gates",
+        "description": "spc_workbench_demo(), advanced_spc(), ensure using TachikomaTUI; TachikomaTUI.hello_tachikoma() still works + new runners callable. Full suite green (now including workbench tests via prior include). Run live app verification. Capture evidence.",
+        "files": [
+          "src/TachikomaTUI.jl",
+          "src/spc_workbench.jl",
+          "README.md"
+        ],
+        "dependencies": [
+          "pr-6"
+        ],
+        "level": 6,
+        "status": "completed",
+        "branch": "execute-plan/d34f188c-pr-7-public-runners-exports-integration-final-gates",
+        "subagent_id": "019f3f9e-2b84-79b3-ad4d-eadc0328c6f9",
+        "worktree_path": "/home/dustin/.grok/worktrees/projects-tachikoma-tui/subagent-019f3f9e-2b84-79b3-ad4d-eadc0328c6f9",
+        "base_sha": "237a1b6d33c27b0557107949e3cff7c5fe51123c",
+        "commit_sha": "149ebaf",
+        "error": null,
+        "reviewer_subagent_id": "019f3fad-618e-7102-8b22-6c80dd0a562d",
+        "review_rounds": 2,
+        "started_at": "2026-07-08T02:45:58Z",
+        "completed_at": "2026-07-08T03:04:45Z",
+        "worktree_cleaned": false
+      }
+    ]
+  },
+  "stack_assembly_started": true,
+  "stack_assembly_progress": [],
+  "graphite_stack_submitted": true,
+  "pr_urls": [
+    {
+      "branch": "execute-plan/d34f188c-pr-1-add-pure-weco-stats-functions-generator-wire-tests-into-runtestsjl-no-ui",
+      "url": "https://github.com/dustinthomas/tachikoma-tui/compare/master...execute-plan/d34f188c-pr-1-add-pure-weco-stats-functions-generator-wire-tests-into-runtestsjl-no-ui?expand=1",
+      "kind": "compare",
+      "note": "Open this compare URL to create the PR (or run the gh pr create command below)"
+    },
+    {
+      "branch": "execute-plan/d34f188c-pr-2-spcworkbenchmodel-skeleton-static-render-paused",
+      "url": "https://github.com/dustinthomas/tachikoma-tui/compare/execute-plan/d34f188c-pr-1-add-pure-weco-stats-functions-generator-wire-tests-into-runtestsjl-no-ui...execute-plan/d34f188c-pr-2-spcworkbenchmodel-skeleton-static-render-paused?expand=1",
+      "kind": "compare",
+      "note": "Open this compare URL to create the PR (or run the gh pr create command below)"
+    },
+    {
+      "branch": "execute-plan/d34f188c-pr-3-rich-mouse-keyboard-interactions-exact-fidelity-to-spcjl",
+      "url": "https://github.com/dustinthomas/tachikoma-tui/compare/execute-plan/d34f188c-pr-2-spcworkbenchmodel-skeleton-static-render-paused...execute-plan/d34f188c-pr-3-rich-mouse-keyboard-interactions-exact-fidelity-to-spcjl?expand=1",
+      "kind": "compare",
+      "note": "Open this compare URL to create the PR (or run the gh pr create command below)"
+    },
+    {
+      "branch": "execute-plan/d34f188c-pr-4-config-overlay-rule-toggles",
+      "url": "https://github.com/dustinthomas/tachikoma-tui/compare/execute-plan/d34f188c-pr-3-rich-mouse-keyboard-interactions-exact-fidelity-to-spcjl...execute-plan/d34f188c-pr-4-config-overlay-rule-toggles?expand=1",
+      "kind": "compare",
+      "note": "Open this compare URL to create the PR (or run the gh pr create command below)"
+    },
+    {
+      "branch": "execute-plan/d34f188c-pr-5-capability-cpk-spec-limits-violations-list-zones",
+      "url": "https://github.com/dustinthomas/tachikoma-tui/compare/execute-plan/d34f188c-pr-4-config-overlay-rule-toggles...execute-plan/d34f188c-pr-5-capability-cpk-spec-limits-violations-list-zones?expand=1",
+      "kind": "compare",
+      "note": "Open this compare URL to create the PR (or run the gh pr create command below)"
+    },
+    {
+      "branch": "execute-plan/d34f188c-pr-6-live-mode-gauges-polish-precompile",
+      "url": "https://github.com/dustinthomas/tachikoma-tui/compare/execute-plan/d34f188c-pr-5-capability-cpk-spec-limits-violations-list-zones...execute-plan/d34f188c-pr-6-live-mode-gauges-polish-precompile?expand=1",
+      "kind": "compare",
+      "note": "Open this compare URL to create the PR (or run the gh pr create command below)"
+    },
+    {
+      "branch": "execute-plan/d34f188c-pr-7-public-runners-exports-integration-final-gates",
+      "url": "https://github.com/dustinthomas/tachikoma-tui/compare/execute-plan/d34f188c-pr-6-live-mode-gauges-polish-precompile...execute-plan/d34f188c-pr-7-public-runners-exports-integration-final-gates?expand=1",
+      "kind": "compare",
+      "note": "Open this compare URL to create the PR (or run the gh pr create command below)"
+    }
+  ],
+  "pr_create_commands": [
+    "gh pr create --base master --head execute-plan/d34f188c-pr-1-add-pure-weco-stats-functions-generator-wire-tests-into-runtestsjl-no-ui --fill --draft",
+    "gh pr create --base execute-plan/d34f188c-pr-1-add-pure-weco-stats-functions-generator-wire-tests-into-runtestsjl-no-ui --head execute-plan/d34f188c-pr-2-spcworkbenchmodel-skeleton-static-render-paused --fill --draft",
+    "gh pr create --base execute-plan/d34f188c-pr-2-spcworkbenchmodel-skeleton-static-render-paused --head execute-plan/d34f188c-pr-3-rich-mouse-keyboard-interactions-exact-fidelity-to-spcjl --fill --draft",
+    "gh pr create --base execute-plan/d34f188c-pr-3-rich-mouse-keyboard-interactions-exact-fidelity-to-spcjl --head execute-plan/d34f188c-pr-4-config-overlay-rule-toggles --fill --draft",
+    "gh pr create --base execute-plan/d34f188c-pr-4-config-overlay-rule-toggles --head execute-plan/d34f188c-pr-5-capability-cpk-spec-limits-violations-list-zones --fill --draft",
+    "gh pr create --base execute-plan/d34f188c-pr-5-capability-cpk-spec-limits-violations-list-zones --head execute-plan/d34f188c-pr-6-live-mode-gauges-polish-precompile --fill --draft",
+    "gh pr create --base execute-plan/d34f188c-pr-6-live-mode-gauges-polish-precompile --head execute-plan/d34f188c-pr-7-public-runners-exports-integration-final-gates --fill --draft"
+  ],
+  "user_instructions": "",
+  "no_graphite_flag": false,
+  "auto_pr_flag": false,
+  "graphite_available": false,
+  "gh_available": true,
+  "past_issues_briefing": "",
+  "issue_patterns": [],
+  "total_issues_by_severity": {},
+  "existing_patterns_snapshot": [],
+  "memory_existed_before": false
+}
