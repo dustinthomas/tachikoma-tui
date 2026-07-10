@@ -1,9 +1,10 @@
-# Documenter build entry (scaffold — full green is PR11, not PR0).
+# Documenter build entry — PR11 gate: this script must exit 0.
 #
-# Optional instantiate:
+# Instantiate (once per env):
 #   julia --project=docs -e 'using Pkg; Pkg.instantiate()'
-#   # fallback: Pkg.develop(path="..") if [sources] path dep is unavailable
-# Build (later):
+# Fallback if [sources] path dep is unavailable:
+#   julia --project=docs -e 'using Pkg; Pkg.develop(path=".."); Pkg.instantiate()'
+# Build:
 #   julia --project=docs docs/make.jl
 
 using Documenter
@@ -23,6 +24,8 @@ makedocs(;
         "SPC Workbench" => "spc-workbench.md",
         "API" => "api.md",
     ],
+    # Many public names are thin reexports without full docstrings yet.
+    # checkdocs=:none keeps the PR11 green gate focused on build success.
     checkdocs = :none,
     warnonly = true,
 )
