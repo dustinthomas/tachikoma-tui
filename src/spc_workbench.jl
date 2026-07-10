@@ -1050,6 +1050,11 @@ end
     pending_delete::Bool = false
     last_workbench_path::String = ""
     last_export_path::String = ""
+    # PR12: library list mouse (hit-test rect, wheel scroll, double-click)
+    library_area::Rect = Rect(0, 0, 0, 0)   # list hit-test; height = visible rows
+    library_scroll::Int = 0                 # 0-based first visible chart index
+    library_last_click_idx::Union{Nothing,Int} = nothing
+    library_last_click_ns::Int64 = 0
     # Seed policy when charts empty — NEVER flip default from :triple
     seed_demos::Symbol = :triple     # :triple | :single | :none
     tools::Vector{ToolEntry} = ToolEntry[]
@@ -1540,10 +1545,12 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             return
         elseif evt.key == :up
             m.library_selected = max(1, m.library_selected - 1)
+            _ensure_library_selected_visible!(m)
             m.last_event = "library sel $(m.library_selected)"
             return
         elseif evt.key == :down
             m.library_selected = min(nch, m.library_selected + 1)
+            _ensure_library_selected_visible!(m)
             m.last_event = "library sel $(m.library_selected)"
             return
         elseif evt.key == :enter
@@ -1555,10 +1562,12 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             c = evt.char
             if c == 'a' || c == 'A'
                 idx = add_chart!(m)
+                _ensure_library_selected_visible!(m)
                 m.last_event = "added chart $idx"
                 return
             elseif c == 'c' || c == 'C'
                 idx = clone_chart!(m, m.library_selected)
+                _ensure_library_selected_visible!(m)
                 m.last_event = "cloned → $idx"
                 return
             elseif c == 'd' || c == 'D'
@@ -1710,11 +1719,93 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     end
 end
 
+# Double-click window for library list activate (ns)
+const LIBRARY_DOUBLE_CLICK_NS = Int64(500_000_000)
+
+function _library_visible_rows(m::SPCWorkbenchModel)::Int
+    h = m.library_area.height
+    return h > 0 ? h : 1
+end
+
+function _clamp_library_scroll!(m::SPCWorkbenchModel)
+    nch = length(m.charts)
+    vis = _library_visible_rows(m)
+    max_scroll = max(0, nch - vis)
+    m.library_scroll = clamp(m.library_scroll, 0, max_scroll)
+    return nothing
+end
+
+"""Keep `library_selected` inside the scrolled window when area is known."""
+function _ensure_library_selected_visible!(m::SPCWorkbenchModel)
+    m.library_area.height <= 0 && return nothing
+    vis = _library_visible_rows(m)
+    nch = length(m.charts)
+    nch == 0 && return nothing
+    s = clamp(m.library_selected, 1, nch)
+    if s < m.library_scroll + 1
+        m.library_scroll = s - 1
+    elseif s > m.library_scroll + vis
+        m.library_scroll = s - vis
+    end
+    _clamp_library_scroll!(m)
+    return nothing
+end
+
+"""Map mouse (x,y) to 1-based chart index in the library list, or nothing."""
+function _library_hit_index(m::SPCWorkbenchModel, x::Int, y::Int)::Union{Nothing,Int}
+    la = m.library_area
+    (la.width <= 0 || la.height <= 0) && return nothing
+    contains(la, x, y) || return nothing
+    row = y - la.y  # 0-based within visible window
+    idx = m.library_scroll + row + 1
+    nch = length(m.charts)
+    (1 <= idx <= nch) || return nothing
+    return idx
+end
+
+"""PR12: click-to-select, double-click activate, wheel scroll — keyboard remains primary."""
+function _handle_library_mouse!(m::SPCWorkbenchModel, evt::MouseEvent)
+    nch = length(m.charts)
+    # Wheel: scroll the list (no-op clamp when all rows fit)
+    if evt.button == mouse_scroll_up || evt.button == mouse_scroll_down
+        delta = (evt.button == mouse_scroll_up) ? -1 : 1
+        m.library_scroll += delta
+        _clamp_library_scroll!(m)
+        m.last_event = "library scroll $(m.library_scroll)"
+        return
+    end
+
+    if evt.action == mouse_press && evt.button == mouse_left && nch > 0
+        idx = _library_hit_index(m, evt.x, evt.y)
+        if idx !== nothing
+            now = Int64(time_ns())
+            is_double = (m.library_last_click_idx == idx &&
+                         (now - m.library_last_click_ns) < LIBRARY_DOUBLE_CLICK_NS)
+            m.library_selected = idx
+            m.library_last_click_idx = idx
+            m.library_last_click_ns = now
+            if is_double
+                set_active_chart!(m, idx)
+                m.view_mode = :dashboard
+                m.library_last_click_idx = nothing
+                m.last_event = "active chart $(m.active) (dblclick)"
+            else
+                m.last_event = "library sel $idx (click)"
+            end
+            return
+        end
+    end
+
+    m.last_event = string(evt.action, " ", evt.button, " (library)")
+    return
+end
+
 function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     _ensure_charts!(m)
-    # Modal / library / prompt / pending_delete: keyboard-only (full template KD10)
+    # Strict modal no-op: config/edit/help/keymap/builder + prompt/pending_delete
+    # (PR12: :library is handled below — list mouse — not a pure no-op)
     if m.config_open || m.editing !== nothing ||
-       m.view_mode in (:help, :keymap, :library, :builder) ||
+       m.view_mode in (:help, :keymap, :builder) ||
        m.prompt_kind !== nothing || m.pending_delete
         m.last_event = string(evt.action, " ", evt.button, " (modal)")
         m.hover_x = nothing
@@ -1722,6 +1813,17 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         if evt.action == mouse_release
             m.drag_start = nothing   # avoid stuck drag if mode opened mid-drag
         end
+        return
+    end
+
+    # Library list mouse (PR12): clear dashboard hover/drag; hit-test list
+    if m.view_mode == :library
+        m.hover_x = nothing
+        m.hovered = nothing
+        if evt.action == mouse_release
+            m.drag_start = nothing
+        end
+        _handle_library_mouse!(m, evt)
         return
     end
 
@@ -2427,7 +2529,7 @@ function _fmt(x)
     x < 1 ? string(round(x; digits=3)) : string(round(x; digits=2))
 end
 
-# ── Chart Library page (PR2b / A5) ─────────────────────────────────────
+# ── Chart Library page (PR2b / A5 + PR12 mouse hit-test) ───────────────
 function _render_library_page!(buf, area, m)
     set_string!(buf, area.x + 1, area.y, "CHART LIBRARY  (Esc/q close → dashboard)", tstyle(:title, bold=true))
     y = area.y + 2
@@ -2436,19 +2538,28 @@ function _render_library_page!(buf, area, m)
         "Charts: $nch   active=$(m.active)   selected=$(m.library_selected)",
         tstyle(:text_dim))
     y += 2
-    # List charts
-    for (i, c) in enumerate(m.charts)
-        if y > bottom(area) - 4
-            break
+    # List geometry for hit-test + scroll (PR12)
+    first_y = y
+    max_list_y = bottom(area) - 4
+    visible = max(0, max_list_y - first_y + 1)
+    m.library_area = Rect(area.x + 2, first_y, max(1, area.width - 4), max(0, visible))
+    _ensure_library_selected_visible!(m)
+    _clamp_library_scroll!(m)
+    # List charts (scrolled window)
+    if visible > 0 && nch > 0
+        start_i = m.library_scroll + 1
+        end_i = min(nch, m.library_scroll + visible)
+        for i in start_i:end_i
+            c = m.charts[i]
+            marker = i == m.library_selected ? "▶" : " "
+            act = i == m.active ? "*" : " "
+            nvals = length(c.data.values)
+            live = c.live_enabled ? "live" : "off"
+            line = "$marker$act $i. $(c.name)  [$(c.chart_type)] n=$nvals live=$live"
+            sty = i == m.library_selected ? tstyle(:accent, bold=true) : tstyle(:text)
+            set_string!(buf, area.x + 2, y, line, sty)
+            y += 1
         end
-        marker = i == m.library_selected ? "▶" : " "
-        act = i == m.active ? "*" : " "
-        nvals = length(c.data.values)
-        live = c.live_enabled ? "live" : "off"
-        line = "$marker$act $i. $(c.name)  [$(c.chart_type)] n=$nvals live=$live"
-        sty = i == m.library_selected ? tstyle(:accent, bold=true) : tstyle(:text)
-        set_string!(buf, area.x + 2, y, line, sty)
-        y += 1
     end
     y = min(y + 1, bottom(area) - 3)
     # Prompt / pending delete status
@@ -2469,10 +2580,10 @@ function _render_library_page!(buf, area, m)
             tstyle(:text_dim))
         y += 1
     end
-    # Footer keys
+    # Footer keys (keyboard primary; mouse optional)
     if y <= bottom(area) - 1
         set_string!(buf, area.x + 2, bottom(area) - 1,
-            "↑↓ select  Enter activate  a add  c clone  d+y delete  n rename  i/e/w/W I/O  Esc/q close",
+            "↑↓/click select  Enter/dblclick activate  wheel scroll  a/c/d+y/n  i/e/w/W  Esc/q",
             tstyle(:text_dim))
     end
     if y <= bottom(area)
@@ -2551,6 +2662,8 @@ function _render_keymap_page!(buf, area, m)
         "  Left release Snap ┃ to nearest point + select",
         "  Wheel up    Zoom in (around cursor)",
         "  Wheel down  Zoom out",
+        "  LIB click   Select chart row; dblclick activate",
+        "  LIB wheel   Scroll library list",
         "",
         "Config: Tab WECO↔Lines; ↑↓/digits/space; Esc/c/v close. Lines ●=draw on chart.",
     ]

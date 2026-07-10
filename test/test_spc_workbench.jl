@@ -1603,7 +1603,7 @@ end
         @test m.quit == false
     end
 
-    @testset "library: mouse no-op / no stuck drag; ↑↓ selection" begin
+    @testset "library: mouse clears drag/hover; ↑↓ selection; pending_delete modal" begin
         m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 5), paused = true)
         _ensure_charts!(m)
         nch = length(m.charts)
@@ -1621,7 +1621,8 @@ end
         T.update!(m, T.MouseEvent(12, 6, T.mouse_left, T.mouse_move, false, false, false))
         @test m.hover_x === nothing
         @test m.hovered === nothing
-        @test occursin("modal", m.last_event)
+        # PR12: library mouse is no longer a pure modal no-op (list hit-test path)
+        @test occursin("library", m.last_event) || occursin("modal", m.last_event)
 
         T.update!(m, T.MouseEvent(12, 6, T.mouse_left, T.mouse_release, false, false, false))
         @test m.drag_start === nothing
@@ -1650,5 +1651,100 @@ end
         T.update!(m, T.KeyEvent(:escape))
         @test m.pending_delete == false
         @test m.quit == false
+    end
+
+    # ── PR12: library list mouse (click select, double-click activate, wheel) ──
+    @testset "library mouse: click selects row via hit-test" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 12), paused = true)
+        _ensure_charts!(m)
+        @test length(m.charts) >= 2
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        tb = T.TestBackend(80, 18)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 18), [], []))
+        la = m.library_area
+        @test la.width > 0 && la.height >= 2
+        # Click second visible row → chart index 2 (scroll 0)
+        y2 = la.y + 1
+        m.library_selected = 1
+        T.update!(m, T.MouseEvent(la.x, y2, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.library_selected == 2
+        @test m.view_mode == :library
+        @test occursin("click", m.last_event) || occursin("sel", m.last_event)
+        # Dashboard hover state must stay clear while in library
+        @test m.hover_x === nothing
+        @test m.hovered === nothing
+    end
+
+    @testset "library mouse: double-click activates and returns dashboard" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 13), paused = true)
+        _ensure_charts!(m)
+        @test length(m.charts) >= 2
+        T.update!(m, T.KeyEvent('m'))
+        tb = T.TestBackend(80, 18)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 18), [], []))
+        la = m.library_area
+        y2 = la.y + 1  # chart 2
+        m.active = 1
+        m.library_selected = 1
+        m.library_last_click_idx = nothing
+        # Two left-presses on same row within double-click window
+        T.update!(m, T.MouseEvent(la.x, y2, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.library_selected == 2
+        @test m.view_mode == :library
+        T.update!(m, T.MouseEvent(la.x, y2, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.view_mode == :dashboard
+        @test m.active == 2
+        @test T.find_text(begin
+            tb2 = T.TestBackend(80, 18); T.reset!(tb2.buf)
+            T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 80, 18), [], []))
+            tb2
+        end, "CHART LIBRARY") === nothing
+    end
+
+    @testset "library mouse: wheel scrolls list when overflow" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 14), paused = true)
+        _ensure_charts!(m)
+        # Ensure more charts than visible rows (small height → few visible)
+        while length(m.charts) < 20
+            add_chart!(m)
+        end
+        T.update!(m, T.KeyEvent('m'))
+        tb = T.TestBackend(80, 12)  # short → fewer list rows
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 12), [], []))
+        la = m.library_area
+        @test la.height > 0
+        @test length(m.charts) > la.height
+        s0 = m.library_scroll
+        T.update!(m, T.MouseEvent(la.x, la.y, T.mouse_scroll_down, T.mouse_press, false, false, false))
+        @test m.library_scroll == s0 + 1
+        T.update!(m, T.MouseEvent(la.x, la.y, T.mouse_scroll_up, T.mouse_press, false, false, false))
+        @test m.library_scroll == s0
+        # clamp at top
+        m.library_scroll = 0
+        T.update!(m, T.MouseEvent(la.x, la.y, T.mouse_scroll_up, T.mouse_press, false, false, false))
+        @test m.library_scroll == 0
+        # re-render after scroll — still library, no crash
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 12), [], []))
+        @test T.find_text(tb, "CHART LIBRARY") !== nothing
+    end
+
+    @testset "library mouse: does not regress dashboard hover/zoom" begin
+        d = generate_spc_workbench_data(18; seed = 55)
+        n = length(d.values)
+        m = SPCWorkbenchModel(data = d, paused = true, viewport = Viewport(x0 = 1, x1 = n))
+        tb0 = T.TestBackend(60, 16); T.reset!(tb0.buf)
+        T.view(m, T.Frame(tb0.buf, T.Rect(1, 1, 60, 16), [], []))
+        pa = m.plot_area
+        @test pa.width > 5
+        cx, cy = pa.x + pa.width ÷ 2, pa.y + pa.height ÷ 2
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_move, false, false, false))
+        @test m.hovered !== nothing
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_scroll_up, T.mouse_press, false, false, false))
+        @test m.viewport.x1 - m.viewport.x0 < n
     end
 end
