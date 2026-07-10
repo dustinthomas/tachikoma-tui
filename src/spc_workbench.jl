@@ -2209,9 +2209,12 @@ function _apply_prompt!(m::SPCWorkbenchModel)
             m.library_selected = clamp(m.library_selected, 1, nch)
         end
         import_csv_into_model!(m, path; chart_idx = m.library_selected)
-        # last_event set by import API (ok or "import err: …"); stay in library
+        # last_event set by import API. On err: keep prompt open + buf so path can be edited
+        # and re-Enter without re-pressing i (clearing kind would discard practical retry).
+        if startswith(m.last_event, "import err:")
+            return
+        end
         m.prompt_kind = nothing
-        # keep prompt_buf for path retry on err (and harmless on ok)
         return
     elseif kind === :export_csv
         path = strip(buf)
@@ -2220,23 +2223,30 @@ function _apply_prompt!(m::SPCWorkbenchModel)
         if err === nothing
             m.last_export_path = path
             m.last_event = "exported $(length(ch.data.values)) values to $path"
+            m.prompt_kind = nothing
         else
-            # fail-closed: do not update last_export_path
+            # fail-closed: do not update last_export_path; keep prompt open for path retry
             m.last_event = "export err: $err"
         end
-        m.prompt_kind = nothing
         return
     elseif kind === :save_workbench
         path = strip(buf)
         # save_workbench sets last_workbench_path + last_event only on success
-        save_workbench(m, path)
-        m.prompt_kind = nothing
+        err = save_workbench(m, path)
+        if err === nothing
+            m.prompt_kind = nothing
+        end
+        # on err: keep prompt open + buf for path retry; last_workbench_path unchanged
         return
     elseif kind === :load_workbench
         path = strip(buf)
-        # load_workbench!: ok → dashboard + clear prompt; err → stay library, clear kind, keep buf
-        load_workbench!(m, path)
-        m.prompt_kind = nothing  # belt-and-suspenders (io already clears on both paths)
+        # load_workbench!: ok → dashboard + clear prompt (io ephemerals); err → stay library
+        err = load_workbench!(m, path)
+        if err !== nothing
+            # io clears kind on err via _set_load_err!; restore so path can be edited + re-Enter
+            m.prompt_kind = :load_workbench
+            # prompt_buf already kept by io
+        end
         return
     else
         m.prompt_kind = nothing
@@ -3494,10 +3504,10 @@ function _render_library_page!(buf, area, m)
             tstyle(:text_dim))
         y += 1
     end
-    # Footer keys — do not claim I/O is wired (GC-PR3)
+    # Footer keys — I/O wired (GC-PR3)
     if y <= bottom(area) - 1
         set_string!(buf, area.x + 2, bottom(area) - 1,
-            "↑↓ select  Enter activate  a add  c clone  d+y delete  n rename  i/e/w/W later  Esc/q close",
+            "↑↓ select  Enter activate  a add  c clone  d+y delete  n rename  i import  e export  w save  W load  Esc/q close",
             tstyle(:text_dim))
     end
     if y <= bottom(area)

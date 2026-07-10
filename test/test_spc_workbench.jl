@@ -2301,6 +2301,13 @@ end
         T.update!(m, T.KeyEvent(:escape))
         @test m.prompt_kind === nothing
 
+        # capital I is symmetric with i
+        T.update!(m, T.KeyEvent('I'))
+        @test m.prompt_kind === :import_csv
+        @test m.view_mode == :library
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+
         m.last_export_path = "/tmp/prev_export.csv"
         T.update!(m, T.KeyEvent('e'))
         @test m.prompt_kind === :export_csv
@@ -2971,7 +2978,8 @@ end
         _set_prompt_path!(m, bad)
         T.update!(m, T.KeyEvent(:enter))
 
-        @test m.prompt_kind === nothing
+        # On err: keep prompt open + buf so path can be edited and re-Enter
+        @test m.prompt_kind === :import_csv
         @test m.view_mode == :library
         @test startswith(m.last_event, "import err:")
         @test length(m.charts) == n0
@@ -2981,8 +2989,12 @@ end
         end
         @test m.last_export_path == prev_export
         @test m.last_workbench_path == prev_wb
-        # buf kept for retry
         @test m.prompt_buf == bad
+        # Esc still cancels without quit
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+        @test m.quit == false
+        @test m.view_mode == :library
     end
 
     @testset "export e then re-import: numeric equality; last_export_path on ok" begin
@@ -3019,19 +3031,21 @@ end
                 @test r.values[i] ≈ known[i]
             end
 
-            # re-import into selected (chart 2 already has known; wipe chart 3 then import)
+            # re-import into selected chart 3: wipe to a known different series first
             m.library_selected = 3
-            snap3_len = length(m.charts[3].data.values)
+            m.charts[3].data.values = [0.0, 0.0]  # distinct from known
+            @test m.charts[3].data.values != known
             T.update!(m, T.KeyEvent('i'))
             _set_prompt_path!(m, path)
             T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === nothing
             @test occursin("imported", m.last_event)
             @test length(m.charts[3].data.values) == length(known)
             for i in eachindex(known)
                 @test m.charts[3].data.values[i] ≈ known[i]
             end
+            @test m.charts[3].data.values != [0.0, 0.0]  # mutated from wipe
             @test length(m.charts[2].data.values) == length(known)  # prior export target intact
-            @test snap3_len != length(m.charts[3].data.values) || snap3_len == length(known)
         end
     end
 
@@ -3045,26 +3059,31 @@ end
         T.update!(m, T.KeyEvent('m'))
         T.update!(m, T.KeyEvent('e'))
         @test m.prompt_kind === :export_csv
-        # empty path → fail closed
+        # empty path → fail closed; prompt stays open for retry
         while !isempty(m.prompt_buf)
             T.update!(m, T.KeyEvent(:backspace))
         end
         T.update!(m, T.KeyEvent(:enter))
-        @test m.prompt_kind === nothing
+        @test m.prompt_kind === :export_csv
         @test occursin("export err", m.last_event)
         @test m.last_export_path == "/tmp/keep_me.csv"
         @test m.view_mode == :library
         for i in eachindex(m.charts)
             @test m.charts[i].data.values == snaps[i]
         end
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
 
         # unwritable path
         m.last_export_path = "/tmp/keep_me.csv"
         T.update!(m, T.KeyEvent('e'))
-        _set_prompt_path!(m, "/proc/definitely_unwritable_$(rand(UInt32))/out.csv")
+        bad_path = "/proc/definitely_unwritable_$(rand(UInt32))/out.csv"
+        _set_prompt_path!(m, bad_path)
         T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === :export_csv  # stay open for path retry
         @test occursin("export err", m.last_event)
         @test m.last_export_path == "/tmp/keep_me.csv"
+        @test m.prompt_buf == bad_path
         @test m.view_mode == :library
     end
 
@@ -3088,15 +3107,16 @@ end
             @test isfile(path)
             @test m.view_mode == :library
 
-            # err: unwritable — path not updated
+            # err: unwritable — path not updated; prompt stays open for retry
             m.last_workbench_path = path
             T.update!(m, T.KeyEvent('w'))
             bad = "/proc/no_write_$(rand(UInt32))/wb.json"
             _set_prompt_path!(m, bad)
             T.update!(m, T.KeyEvent(:enter))
-            @test m.prompt_kind === nothing
+            @test m.prompt_kind === :save_workbench
             @test occursin("save err", m.last_event)
             @test m.last_workbench_path == path  # unchanged
+            @test m.prompt_buf == bad
             @test m.view_mode == :library
         end
     end
@@ -3145,7 +3165,7 @@ end
             @test m.tick == tick0
             @test m.live_max == live_max0
 
-            # load err: missing file — stay library, no chart mutate, last path kept
+            # load err: missing file — stay library, keep prompt open for path retry
             m.view_mode = :library
             snaps = [copy(c.data.values) for c in m.charts]
             n0 = length(m.charts)
@@ -3154,7 +3174,7 @@ end
             bad = joinpath(dir, "missing_$(rand(UInt32)).json")
             _set_prompt_path!(m, bad)
             T.update!(m, T.KeyEvent(:enter))
-            @test m.prompt_kind === nothing
+            @test m.prompt_kind === :load_workbench  # restored after io clears on err
             @test m.view_mode == :library
             @test startswith(m.last_event, "load err:")
             @test length(m.charts) == n0
@@ -3164,6 +3184,9 @@ end
             @test m.last_workbench_path == prev_path
             @test m.prompt_buf == bad  # kept for retry
             @test m.rng === rng0
+            T.update!(m, T.KeyEvent(:escape))
+            @test m.prompt_kind === nothing
+            @test m.view_mode == :library
         end
     end
 
