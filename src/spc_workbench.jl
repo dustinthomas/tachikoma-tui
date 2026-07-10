@@ -1046,6 +1046,8 @@ end
     # Seed policy when charts empty — NEVER flip default from :triple
     seed_demos::Symbol = :triple     # :triple | :single | :none
     tools::Vector{ToolEntry} = ToolEntry[]
+    # Prefill only for save/load prompts — never silent write to default path
+    last_workbench_path::String = ""
 end
 
 should_quit(m::SPCWorkbenchModel) = m.quit
@@ -2398,11 +2400,25 @@ end
 const run_spc_workbench = spc_workbench_demo
 
 """
-    spc_workbench(; paused=false)
+    spc_workbench(; paused=false, workbench=nothing)
 
-Live/interactive.
+Live/interactive. Optional `workbench` path loads schema-v1 JSON via
+`load_workbench` (construct) before `app(m)`.
 """
-function spc_workbench(; paused::Bool = false)
+function spc_workbench(;
+    paused::Bool = false,
+    workbench::Union{Nothing,AbstractString} = nothing,
+)
+    if workbench !== nothing
+        m_or_err = load_workbench(workbench)
+        m_or_err isa AbstractString && error(m_or_err)
+        m = m_or_err
+        if paused
+            m.paused = true
+        end
+        app(m)
+        return
+    end
     d = generate_spc_workbench_data(40; seed=42)
     n = length(d.values)
     vp = Viewport(x0 = n > 0 ? 1 : 0, x1 = n > 0 ? n : 0)

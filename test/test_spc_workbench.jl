@@ -1298,3 +1298,278 @@ end
         @test braille_on >= 2
     end
 end
+
+# ═══════════════════════════════════════════════════════════════════════
+# JSON session persistence (schema v1) — via package module (KD22)
+# ═══════════════════════════════════════════════════════════════════════
+
+module TestSPCWorkbenchJSON
+using Test
+using Random
+using TachikomaTUI
+# private bootstrap used by workbench itself (not exported)
+const _ensure_charts! = TachikomaTUI._ensure_charts!
+
+@testset "SPC Workbench JSON session persistence (schema v1)" begin
+
+    function _make_session()
+        d = generate_spc_workbench_data(12; seed = 99)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        # second chart first; set active before mutating non-active ChartSpec fields
+        # (set_active_chart! syncs legacy mirrors and would wipe stale m.usl onto chart)
+        idx = add_chart!(m; name = "Second", data = WorkbenchData(
+            values = [1.0, 2.0, 3.0, 4.0, 5.0], cl = 3.0, sigma = 1.0))
+        m.charts[idx].chart_type = I_MR
+        m.charts[idx].live_enabled = false
+        set_active_chart!(m, idx)
+        # mutate chart 1 (inactive) — not overwritten by legacy sync
+        ch = m.charts[1]
+        ch.usl = 110.0
+        ch.target = 100.0
+        ch.lsl = 90.0
+        ch.enabled_rules["WECO-6"] = true
+        ch.enabled_rules["WECO-1"] = false
+        ch.chart_type = Xbar_R
+        ch.live_enabled = true
+        ch.param = "thickness"
+        ch.units = "nm"
+        m.tools = [ToolEntry(id = "T1", description = "tool one")]
+        return m
+    end
+
+    @testset "tempfile round-trip: values, WECO, specs, active, chart_type wire" begin
+        m = _make_session()
+        path = joinpath(tempdir(), "spc_wb_rt_$(rand(UInt32)).json")
+        try
+            err = save_workbench(m, path)
+            @test err === nothing
+            @test isfile(path)
+            @test m.last_workbench_path == path
+
+            loaded = load_workbench(path)
+            @test loaded isa SPCWorkbenchModel
+            @test length(loaded.charts) == length(m.charts)
+            @test loaded.active == m.active
+            @test loaded.last_workbench_path == path
+
+            # values
+            @test loaded.charts[1].data.values == m.charts[1].data.values
+            @test loaded.charts[2].data.values == m.charts[2].data.values
+
+            # WECO rules
+            @test loaded.charts[1].enabled_rules["WECO-6"] === true
+            @test loaded.charts[1].enabled_rules["WECO-1"] === false
+
+            # specs
+            @test loaded.charts[1].usl == 110.0
+            @test loaded.charts[1].target == 100.0
+            @test loaded.charts[1].lsl == 90.0
+
+            # chart_type wire strings round-trip
+            @test chart_type_to_string(loaded.charts[1].chart_type) == "Xbar-R"
+            @test chart_type_to_string(loaded.charts[2].chart_type) == "I-MR"
+            @test loaded.charts[1].chart_type === Xbar_R
+            @test loaded.charts[2].chart_type === I_MR
+
+            # live_enabled written and restored
+            @test loaded.charts[1].live_enabled === true
+            @test loaded.charts[2].live_enabled === false
+
+            # tools registry
+            @test length(loaded.tools) == 1
+            @test loaded.tools[1].id == "T1"
+
+            # dict-level wire check
+            d = workbench_to_dict(m)
+            @test d["version"] == 1
+            @test d["charts"][1]["chart_type"] == "Xbar-R"
+            @test haskey(d["charts"][1], "live_enabled")
+            @test d["active"] == m.active
+        finally
+            isfile(path) && rm(path; force = true)
+        end
+    end
+
+    @testset "omitted live_enabled → false (safe default)" begin
+        d = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [
+                Dict{String,Any}(
+                    "id" => "CHT-1",
+                    "name" => "NoLiveKey",
+                    "chart_type" => "I-MR",
+                    "values" => [10.0, 11.0, 12.0],
+                    # live_enabled intentionally omitted
+                ),
+            ],
+        )
+        m = workbench_from_dict(d)
+        @test m isa SPCWorkbenchModel
+        @test m.charts[1].live_enabled === false
+        # writers always emit the field
+        out = workbench_to_dict(m)
+        @test haskey(out["charts"][1], "live_enabled")
+        @test out["charts"][1]["live_enabled"] === false
+    end
+
+    @testset "load err no mutate (fail closed)" begin
+        d0 = generate_spc_workbench_data(8; seed = 3)
+        m = SPCWorkbenchModel(data = d0, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        m.charts[1].usl = 55.0
+        m.charts[1].data.values[1] = 123.456
+        m.active = 1
+        m.rng = MersenneTwister(4242)
+        m.tick = 7
+        m.quit = false
+        m.live_max = 321
+        m.config_open = true
+        m.editing = :usl
+        m.edit_buf = "partial"
+        snapshot_vals = copy(m.charts[1].data.values)
+        snapshot_usl = m.charts[1].usl
+        snapshot_n = length(m.charts)
+        snapshot_rng_state = copy(m.rng)
+        snapshot_tick = m.tick
+        snapshot_live_max = m.live_max
+
+        bad = Dict{String,Any}("version" => 99, "active" => 1, "charts" => [
+            Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0]),
+        ])
+        err = workbench_from_dict!(m, bad)
+        @test err isa AbstractString
+        @test occursin("version", err) || occursin("unsupported", err)
+        # unchanged
+        @test length(m.charts) == snapshot_n
+        @test m.charts[1].data.values == snapshot_vals
+        @test m.charts[1].usl == snapshot_usl
+        @test m.tick == snapshot_tick
+        @test m.live_max == snapshot_live_max
+        @test m.config_open == true  # fail closed: no partial apply / no clear
+        @test m.editing === :usl
+
+        # empty charts
+        err2 = workbench_from_dict!(m, Dict{String,Any}("version" => 1, "active" => 1, "charts" => Any[]))
+        @test err2 isa AbstractString
+        @test length(m.charts) == snapshot_n
+        @test m.charts[1].usl == snapshot_usl
+
+        # missing version
+        err3 = workbench_from_dict!(m, Dict{String,Any}("charts" => [
+            Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0]),
+        ]))
+        @test err3 isa AbstractString
+        @test length(m.charts) == snapshot_n
+
+        # unknown chart_type
+        err4 = workbench_from_dict!(m, Dict{String,Any}(
+            "version" => 1, "active" => 1,
+            "charts" => [Dict("id" => "x", "name" => "y", "chart_type" => "NOPE", "values" => [1.0])],
+        ))
+        @test err4 isa AbstractString
+        @test length(m.charts) == snapshot_n
+        @test m.charts[1].data.values == snapshot_vals
+
+        # unreadable path
+        err5 = load_workbench!(m, "/tmp/definitely_missing_spc_wb_$(rand(UInt32)).json")
+        @test err5 isa AbstractString
+        @test occursin("load err", err5) || occursin("unreadable", err5)
+        @test length(m.charts) == snapshot_n
+        @test m.charts[1].usl == snapshot_usl
+    end
+
+    @testset "load_workbench! replaces charts + clears ephemerals + preserves rng/tick/live_max" begin
+        d0 = generate_spc_workbench_data(8; seed = 5)
+        m = SPCWorkbenchModel(data = d0, paused = false, seed_demos = :triple)
+        _ensure_charts!(m)
+        @test length(m.charts) == 3
+        m.rng = MersenneTwister(777)
+        m.tick = 42
+        m.live_max = 150
+        m.quit = false
+        m.config_open = true
+        m.editing = :target
+        m.edit_buf = "99"
+        m.hovered = 2
+        m.selected = 1
+        m.drag_start = (x = 1, y = 2, vp = Viewport())
+
+        path = joinpath(tempdir(), "spc_wb_inplace_$(rand(UInt32)).json")
+        try
+            src = _make_session()
+            @test save_workbench(src, path) === nothing
+
+            err = load_workbench!(m, path)
+            @test err === nothing
+            @test length(m.charts) == length(src.charts)
+            @test m.active == src.active
+            @test m.charts[1].usl == 110.0
+            @test m.charts[1].enabled_rules["WECO-6"] === true
+            @test m.last_workbench_path == path
+            # ephemerals cleared
+            @test m.config_open == false
+            @test m.editing === nothing
+            @test m.edit_buf == ""
+            @test m.hovered === nothing
+            @test m.selected === nothing
+            @test m.drag_start === nothing
+            @test m.view_mode === :dashboard
+            @test m.library_selected == m.active
+            # preserved
+            @test m.tick == 42
+            @test m.live_max == 150
+            @test m.quit == false
+            # rng identity preserved (same object)
+            @test m.rng isa MersenneTwister
+        finally
+            isfile(path) && rm(path; force = true)
+        end
+    end
+
+    @testset "admins/passcodes never applied; unknown chart keys ignored" begin
+        d = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "admins" => [Dict("user" => "evil", "passcode" => "secret")],
+            "passcodes" => ["x"],
+            "charts" => [
+                Dict{String,Any}(
+                    "id" => "CHT-z",
+                    "name" => "Safe",
+                    "chart_type" => "I-MR",
+                    "values" => [1.0, 2.0],
+                    "admins" => "ignore-me",
+                    "future_key" => 123,
+                    "live_enabled" => true,
+                ),
+            ],
+        )
+        m = workbench_from_dict(d)
+        @test m isa SPCWorkbenchModel
+        @test m.charts[1].name == "Safe"
+        @test m.charts[1].data.values == [1.0, 2.0]
+        # no admin field on model / chart
+        @test !hasfield(typeof(m), :admins)
+        @test !hasfield(typeof(m.charts[1]), :admins)
+    end
+
+    @testset "active clamped 1-based" begin
+        d = Dict{String,Any}(
+            "version" => 1,
+            "active" => 99,
+            "charts" => [
+                Dict("id" => "a", "name" => "A", "chart_type" => "I-MR", "values" => [1.0]),
+                Dict("id" => "b", "name" => "B", "chart_type" => "I-MR", "values" => [2.0]),
+            ],
+        )
+        m = workbench_from_dict(d)
+        @test m isa SPCWorkbenchModel
+        @test m.active == 2
+        @test m.library_selected == 2
+    end
+
+end
+
+end # module TestSPCWorkbenchJSON
