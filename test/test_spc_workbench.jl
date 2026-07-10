@@ -1180,6 +1180,144 @@ include("../src/spc_workbench.jl")
         @test isempty(visible_charts(m_empty))
         @test isempty(dashboard_pane_charts(m_empty))
     end
+
+    @testset "filters + visible_charts + A6 rehome (GC-PR4)" begin
+        d = generate_spc_workbench_data(10; seed = 11)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        # Three charts with distinct type / tool / owner metadata
+        idx1 = add_chart!(m; name = "Alpha")
+        idx2 = add_chart!(m; name = "Beta")
+        idx3 = add_chart!(m; name = "Gamma")
+        m.charts[idx1].chart_type = I_MR
+        m.charts[idx1].tools = ["T-A"]
+        m.charts[idx1].owner = "Alice"
+        m.charts[idx2].chart_type = Xbar_R
+        m.charts[idx2].tools = ["T-B"]
+        m.charts[idx2].owner = "Bob"
+        m.charts[idx3].chart_type = I_MR
+        m.charts[idx3].tools = ["T-A", "T-C"]
+        m.charts[idx3].owner = "Alice"
+        set_active_chart!(m, idx1)
+        @test m.filter_tool == ""
+        @test m.filter_type == ""   # wire String only (not Nothing/ChartType)
+        @test m.filter_owner == ""
+        @test length(visible_charts(m)) == 3
+        @test m.seed_demos === :none  # explicit; default remains :triple elsewhere
+
+        # filter by tool (setters package-private; available via include path here)
+        set_filter_tool!(m, "T-A")
+        vis = visible_charts(m)
+        @test length(vis) == 2
+        @test all(c -> "T-A" in c.tools, vis)
+        @test Set(c.name for c in vis) == Set(["Alpha", "Gamma"])
+
+        # empty ch.tools fails non-empty tool filter (stricter / stack pure policy)
+        m.charts[idx1].tools = String[]
+        vis_empty_tools = visible_charts(m)
+        @test all(c -> c.name != "Alpha", vis_empty_tools)
+        @test Set(c.name for c in vis_empty_tools) == Set(["Gamma"])
+        m.charts[idx1].tools = ["T-A"]  # restore
+        # chart with tools=["ETCH-1"] visible when filter_tool=="ETCH-1"
+        m.charts[idx2].tools = ["ETCH-1"]
+        set_filter_tool!(m, "ETCH-1")
+        vis_etch = visible_charts(m)
+        @test length(vis_etch) == 1
+        @test vis_etch[1].name == "Beta"
+        m.charts[idx2].tools = ["T-B"]
+        set_filter_tool!(m, "T-A")
+
+        # filter by type wire String (AND with tool)
+        set_filter_type!(m, "Xbar-R")
+        vis2 = visible_charts(m)
+        @test isempty(vis2)  # Beta has T-B only; no T-A + Xbar-R
+        # A6: no visible → keep active, empty message (no crash)
+        @test occursin("No charts match filters", m.last_event) ||
+              occursin("no charts match", lowercase(m.last_event))
+        @test m.active == idx1  # left as-is when empty visible
+
+        # type alone: clear filters, re-select Alpha, then apply type → A6 rehome
+        clear_filters!(m)
+        set_active_chart!(m, idx1)
+        @test current_chart(m).name == "Alpha"
+        set_filter_type!(m, "Xbar-R")
+        vis3 = visible_charts(m)
+        @test length(vis3) == 1
+        @test vis3[1].name == "Beta"
+        # A6: active Alpha filtered out → switch to first visible (Beta)
+        # last_event precedence: rehome message wins (not plain "filter type=…")
+        @test m.active == idx2
+        @test current_chart(m).name == "Beta"
+        @test occursin("active chart filtered", m.last_event)
+        @test occursin("Beta", m.last_event)
+        @test m.library_selected == m.active
+        # when already on visible chart, plain confirmation (no rehome overwrite)
+        set_filter_type!(m, "Xbar-R")
+        @test m.active == idx2
+        @test m.last_event == "filter type=Xbar-R"
+
+        # panes use visible_charts neighborhood
+        panes = dashboard_pane_charts(m; k = 3)
+        @test length(panes) == 1
+        @test panes[1].id == m.charts[idx2].id
+
+        # owner filter (strip equality)
+        clear_filters!(m)
+        @test m.filter_tool == "" && m.filter_type == "" && m.filter_owner == ""
+        @test length(visible_charts(m)) == 3
+        @test m.last_event == "filters cleared"
+        set_filter_owner!(m, "  Alice  ")
+        @test m.filter_owner == "Alice"
+        vis4 = visible_charts(m)
+        @test length(vis4) == 2
+        @test all(c -> strip(c.owner) == "Alice", vis4)
+
+        # clearing restores full list; active stays valid
+        act_before = m.active
+        clear_filters!(m)
+        @test length(visible_charts(m)) == 3
+        @test m.active == act_before
+
+        # seed_demos default still :triple
+        m_def = SPCWorkbenchModel(data = d, paused = true)
+        @test m_def.seed_demos === :triple
+
+        # A6: delete_chart! under filter rehomes active onto remaining visible
+        clear_filters!(m)
+        set_active_chart!(m, idx1)  # Alpha (T-A, Alice)
+        set_filter_owner!(m, "Alice")  # Alpha + Gamma; Beta hidden
+        @test Set(c.name for c in visible_charts(m)) == Set(["Alpha", "Gamma"])
+        @test m.active == idx1
+        id_gamma = m.charts[idx3].id
+        @test delete_chart!(m, idx1) === true  # delete active Alpha
+        @test length(m.charts) == 2
+        # active must be a visible chart (Gamma), not Bob/Beta
+        @test any(c -> c.id == current_chart(m).id, visible_charts(m))
+        @test current_chart(m).id == id_gamma || current_chart(m).name == "Gamma"
+        # [ ] cycle only among visible (absolute indices)
+        clear_filters!(m)
+        # rebuild 3 charts for cycle test
+        m2 = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        a = add_chart!(m2; name = "Keep")
+        b = add_chart!(m2; name = "Hide")
+        c = add_chart!(m2; name = "Keep2")
+        m2.charts[a].owner = "A"
+        m2.charts[b].owner = "B"
+        m2.charts[c].owner = "A"
+        set_active_chart!(m2, a)
+        set_filter_owner!(m2, "A")
+        @test length(visible_charts(m2)) == 2
+        _cycle_active_visible!(m2, +1)
+        @test current_chart(m2).name == "Keep2"
+        _cycle_active_visible!(m2, +1)
+        @test current_chart(m2).name == "Keep2"  # clamped at end
+        _cycle_active_visible!(m2, -1)
+        @test current_chart(m2).name == "Keep"
+        # never lands on Hide while filter active
+        for _ in 1:5
+            _cycle_active_visible!(m2, +1)
+            @test current_chart(m2).name != "Hide"
+        end
+    end
 end
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2155,6 +2293,515 @@ end
         @test braille_on > braille_off
         @test braille_on >= 2
     end
+
+    # ── GC-PR2: Chart library mode UI + prompt SM (A5 / KD21) ─────────────
+    @testset "library mode: open (m), CHART LIBRARY title, no dashboard bleed" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(12; seed = 7), paused = true)
+        _ensure_charts!(m)
+        @test m.view_mode == :dashboard
+        @test m.prompt_kind === nothing
+        @test m.pending_delete == false
+
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        @test m.library_selected == m.active
+        @test m.quit == false
+        @test m.last_event == "library open"
+
+        tb = T.TestBackend(80, 20); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 20), [], []))
+        @test T.find_text(tb, "CHART LIBRARY") !== nothing
+        # no-bleed: normal dashboard chrome must not render under library
+        @test T.find_text(tb, "SPC Workbench [dashboard]") === nothing
+        @test T.find_text(tb, "Side Stats") === nothing
+        @test T.find_text(tb, "Dashboard:") === nothing
+        full = join([string(T.row_text(tb, i)) for i in 1:20 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("Primary", full)
+    end
+
+    @testset "library: clone, d+y delete, rename prompt, Enter activate" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 3), paused = true)
+        _ensure_charts!(m)
+        n0 = length(m.charts)
+        @test n0 >= 2
+
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+
+        # clone selected
+        T.update!(m, T.KeyEvent('c'))
+        @test length(m.charts) == n0 + 1
+        @test m.library_selected == n0 + 1
+        @test endswith(m.charts[end].name, "(copy)")
+        @test m.view_mode == :library
+        @test m.quit == false
+
+        # delete cloned via d then y
+        n_before_del = length(m.charts)
+        T.update!(m, T.KeyEvent('d'))
+        @test m.pending_delete == true
+        @test m.quit == false
+        T.update!(m, T.KeyEvent('y'))
+        @test m.pending_delete == false
+        @test length(m.charts) == n_before_del - 1
+        @test m.view_mode == :library
+        @test m.quit == false
+
+        # cancel delete path: d then Esc
+        T.update!(m, T.KeyEvent('d'))
+        @test m.pending_delete == true
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.pending_delete == false
+        @test m.quit == false
+        @test m.view_mode == :library
+
+        # rename prompt: n, edit name, Enter
+        m.library_selected = 1
+        T.update!(m, T.KeyEvent('n'))
+        @test m.prompt_kind === :rename_chart
+        @test !isempty(m.prompt_buf)
+        for _ in 1:length(m.prompt_buf)
+            T.update!(m, T.KeyEvent(:backspace))
+        end
+        for ch in collect("Renamed")
+            T.update!(m, T.KeyEvent(ch))
+        end
+        # 'q' is a buffer character in prompt, not quit
+        T.update!(m, T.KeyEvent('q'))
+        @test m.quit == false
+        @test endswith(m.prompt_buf, "q")
+        T.update!(m, T.KeyEvent(:backspace))
+        @test m.prompt_buf == "Renamed"
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === nothing
+        @test m.charts[1].name == "Renamed"
+        @test m.view_mode == :library
+        @test m.quit == false
+
+        # Esc cancels rename without applying
+        T.update!(m, T.KeyEvent('n'))
+        @test m.prompt_kind === :rename_chart
+        for _ in 1:length(m.prompt_buf)
+            T.update!(m, T.KeyEvent(:backspace))
+        end
+        for ch in collect("Nope")
+            T.update!(m, T.KeyEvent(ch))
+        end
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+        @test m.charts[1].name == "Renamed"
+        @test m.quit == false
+
+        # Enter activates selected → dashboard
+        m.library_selected = min(2, length(m.charts))
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.view_mode == :dashboard
+        @test m.active == m.library_selected
+        @test m.quit == false
+        tb = T.TestBackend(80, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 18), [], []))
+        @test T.find_text(tb, "CHART LIBRARY") === nothing
+        @test T.find_text(tb, "SPC Workbench") !== nothing
+    end
+
+    @testset "library: Esc/q close without quit; I/O keys open prompts; add" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 1), paused = true)
+        _ensure_charts!(m)
+
+        # Esc closes library, no quit
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+        @test m.quit == false
+
+        # q closes library, no quit
+        T.update!(m, T.KeyEvent('M'))
+        @test m.view_mode == :library
+        T.update!(m, T.KeyEvent('q'))
+        @test m.view_mode == :dashboard
+        @test m.quit == false
+
+        # add empty chart from library
+        T.update!(m, T.KeyEvent('m'))
+        n0 = length(m.charts)
+        T.update!(m, T.KeyEvent('a'))
+        @test length(m.charts) == n0 + 1
+        @test m.library_selected == n0 + 1
+        @test isempty(m.charts[end].data.values)
+
+        # GC-PR3: I/O keys open path prompts (Enter wired in package-module suite)
+        T.update!(m, T.KeyEvent('i'))
+        @test m.prompt_kind === :import_csv
+        @test m.prompt_buf == ""
+        @test m.view_mode == :library
+        @test m.quit == false
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+
+        # capital I is symmetric with i
+        T.update!(m, T.KeyEvent('I'))
+        @test m.prompt_kind === :import_csv
+        @test m.view_mode == :library
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+
+        m.last_export_path = "/tmp/prev_export.csv"
+        T.update!(m, T.KeyEvent('e'))
+        @test m.prompt_kind === :export_csv
+        @test m.prompt_buf == "/tmp/prev_export.csv"
+        T.update!(m, T.KeyEvent(:escape))
+
+        T.update!(m, T.KeyEvent('E'))
+        @test m.prompt_kind === :export_csv
+        T.update!(m, T.KeyEvent(:escape))
+
+        m.last_workbench_path = "/tmp/prev_session.json"
+        T.update!(m, T.KeyEvent('w'))
+        @test m.prompt_kind === :save_workbench
+        @test m.prompt_buf == "/tmp/prev_session.json"
+        T.update!(m, T.KeyEvent(:escape))
+
+        T.update!(m, T.KeyEvent('W'))
+        @test m.prompt_kind === :load_workbench
+        @test m.prompt_buf == "/tmp/prev_session.json"
+        # q is a buffer character under prompt — never quit
+        T.update!(m, T.KeyEvent('q'))
+        @test m.quit == false
+        @test m.prompt_kind === :load_workbench
+        @test endswith(m.prompt_buf, "q")
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+        @test m.view_mode == :library
+        @test m.quit == false
+
+        # empty-name rename Enter → cancel message, name unchanged
+        m.library_selected = 1
+        name0 = m.charts[1].name
+        T.update!(m, T.KeyEvent('n'))
+        @test m.prompt_kind === :rename_chart
+        for _ in 1:length(m.prompt_buf)
+            T.update!(m, T.KeyEvent(:backspace))
+        end
+        @test isempty(m.prompt_buf)
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === nothing
+        @test m.last_event == "rename cancel: empty name"
+        @test m.charts[1].name == name0
+
+        # last-chart delete refuse
+        while length(m.charts) > 1
+            m.library_selected = length(m.charts)
+            T.update!(m, T.KeyEvent('d'))
+            T.update!(m, T.KeyEvent('y'))
+        end
+        @test length(m.charts) == 1
+        T.update!(m, T.KeyEvent('d'))
+        @test m.pending_delete == false
+        @test m.last_event == "cannot delete last chart"
+        @test m.view_mode == :library
+        @test m.quit == false
+    end
+
+    @testset "library: left/right no-op under library/prompt; no dashboard key bleed" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 5), paused = true)
+        _ensure_charts!(m)
+        n = length(m.data.values)
+        m.viewport.x0 = 3
+        m.viewport.x1 = min(n, 8)
+        x0, x1 = m.viewport.x0, m.viewport.x1
+        paused0 = m.paused
+
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+
+        T.update!(m, T.KeyEvent(:left))
+        @test m.viewport.x0 == x0
+        @test m.viewport.x1 == x1
+        @test m.view_mode == :library
+        T.update!(m, T.KeyEvent(:right))
+        @test m.viewport.x0 == x0
+        @test m.viewport.x1 == x1
+
+        # dashboard pause key must not fire in library
+        T.update!(m, T.KeyEvent('p'))
+        @test m.paused == paused0
+        @test m.view_mode == :library
+
+        # prompt swallows left/right and does not quit on q
+        T.update!(m, T.KeyEvent('n'))
+        @test m.prompt_kind === :rename_chart
+        T.update!(m, T.KeyEvent(:left))
+        @test m.viewport.x0 == x0
+        @test m.prompt_kind === :rename_chart
+        T.update!(m, T.KeyEvent(:right))
+        @test m.viewport.x1 == x1
+        @test m.prompt_kind === :rename_chart
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+        @test m.quit == false
+        @test m.view_mode == :library
+    end
+
+    @testset "library: mouse no-op / no stuck drag; ↑↓ selection" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 5), paused = true)
+        _ensure_charts!(m)
+        nch = length(m.charts)
+        @test nch >= 2
+
+        T.view(m, T.Frame(T.TestBackend(80, 18).buf, T.Rect(1, 1, 80, 18), [], []))
+        m.drag_start = (x = 10, y = 5, vp = deepcopy(m.viewport))
+        m.hover_x = 10
+        m.hovered = 1
+
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+
+        T.update!(m, T.MouseEvent(12, 6, T.mouse_left, T.mouse_move, false, false, false))
+        @test m.hover_x === nothing
+        @test m.hovered === nothing
+        @test occursin("modal", m.last_event)
+
+        T.update!(m, T.MouseEvent(12, 6, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.drag_start === nothing
+        @test m.view_mode == :library
+        @test m.quit == false
+
+        m.library_selected = 1
+        T.update!(m, T.KeyEvent(:down))
+        @test m.library_selected == 2
+        T.update!(m, T.KeyEvent(:up))
+        @test m.library_selected == 1
+        T.update!(m, T.KeyEvent(:up))
+        @test m.library_selected == 1
+        m.library_selected = nch
+        T.update!(m, T.KeyEvent(:down))
+        @test m.library_selected == nch
+
+        T.update!(m, T.KeyEvent('d'))
+        @test m.pending_delete
+        T.update!(m, T.MouseEvent(5, 5, T.mouse_left, T.mouse_press, false, false, false))
+        @test occursin("modal", m.last_event)
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.pending_delete == false
+        @test m.quit == false
+    end
+
+    @testset "library: scroll keeps selection visible; corrupt sel clamps" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 2), paused = true)
+        _ensure_charts!(m)
+        # Pad library past a short page height
+        for i in 1:12
+            add_chart!(m; name = "Extra-$i")
+        end
+        nch = length(m.charts)
+        @test nch >= 15
+
+        T.update!(m, T.KeyEvent('m'))
+        # Short height so only a few rows fit → scroll must advance
+        tb = T.TestBackend(80, 14); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 14), [], []))
+        vis = max(1, m.library_area.height - 8)
+        m.library_selected = 1
+        m.library_scroll = 0
+        for _ in 1:(nch - 1)
+            T.update!(m, T.KeyEvent(:down))
+        end
+        @test m.library_selected == nch
+        @test m.library_scroll >= max(0, nch - vis)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 14), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:14 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("▶", full)
+        @test occursin(string(nch) * ".", full) || occursin("Extra-", full)
+
+        # Corrupt selection: clamp on next library key; rename Enter must not BoundsError
+        m.library_selected = 0
+        T.update!(m, T.KeyEvent('n'))
+        @test m.library_selected >= 1
+        @test m.prompt_kind === :rename_chart
+        T.update!(m, T.KeyEvent(:enter))  # apply existing seed name
+        @test m.prompt_kind === nothing
+        @test m.quit == false
+
+        m.library_selected = 9999
+        T.update!(m, T.KeyEvent('c'))
+        @test m.library_selected == length(m.charts)
+        @test m.view_mode == :library
+    end
+
+    @testset "library: help/keymap mention m/library; live blocked by prompt" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 2), paused = true)
+        _ensure_charts!(m)
+        T.update!(m, T.KeyEvent('h'))
+        tb = T.TestBackend(80, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 24), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("library", lowercase(full)) || occursin("m/M", full)
+        @test occursin("filter", lowercase(full)) || occursin("f/F", full) || occursin("f       ", full)
+        T.update!(m, T.KeyEvent(:escape))
+        T.update!(m, T.KeyEvent('k'))
+        tb2 = T.TestBackend(80, 24); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 80, 24), [], []))
+        full2 = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("library", lowercase(full2)) || occursin("m M", full2)
+        @test occursin("filter", lowercase(full2)) || occursin("f           ", full2)
+        T.update!(m, T.KeyEvent(:escape))
+
+        m.paused = false
+        current_chart(m).live_enabled = true
+        @test _live_may_advance(m) === true
+        T.update!(m, T.KeyEvent('m'))
+        @test _live_may_advance(m) === false
+        T.update!(m, T.KeyEvent('n'))
+        @test m.prompt_kind === :rename_chart
+        @test _live_may_advance(m) === false
+        T.update!(m, T.KeyEvent(:escape))
+        @test _live_may_advance(m) === false  # still in library
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+        @test _live_may_advance(m) === true
+    end
+
+    @testset "filters f/F prompts: dashboard + library; side list; no :filters mode (GC-PR4)" begin
+        d = generate_spc_workbench_data(8; seed = 21)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        a = add_chart!(m; name = "KeepMe")
+        b = add_chart!(m; name = "HideMe")
+        m.charts[a].owner = "A"
+        m.charts[a].tools = ["TA"]
+        m.charts[a].chart_type = I_MR
+        m.charts[b].owner = "B"
+        m.charts[b].tools = ["TB"]
+        m.charts[b].chart_type = Xbar_S
+        set_active_chart!(m, a)
+        @test m.seed_demos === :none
+        @test m.filter_type isa String
+
+        # dashboard f opens filter_tool prompt (cycle start); does NOT open :filters mode
+        T.update!(m, T.KeyEvent('f'))
+        @test m.prompt_kind === :filter_tool
+        @test m.view_mode == :dashboard
+        @test m.quit == false
+        # Esc cancels prompt only — filters unchanged
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+        @test m.last_event == "filter edit cancel"
+        @test m.filter_tool == ""
+        @test m.quit == false
+
+        # Apply owner filter via prompt cycle: f f f → owner (after tool+type opens advance field)
+        m.filter_prompt_field = :owner
+        T.update!(m, T.KeyEvent('f'))
+        @test m.prompt_kind === :filter_owner
+        for ch in "A"
+            T.update!(m, T.KeyEvent(ch))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === nothing
+        @test m.filter_owner == "A"
+        @test length(visible_charts(m)) == 1
+        @test visible_charts(m)[1].name == "KeepMe"
+
+        # Library list shows only filtered charts; f/F available in library
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        tb2 = T.TestBackend(80, 22); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 80, 22), [], []))
+        lib = join([string(T.row_text(tb2, i)) for i = 1:22 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("KeepMe", lib)
+        @test !occursin("HideMe", lib)
+        @test occursin("filters:", lib) || occursin("owner=A", lib)
+        # library f opens filter prompt (stays in library)
+        T.update!(m, T.KeyEvent('f'))
+        @test m.view_mode == :library
+        @test m.prompt_kind in (:filter_tool, :filter_type, :filter_owner)
+        T.update!(m, T.KeyEvent(:escape))
+        # library F clears all filters
+        T.update!(m, T.KeyEvent('F'))
+        @test m.filter_tool == "" && m.filter_type == "" && m.filter_owner == ""
+        @test m.last_event == "filters cleared"
+        @test m.view_mode == :library
+        @test length(visible_charts(m)) == 2
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+
+        # Filter that hides all → empty dashboard message + side Charts: 0/N + footer
+        set_filter_owner!(m, "Nobody")
+        @test isempty(visible_charts(m))
+        tb3 = T.TestBackend(80, 20); T.reset!(tb3.buf)
+        T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 80, 20), [], []))
+        dash = join([string(T.row_text(tb3, i)) for i = 1:20 if T.row_text(tb3, i) !== nothing], "\n")
+        @test occursin("No charts match filters", dash)
+        @test occursin("Charts: 0/2", dash) || occursin("Charts: 0/", dash)
+        @test occursin("(no match)", dash) || occursin("no match", lowercase(dash))
+        @test occursin("Side Stats", dash)
+        @test occursin("last=", dash)  # footer still rendered
+
+        # Side list respects filters (visible only) + count form
+        clear_filters!(m)
+        set_filter_owner!(m, "A")
+        set_active_chart!(m, a)
+        tb4 = T.TestBackend(90, 28); T.reset!(tb4.buf)
+        T.view(m, T.Frame(tb4.buf, T.Rect(1, 1, 90, 28), [], []))
+        side = join([string(T.row_text(tb4, i)) for i = 1:28 if T.row_text(tb4, i) !== nothing], "\n")
+        @test occursin("Charts: 1/2", side) || occursin("KeepMe", side)
+        @test !occursin("HideMe", side)
+
+        # ] / [ under filter only cycle visible (never land on HideMe)
+        set_active_chart!(m, a)
+        @test current_chart(m).name == "KeepMe"
+        T.update!(m, T.KeyEvent(']'))
+        @test current_chart(m).name == "KeepMe"  # only one visible
+        @test current_chart(m).name != "HideMe"
+        T.update!(m, T.KeyEvent('['))
+        @test current_chart(m).name == "KeepMe"
+
+        # F on dashboard clears
+        T.update!(m, T.KeyEvent('F'))
+        @test m.filter_owner == ""
+        @test m.last_event == "filters cleared"
+
+        # type filter prompt: parse wire string on Enter
+        m.filter_prompt_field = :type
+        T.update!(m, T.KeyEvent('f'))
+        @test m.prompt_kind === :filter_type
+        for ch in "Xbar-S"
+            T.update!(m, T.KeyEvent(ch))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.filter_type == "Xbar-S"
+        @test length(visible_charts(m)) == 1
+        @test visible_charts(m)[1].name == "HideMe"
+        # A6 rehome last_event when active was KeepMe
+        @test m.active == b
+        @test occursin("filtered", m.last_event)
+
+        # invalid type keeps prompt open for retry
+        m.filter_prompt_field = :type
+        T.update!(m, T.KeyEvent('f'))
+        @test m.prompt_kind === :filter_type
+        while !isempty(m.prompt_buf)
+            T.update!(m, T.KeyEvent(:backspace))
+        end
+        for ch in "NOTATYPE"
+            T.update!(m, T.KeyEvent(ch))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === :filter_type
+        @test occursin("invalid", m.last_event)
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_buf == ""  # cancel clears buf
+
+        # anti-port: never enter :filters or :tools view modes
+        @test m.view_mode in (:dashboard, :library, :help, :keymap, :builder, :focused)
+        @test m.view_mode != :filters
+        @test m.view_mode != :tools
+        # package-private setters exist on the included workbench surface
+        @test isdefined(@__MODULE__, :set_filter_tool!)
+        @test isdefined(@__MODULE__, :clear_filters!)
+        clear_filters!(m)
+    end
 end
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2511,6 +3158,343 @@ end
 
 end # module TestSPCWorkbenchCSVImport
 
+# ═══════════════════════════════════════════════════════════════════════
+# GC-PR3: library i/e/w/W path prompts → CSV/JSON I/O APIs (KeyEvent).
+# Package-module path (KD22) so Enter hits TachikomaTUI I/O symbols.
+# ═══════════════════════════════════════════════════════════════════════
+
+module TestSPCWorkbenchLibraryIO
+using Test
+using TachikomaTUI
+using Tachikoma
+using Random
+
+const T = Tachikoma
+const WB = TachikomaTUI
+const _ensure_charts! = WB._ensure_charts!
+const current_chart = WB.current_chart
+
+const FIX_DIR = joinpath(@__DIR__, "fixtures", "spc")
+const SAMPLE = joinpath(FIX_DIR, "sample_value.csv")
+
+"""Type `path` into the active path prompt via KeyEvents (printable chars)."""
+function _type_path!(m, path::AbstractString)
+    for ch in collect(String(path))
+        T.update!(m, T.KeyEvent(ch))
+    end
+end
+
+"""Clear prompt_buf with backspaces then type path."""
+function _set_prompt_path!(m, path::AbstractString)
+    while !isempty(m.prompt_buf)
+        T.update!(m, T.KeyEvent(:backspace))
+    end
+    _type_path!(m, path)
+end
+
+@testset "GC-PR3 library I/O keys (using TachikomaTUI)" begin
+
+    @testset "import i: active≠library_selected mutates selected chart" begin
+        d = generate_spc_workbench_data(20; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        @test length(m.charts) >= 3
+        @test m.seed_demos === :triple
+
+        # Distinct series; keep active on chart 1, select chart 2
+        m.charts[1].data.values = [1.0, 2.0, 3.0]
+        m.charts[2].data.values = [9.0, 8.0]
+        m.charts[3].data.values = [100.0]
+        m.active = 1
+        m.library_selected = 2
+        active_snap = copy(m.charts[1].data.values)
+        other_snap = copy(m.charts[3].data.values)
+        n_charts = length(m.charts)
+
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        m.library_selected = 2
+        @test m.active == 1
+        @test m.active != m.library_selected
+
+        T.update!(m, T.KeyEvent('i'))
+        @test m.prompt_kind === :import_csv
+        @test m.prompt_buf == ""
+        _set_prompt_path!(m, SAMPLE)
+        T.update!(m, T.KeyEvent(:enter))
+
+        @test m.prompt_kind === nothing
+        @test m.view_mode == :library
+        @test m.active == 1  # active unchanged
+        @test length(m.charts) == n_charts
+        @test occursin("imported", m.last_event)
+        @test m.charts[2].live_enabled === false
+        @test length(m.charts[2].data.values) == 10
+        # active chart untouched
+        @test m.charts[1].data.values == active_snap
+        @test m.charts[3].data.values == other_snap
+        # selected series matches fixture
+        r = parse_csv_table(SAMPLE)
+        @test r isa CsvParseOk
+        @test m.charts[2].data.values == r.values
+    end
+
+    @testset "import err: no mutate; last_event import err; stay library" begin
+        d = generate_spc_workbench_data(12; seed = 3)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        m.active = 1
+        m.library_selected = 2
+        snaps = [copy(c.data.values) for c in m.charts]
+        lives = [c.live_enabled for c in m.charts]
+        n0 = length(m.charts)
+        prev_export = m.last_export_path
+        prev_wb = m.last_workbench_path
+
+        T.update!(m, T.KeyEvent('m'))
+        m.library_selected = 2
+        T.update!(m, T.KeyEvent('i'))
+        bad = joinpath(FIX_DIR, "does_not_exist_$(rand(UInt32)).csv")
+        _set_prompt_path!(m, bad)
+        T.update!(m, T.KeyEvent(:enter))
+
+        # On err: keep prompt open + buf so path can be edited and re-Enter
+        @test m.prompt_kind === :import_csv
+        @test m.view_mode == :library
+        @test startswith(m.last_event, "import err:")
+        @test length(m.charts) == n0
+        for i in eachindex(m.charts)
+            @test m.charts[i].data.values == snaps[i]
+            @test m.charts[i].live_enabled === lives[i]
+        end
+        @test m.last_export_path == prev_export
+        @test m.last_workbench_path == prev_wb
+        @test m.prompt_buf == bad
+        # Esc still cancels without quit
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+        @test m.quit == false
+        @test m.view_mode == :library
+    end
+
+    @testset "export e then re-import: numeric equality; last_export_path on ok" begin
+        d = generate_spc_workbench_data(15; seed = 4)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        known = [11.1, 22.2, 33.3, 44.4]
+        m.charts[2].data.values = copy(known)
+        m.active = 1
+        m.library_selected = 2
+        orig_active = copy(m.charts[1].data.values)
+
+        mktempdir() do dir
+            path = joinpath(dir, "lib_sel.csv")
+            T.update!(m, T.KeyEvent('m'))
+            @test m.view_mode == :library
+            m.library_selected = 2
+            T.update!(m, T.KeyEvent('e'))
+            @test m.prompt_kind === :export_csv
+            _set_prompt_path!(m, path)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === nothing
+            @test occursin("exported $(length(known)) values", m.last_event)
+            @test m.last_export_path == path
+            @test m.view_mode == :library
+            @test m.quit == false
+            @test m.charts[1].data.values == orig_active
+            @test m.active == 1
+
+            r = parse_csv_table(path)
+            @test r isa CsvParseOk
+            @test length(r.values) == length(known)
+            for i in eachindex(known)
+                @test r.values[i] ≈ known[i]
+            end
+
+            # re-import into selected chart 3: wipe to a known different series first
+            m.library_selected = 3
+            m.charts[3].data.values = [0.0, 0.0]  # distinct from known
+            @test m.charts[3].data.values != known
+            T.update!(m, T.KeyEvent('i'))
+            _set_prompt_path!(m, path)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === nothing
+            @test occursin("imported", m.last_event)
+            @test length(m.charts[3].data.values) == length(known)
+            for i in eachindex(known)
+                @test m.charts[3].data.values[i] ≈ known[i]
+            end
+            @test m.charts[3].data.values != [0.0, 0.0]  # mutated from wipe
+            @test length(m.charts[2].data.values) == length(known)  # prior export target intact
+        end
+    end
+
+    @testset "export err: last_export_path not updated; charts unchanged" begin
+        d = generate_spc_workbench_data(10; seed = 5)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        m.last_export_path = "/tmp/keep_me.csv"
+        snaps = [copy(c.data.values) for c in m.charts]
+
+        T.update!(m, T.KeyEvent('m'))
+        T.update!(m, T.KeyEvent('e'))
+        @test m.prompt_kind === :export_csv
+        # empty path → fail closed; prompt stays open for retry
+        while !isempty(m.prompt_buf)
+            T.update!(m, T.KeyEvent(:backspace))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === :export_csv
+        @test occursin("export err", m.last_event)
+        @test m.last_export_path == "/tmp/keep_me.csv"
+        @test m.view_mode == :library
+        for i in eachindex(m.charts)
+            @test m.charts[i].data.values == snaps[i]
+        end
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+
+        # unwritable path
+        m.last_export_path = "/tmp/keep_me.csv"
+        T.update!(m, T.KeyEvent('e'))
+        bad_path = "/proc/definitely_unwritable_$(rand(UInt32))/out.csv"
+        _set_prompt_path!(m, bad_path)
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === :export_csv  # stay open for path retry
+        @test occursin("export err", m.last_event)
+        @test m.last_export_path == "/tmp/keep_me.csv"
+        @test m.prompt_buf == bad_path
+        @test m.view_mode == :library
+    end
+
+    @testset "save w Ok / err: last_workbench_path only on success" begin
+        d = generate_spc_workbench_data(12; seed = 6)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        m.charts[1].usl = 42.0
+        m.last_workbench_path = ""
+
+        mktempdir() do dir
+            path = joinpath(dir, "session.json")
+            T.update!(m, T.KeyEvent('m'))
+            T.update!(m, T.KeyEvent('w'))
+            @test m.prompt_kind === :save_workbench
+            _set_prompt_path!(m, path)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === nothing
+            @test m.last_workbench_path == path
+            @test occursin("saved", m.last_event)
+            @test isfile(path)
+            @test m.view_mode == :library
+
+            # err: unwritable — path not updated; prompt stays open for retry
+            m.last_workbench_path = path
+            T.update!(m, T.KeyEvent('w'))
+            bad = "/proc/no_write_$(rand(UInt32))/wb.json"
+            _set_prompt_path!(m, bad)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === :save_workbench
+            @test occursin("save err", m.last_event)
+            @test m.last_workbench_path == path  # unchanged
+            @test m.prompt_buf == bad
+            @test m.view_mode == :library
+        end
+    end
+
+    @testset "load W round-trip KeyEvent; err stay library no mutate" begin
+        d = generate_spc_workbench_data(14; seed = 8)
+        src = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(src)
+        src.charts[1].data.values = [7.0, 8.0, 9.0]
+        src.charts[1].usl = 55.0
+        src.active = 2
+
+        mktempdir() do dir
+            path = joinpath(dir, "roundtrip.json")
+            @test save_workbench(src, path) === nothing
+
+            # Fresh model → library → W load
+            m = SPCWorkbenchModel(
+                data = generate_spc_workbench_data(5; seed = 1),
+                paused = true,
+                seed_demos = :triple,
+            )
+            _ensure_charts!(m)
+            m.rng = MersenneTwister(4242)
+            rng0 = m.rng
+            tick0 = m.tick
+            live_max0 = m.live_max
+            n_before = length(m.charts)
+            @test n_before >= 1
+            T.update!(m, T.KeyEvent('m'))
+            @test m.view_mode == :library
+            T.update!(m, T.KeyEvent('W'))
+            @test m.prompt_kind === :load_workbench
+            _set_prompt_path!(m, path)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === nothing
+            @test m.view_mode == :dashboard  # load clears to dashboard
+            @test occursin("loaded", m.last_event)
+            @test m.last_workbench_path == path
+            @test length(m.charts) == length(src.charts)
+            @test m.active == src.active
+            @test m.charts[1].data.values == [7.0, 8.0, 9.0]
+            @test m.charts[1].usl == 55.0
+            # load_workbench! preserves rng/tick/live_max identity
+            @test m.rng === rng0
+            @test m.tick == tick0
+            @test m.live_max == live_max0
+
+            # load err: missing file — stay library, keep prompt open for path retry
+            m.view_mode = :library
+            snaps = [copy(c.data.values) for c in m.charts]
+            n0 = length(m.charts)
+            prev_path = m.last_workbench_path
+            T.update!(m, T.KeyEvent('W'))
+            bad = joinpath(dir, "missing_$(rand(UInt32)).json")
+            _set_prompt_path!(m, bad)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === :load_workbench  # restored after io clears on err
+            @test m.view_mode == :library
+            @test startswith(m.last_event, "load err:")
+            @test length(m.charts) == n0
+            for i in eachindex(m.charts)
+                @test m.charts[i].data.values == snaps[i]
+            end
+            @test m.last_workbench_path == prev_path
+            @test m.prompt_buf == bad  # kept for retry
+            @test m.rng === rng0
+            T.update!(m, T.KeyEvent(:escape))
+            @test m.prompt_kind === nothing
+            @test m.view_mode == :library
+        end
+    end
+
+    @testset "prompt path may contain q; no quit" begin
+        d = generate_spc_workbench_data(8; seed = 2)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        T.update!(m, T.KeyEvent('m'))
+        T.update!(m, T.KeyEvent('i'))
+        @test m.prompt_kind === :import_csv
+        path_with_q = joinpath(tempdir(), "q_path_$(rand(UInt32)).csv")
+        _set_prompt_path!(m, path_with_q)
+        @test occursin("q", m.prompt_buf)
+        @test m.quit == false
+        @test m.view_mode == :library
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.quit == false
+        @test m.prompt_kind === nothing
+    end
+
+    @testset "seed_demos default remains :triple" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 1), paused = true)
+        @test m.seed_demos === :triple
+    end
+end
+
+end # module TestSPCWorkbenchLibraryIO
+
 # JSON session persistence (schema v1) — via package module (KD22)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -2547,6 +3531,43 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
         ch.units = "nm"
         m.tools = [ToolEntry(id = "T1", description = "tool one")]
         return m
+    end
+
+    @testset "GC-PR4: filters omitted from JSON; load clears session filters" begin
+        m = _make_session()
+        m.filter_tool = "ETCH-1"
+        m.filter_type = "I-MR"
+        m.filter_owner = "Nobody"
+        m.filter_prompt_field = :owner
+        d = workbench_to_dict(m)
+        @test !haskey(d, "filter_tool")
+        @test !haskey(d, "filter_type")
+        @test !haskey(d, "filter_owner")
+        @test !haskey(d, "filter_prompt_field")
+        # setters not public exports
+        @test !(:set_filter_tool! in names(TachikomaTUI))
+        @test !(:set_filter_type! in names(TachikomaTUI))
+        @test !(:set_filter_owner! in names(TachikomaTUI))
+        @test !(:clear_filters! in names(TachikomaTUI))
+        @test :visible_charts in names(TachikomaTUI)
+        @test :dashboard_pane_charts in names(TachikomaTUI)
+
+        path = joinpath(tempdir(), "spc_wb_filt_$(rand(UInt32)).json")
+        try
+            err = save_workbench(m, path)
+            @test err === nothing
+            # leave filters set on model then load into same model
+            err2 = load_workbench!(m, path)
+            @test err2 === nothing
+            @test m.filter_tool == ""
+            @test m.filter_type == ""
+            @test m.filter_owner == ""
+            @test m.filter_prompt_field === :tool
+            @test length(visible_charts(m)) == length(m.charts)
+            @test !isempty(m.charts)
+        finally
+            isfile(path) && rm(path; force = true)
+        end
     end
 
     @testset "tempfile round-trip: values, WECO, specs, active, chart_type wire" begin

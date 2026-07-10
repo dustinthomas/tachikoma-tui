@@ -1647,11 +1647,24 @@ end
     library_area::Rect = Rect(0, 0, 0, 0)
     library_last_click::Union{Nothing, NamedTuple{(:idx, :tick), Tuple{Int, Int}}} = nothing
     view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder
+    # Library / prompt SM (GC-PR2 / KD21)
+    prompt_kind::Union{Nothing,Symbol} = nothing
+    # :import_csv | :export_csv | :save_workbench | :load_workbench | :rename_chart
+    # :filter_tool | :filter_type | :filter_owner  (GC-PR4)
+    prompt_buf::String = ""
+    pending_delete::Bool = false
+    # Prefill only for export prompts — never silent write to default path
+    last_export_path::String = ""
     # Seed policy when charts empty — NEVER flip default from :triple
     seed_demos::Symbol = :triple     # :triple | :single | :none
     tools::Vector{ToolEntry} = ToolEntry[]
     # Prefill only for save/load prompts — never silent write to default path
     last_workbench_path::String = ""
+    # Session-ephemeral dashboard/library filters (GC-PR4) — NOT in JSON schema
+    filter_tool::String = ""       # empty = no filter; match requires tool in ch.tools
+    filter_type::String = ""       # wire form e.g. "I-MR"; empty = no filter (NOT Union{Nothing,ChartType})
+    filter_owner::String = ""      # empty = no filter; strip equality
+    filter_prompt_field::Symbol = :tool  # cycle :tool → :type → :owner on each f open
     # Phase B (PR6 / KD25): in-memory SharedTable after CSV ingress
     table::SharedTable = SharedTable()
     # Builder form state (keyboard-only modal)
@@ -1863,6 +1876,10 @@ function delete_chart!(m::SPCWorkbenchModel, idx::Int)::Bool
     end
     m.library_selected = clamp(m.library_selected, 1, length(m.charts))
     _ensure_charts!(m)  # resync legacy mirrors from new active
+    # A6: under filters, absolute clamp may land on a non-matching chart — rehome
+    if _any_filter_active(m)
+        _rehome_active_if_filtered!(m)
+    end
     return true
 end
 
@@ -1884,16 +1901,175 @@ function set_active_chart!(m::SPCWorkbenchModel, idx::Int)
     return nothing
 end
 
-# ── Multi-plot pane selection (GC-PR1 / PR2a) ───────────────────────────
+# ── Multi-plot pane selection + filters (GC-PR1 / GC-PR4) ───────────────
+
+"""True when any session filter is non-empty."""
+function _any_filter_active(m::SPCWorkbenchModel)::Bool
+    return !isempty(m.filter_tool) || !isempty(m.filter_type) || !isempty(m.filter_owner)
+end
+
+"""True when chart matches active filters (empty filter field = pass)."""
+function _chart_matches_filters(m::SPCWorkbenchModel, ch::ChartSpec)::Bool
+    if !isempty(m.filter_tool)
+        # LOCKED: empty ch.tools does NOT pass a non-empty tool filter
+        (m.filter_tool in ch.tools) || return false
+    end
+    if !isempty(m.filter_type)
+        chart_type_to_string(ch.chart_type) == m.filter_type || return false
+    end
+    if !isempty(m.filter_owner)
+        # strip both sides (intentional vs bare ==): chart owner may have padding
+        strip(ch.owner) == strip(m.filter_owner) || return false
+    end
+    return true
+end
 
 """
     visible_charts(m) -> Vector{ChartSpec}
 
-GC-PR1: identity — all charts in library order (shared refs).
-GC-PR4 will filter by tool/type/owner.
+Charts in library order that pass `filter_tool` / `filter_type` / `filter_owner`.
+Empty filters → identity (all charts, shared refs). Demo charts often have
+`tools==String[]` so a non-empty tool filter yields zero matches until tools
+are assigned (builder).
 """
 function visible_charts(m::SPCWorkbenchModel)::Vector{ChartSpec}
-    return m.charts
+    if !_any_filter_active(m)
+        return m.charts
+    end
+    out = ChartSpec[]
+    for ch in m.charts
+        _chart_matches_filters(m, ch) && push!(out, ch)
+    end
+    return out
+end
+
+"""
+A6: if active chart is filtered out, switch to first visible.
+Returns `true` when `active` changed (caller must keep rehome `last_event`).
+Empty visible → leave active as-is, return `false`.
+"""
+function _rehome_active_if_filtered!(m::SPCWorkbenchModel)::Bool
+    vis = visible_charts(m)
+    isempty(vis) && return false
+    isempty(m.charts) && return false
+    act = current_chart(m)
+    any(c -> c.id == act.id, vis) && return false
+    idx = findfirst(c -> c.id == vis[1].id, m.charts)
+    idx === nothing && return false
+    set_active_chart!(m, idx)
+    m.last_event = "active chart filtered — switched to $(vis[1].name)"
+    return true
+end
+
+"""Package-private. Set tool filter (stripped string); rehome with last_event precedence."""
+function set_filter_tool!(m::SPCWorkbenchModel, s::AbstractString)
+    m.filter_tool = String(strip(s))
+    changed = _rehome_active_if_filtered!(m)
+    if !changed
+        if isempty(visible_charts(m)) && _any_filter_active(m)
+            m.last_event = "No charts match filters"
+        else
+            m.last_event = isempty(m.filter_tool) ? "filter tool cleared" : "filter tool=$(m.filter_tool)"
+        end
+    end
+    return nothing
+end
+
+"""Package-private. Set type filter as wire String (empty clears). Rehome + last_event precedence."""
+function set_filter_type!(m::SPCWorkbenchModel, s::AbstractString)
+    m.filter_type = String(strip(s))
+    changed = _rehome_active_if_filtered!(m)
+    if !changed
+        if isempty(visible_charts(m)) && _any_filter_active(m)
+            m.last_event = "No charts match filters"
+        else
+            m.last_event = isempty(m.filter_type) ? "filter type cleared" : "filter type=$(m.filter_type)"
+        end
+    end
+    return nothing
+end
+
+"""Package-private. Set owner filter (stripped); rehome with last_event precedence."""
+function set_filter_owner!(m::SPCWorkbenchModel, s::AbstractString)
+    m.filter_owner = String(strip(s))
+    changed = _rehome_active_if_filtered!(m)
+    if !changed
+        if isempty(visible_charts(m)) && _any_filter_active(m)
+            m.last_event = "No charts match filters"
+        else
+            m.last_event = isempty(m.filter_owner) ? "filter owner cleared" : "filter owner=$(m.filter_owner)"
+        end
+    end
+    return nothing
+end
+
+"""Package-private. Clear all three filters; cancel filter prompt if open.
+
+After clear, every chart is visible so A6 rehome is a no-op — always set
+`last_event = "filters cleared"` (no rehome branch).
+"""
+function clear_filters!(m::SPCWorkbenchModel)
+    m.filter_tool = ""
+    m.filter_type = ""
+    m.filter_owner = ""
+    if m.prompt_kind === :filter_tool || m.prompt_kind === :filter_type || m.prompt_kind === :filter_owner
+        m.prompt_kind = nothing
+        m.prompt_buf = ""
+    end
+    m.last_event = "filters cleared"
+    return nothing
+end
+
+"""Cycle `active` among `visible_charts` by `delta` (±1). Absolute indices into `m.charts`."""
+function _cycle_active_visible!(m::SPCWorkbenchModel, delta::Int)
+    vis = visible_charts(m)
+    if isempty(vis)
+        m.last_event = "No charts match filters"
+        return nothing
+    end
+    isempty(m.charts) && return nothing
+    act = current_chart(m)
+    pos = findfirst(c -> c.id == act.id, vis)
+    if pos === nothing
+        # Active was filtered out — land on first (forward) or last (backward)
+        new_pos = delta >= 0 ? 1 : length(vis)
+    else
+        new_pos = clamp(pos + delta, 1, length(vis))
+    end
+    idx = findfirst(c -> c.id == vis[new_pos].id, m.charts)
+    idx === nothing && return nothing
+    set_active_chart!(m, idx)
+    m.last_event = "chart $(m.active)"
+    return nothing
+end
+
+"""Open next one-field filter prompt (tool→type→owner cycle). Shared by dashboard + library."""
+function _open_filter_prompt_cycle!(m::SPCWorkbenchModel)
+    field = m.filter_prompt_field
+    if field === :type
+        _open_prompt!(m, :filter_type; seed = m.filter_type)
+        m.filter_prompt_field = :owner
+    elseif field === :owner
+        _open_prompt!(m, :filter_owner; seed = m.filter_owner)
+        m.filter_prompt_field = :tool
+    else
+        # :tool (default) and any unknown → tool
+        _open_prompt!(m, :filter_tool; seed = m.filter_tool)
+        m.filter_prompt_field = :type
+    end
+    return nothing
+end
+
+"""Shared f/F filter keys for dashboard and library. Returns true if handled."""
+function _handle_filter_char!(m::SPCWorkbenchModel, c::Char)::Bool
+    if c == 'f'
+        _open_filter_prompt_cycle!(m)
+        return true
+    elseif c == 'F'
+        clear_filters!(m)
+        return true
+    end
+    return false
 end
 
 """
@@ -1902,6 +2078,7 @@ end
 Active chart plus the next (k-1) visible neighbors. Primary interactive plot
 is panes[1]; read-only extras are panes[2:end]. Fixes the hard-coded
 `charts[2]`/`charts[3]` lock (active==2 duplicate / post-delete hazards).
+Uses `visible_charts` (filter-aware).
 """
 function dashboard_pane_charts(m::SPCWorkbenchModel; k::Int = 3)::Vector{ChartSpec}
     vis = visible_charts(m)
@@ -1915,6 +2092,7 @@ end
 
 export ToolEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
 export visible_charts, dashboard_pane_charts
+# set_filter_tool! / set_filter_type! / set_filter_owner! / clear_filters! stay package-private
 
 # Builder form field order (PR6 minimal form)
 const BUILDER_FIELDS = [
@@ -2145,6 +2323,173 @@ end
 
 # ── Update (Key + Mouse, full fidelity) ─────────────────────────────────
 
+"""Rows available for the chart list (title/summary/footer reserved)."""
+function _library_visible_capacity(m::SPCWorkbenchModel)::Int
+    a = m.library_area
+    h = (a.height > 0) ? a.height : 20
+    # title + blank + summary + blank ≈ 4; footer/prompt reserve ≈ 4
+    return max(1, h - 8)
+end
+
+"""Keep `library_selected` in range and `library_scroll` so selection is visible."""
+function _sync_library_scroll!(m::SPCWorkbenchModel, nch::Int = length(m.charts), vis::Int = _library_visible_capacity(m))
+    vis = max(1, vis)
+    if nch <= 0
+        m.library_selected = 1
+        m.library_scroll = 0
+        return
+    end
+    m.library_selected = clamp(m.library_selected, 1, nch)
+    sel = m.library_selected
+    max_scroll = max(0, nch - vis)
+    scroll = clamp(m.library_scroll, 0, max_scroll)
+    if sel < scroll + 1
+        scroll = sel - 1
+    elseif sel > scroll + vis
+        scroll = sel - vis
+    end
+    m.library_scroll = clamp(scroll, 0, max_scroll)
+end
+
+"""Scroll so `library_selected` stays on-screen among `vis` (visible_charts rows)."""
+function _sync_library_scroll_vis!(m::SPCWorkbenchModel, vis::Vector{ChartSpec},
+                                   capacity::Int = _library_visible_capacity(m))
+    capacity = max(1, capacity)
+    nvis = length(vis)
+    nch = length(m.charts)
+    if nch >= 1
+        m.library_selected = clamp(m.library_selected, 1, nch)
+    end
+    if nvis <= 0
+        m.library_scroll = 0
+        return
+    end
+    pos = 1
+    if nch >= 1
+        p = findfirst(c -> c.id == m.charts[m.library_selected].id, vis)
+        pos = p === nothing ? 1 : p
+    end
+    max_scroll = max(0, nvis - capacity)
+    scroll = clamp(m.library_scroll, 0, max_scroll)
+    if pos < scroll + 1
+        scroll = pos - 1
+    elseif pos > scroll + capacity
+        scroll = pos - capacity
+    end
+    m.library_scroll = clamp(scroll, 0, max_scroll)
+end
+
+"""Apply prompt Enter. Rename + library I/O (GC-PR3) fully wired to master APIs."""
+function _apply_prompt!(m::SPCWorkbenchModel)
+    kind = m.prompt_kind
+    buf = m.prompt_buf
+    if kind === :rename_chart
+        name = strip(buf)
+        if isempty(name)
+            m.last_event = "rename cancel: empty name"
+        else
+            nch = length(m.charts)
+            if nch >= 1
+                m.library_selected = clamp(m.library_selected, 1, nch)
+                rename_chart!(m, m.library_selected, name)
+                m.last_event = "renamed → $name"
+            else
+                m.last_event = "rename cancel: no charts"
+            end
+        end
+        m.prompt_kind = nothing
+        m.prompt_buf = ""
+        return
+    elseif kind === :import_csv
+        # MUST pass library_selected — import_csv_into_model! defaults chart_idx to active
+        path = strip(buf)
+        nch = length(m.charts)
+        if nch >= 1
+            m.library_selected = clamp(m.library_selected, 1, nch)
+        end
+        import_csv_into_model!(m, path; chart_idx = m.library_selected)
+        # last_event set by import API. On err: keep prompt open + buf so path can be edited
+        # and re-Enter without re-pressing i (clearing kind would discard practical retry).
+        if startswith(m.last_event, "import err:")
+            return
+        end
+        m.prompt_kind = nothing
+        return
+    elseif kind === :export_csv
+        path = strip(buf)
+        ch = chart_for_export(m)
+        err = export_csv_series(path, ch.data.values)
+        if err === nothing
+            m.last_export_path = path
+            m.last_event = "exported $(length(ch.data.values)) values to $path"
+            m.prompt_kind = nothing
+        else
+            # fail-closed: do not update last_export_path; keep prompt open for path retry
+            m.last_event = "export err: $err"
+        end
+        return
+    elseif kind === :save_workbench
+        path = strip(buf)
+        # save_workbench sets last_workbench_path + last_event only on success
+        err = save_workbench(m, path)
+        if err === nothing
+            m.prompt_kind = nothing
+        end
+        # on err: keep prompt open + buf for path retry; last_workbench_path unchanged
+        return
+    elseif kind === :load_workbench
+        path = strip(buf)
+        # load_workbench!: ok → dashboard + clear prompt (io ephemerals); err → stay library
+        err = load_workbench!(m, path)
+        if err !== nothing
+            # io clears kind on err via _set_load_err!; restore so path can be edited + re-Enter
+            m.prompt_kind = :load_workbench
+            # prompt_buf already kept by io
+        end
+        return
+    elseif kind === :filter_tool
+        set_filter_tool!(m, buf)
+        m.prompt_kind = nothing
+        m.prompt_buf = ""
+        return
+    elseif kind === :filter_type
+        s = strip(buf)
+        if isempty(s)
+            set_filter_type!(m, "")
+            m.prompt_kind = nothing
+            m.prompt_buf = ""
+            return
+        end
+        parsed = parse_chart_type(s)
+        if parsed === nothing
+            # keep prompt open for retry; do not apply invalid type
+            m.last_event = "filter type invalid: $s"
+            return
+        end
+        # store canonical wire form only
+        set_filter_type!(m, chart_type_to_string(parsed))
+        m.prompt_kind = nothing
+        m.prompt_buf = ""
+        return
+    elseif kind === :filter_owner
+        set_filter_owner!(m, buf)
+        m.prompt_kind = nothing
+        m.prompt_buf = ""
+        return
+    else
+        m.prompt_kind = nothing
+        m.prompt_buf = ""
+        m.last_event = "prompt cancel"
+    end
+end
+
+function _open_prompt!(m::SPCWorkbenchModel, kind::Symbol; seed::AbstractString = "")
+    m.prompt_kind = kind
+    m.prompt_buf = String(seed)
+    m.pending_delete = false
+    m.last_event = "prompt $kind"
+end
+
 function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     _ensure_charts!(m)
     ch = current_chart(m)
@@ -2283,6 +2628,159 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return
     end
 
+    # Prompt SM (KD21): Esc cancels; q is a buffer character; never quit from prompt
+    if m.prompt_kind !== nothing
+        is_filter_prompt = m.prompt_kind === :filter_tool ||
+                           m.prompt_kind === :filter_type ||
+                           m.prompt_kind === :filter_owner
+        if evt.key == :escape
+            m.prompt_kind = nothing
+            # Filters stay as last applied. Clear buf: next `f` reseeds from filter_*,
+            # not from the cancelled edit (comment previously overpromised re-edit).
+            m.prompt_buf = ""
+            m.last_event = is_filter_prompt ? "filter edit cancel" : "prompt cancel"
+            return
+        elseif evt.key == :enter
+            _apply_prompt!(m)
+            return
+        elseif evt.key == :backspace
+            if !isempty(m.prompt_buf)
+                m.prompt_buf = m.prompt_buf[1:prevind(m.prompt_buf, end)]
+            end
+            m.last_event = "prompt $(m.prompt_kind): $(m.prompt_buf)"
+            return
+        elseif evt.key == :char
+            c = evt.char
+            # F while in filter prompt: clear all filters + cancel prompt (GC-PR4)
+            if c == 'F' && is_filter_prompt
+                clear_filters!(m)
+                return
+            end
+            if c >= ' ' && c != '\x7f'  # printable, not DEL (incl. 'q' / 'f')
+                m.prompt_buf *= c
+                m.last_event = "prompt $(m.prompt_kind): $(m.prompt_buf)"
+            end
+            return
+        end
+        return  # left/right and other keys: no-op under prompt
+    end
+
+    # pending_delete: y confirms; any other key (incl Esc) clears — never quit
+    if m.pending_delete
+        if evt.key == :char && (evt.char == 'y' || evt.char == 'Y')
+            nch = length(m.charts)
+            if nch >= 1
+                m.library_selected = clamp(m.library_selected, 1, nch)
+            end
+            ok = nch >= 1 && delete_chart!(m, m.library_selected)
+            m.pending_delete = false
+            _sync_library_scroll!(m)
+            m.last_event = ok ? "deleted chart" : "delete refused (last chart)"
+            return
+        else
+            m.pending_delete = false
+            m.last_event = "delete cancelled"
+            return
+        end
+    end
+
+    # Library mode (before global quit — Esc/q close mode, never quit)
+    # List is filter-aware: ↑↓ navigate among visible_charts absolute indices (GC-PR4).
+    if m.view_mode == :library
+        nch = length(m.charts)
+        vis = visible_charts(m)
+        nvis = length(vis)
+        # Clamp once so corrupt/out-of-range selection cannot crash helpers
+        if nch >= 1
+            m.library_selected = clamp(m.library_selected, 1, nch)
+        end
+        vis_pos = 0
+        if nch >= 1 && nvis > 0
+            vp = findfirst(c -> c.id == m.charts[m.library_selected].id, vis)
+            vis_pos = vp === nothing ? 0 : vp
+        end
+        if evt.key == :escape || (evt.key == :char && evt.char == 'q')
+            m.view_mode = :dashboard
+            m.pending_delete = false
+            m.last_event = "library closed"
+            return
+        elseif evt.key == :up
+            if nvis > 0
+                pos = vis_pos <= 0 ? 1 : max(1, vis_pos - 1)
+                ai = findfirst(c -> c.id == vis[pos].id, m.charts)
+                m.library_selected = ai === nothing ? 1 : ai
+            end
+            _sync_library_scroll_vis!(m, vis)
+            m.last_event = "library sel $(m.library_selected)"
+            return
+        elseif evt.key == :down
+            if nvis > 0
+                pos = vis_pos <= 0 ? 1 : min(nvis, vis_pos + 1)
+                ai = findfirst(c -> c.id == vis[pos].id, m.charts)
+                m.library_selected = ai === nothing ? 1 : ai
+            end
+            _sync_library_scroll_vis!(m, vis)
+            m.last_event = "library sel $(m.library_selected)"
+            return
+        elseif evt.key == :enter
+            if nvis > 0
+                pos = vis_pos <= 0 ? 1 : vis_pos
+                ai = findfirst(c -> c.id == vis[pos].id, m.charts)
+                m.library_selected = ai === nothing ? 1 : ai
+                set_active_chart!(m, m.library_selected)
+                m.view_mode = :dashboard
+                m.last_event = "active chart $(m.active)"
+            else
+                m.last_event = "No charts match filters"
+            end
+            return
+        elseif evt.key == :char
+            c = evt.char
+            # GC-PR4: f/F filters (shared helper — must not be swallowed as library no-op)
+            if _handle_filter_char!(m, c)
+                return
+            end
+            if c == 'a' || c == 'A'
+                idx = add_chart!(m)
+                _sync_library_scroll!(m, length(m.charts))
+                m.last_event = "added chart $idx"
+                return
+            elseif c == 'c' || c == 'C'
+                idx = clone_chart!(m, m.library_selected)
+                _sync_library_scroll!(m, length(m.charts))
+                m.last_event = "cloned → $idx"
+                return
+            elseif c == 'd' || c == 'D'
+                if nch <= 1
+                    m.last_event = "cannot delete last chart"
+                else
+                    m.pending_delete = true
+                    m.last_event = "confirm delete? y/N"
+                end
+                return
+            elseif c == 'n' || c == 'N'
+                seed = nch >= 1 ? m.charts[m.library_selected].name : ""
+                _open_prompt!(m, :rename_chart; seed = seed)
+                return
+            elseif c == 'i' || c == 'I'
+                # GC-PR3: path prompt → import_csv_into_model!(…; chart_idx=library_selected)
+                _open_prompt!(m, :import_csv; seed = "")
+                return
+            elseif c == 'e' || c == 'E'
+                _open_prompt!(m, :export_csv; seed = m.last_export_path)
+                return
+            elseif c == 'w'
+                _open_prompt!(m, :save_workbench; seed = m.last_workbench_path)
+                return
+            elseif c == 'W'
+                _open_prompt!(m, :load_workbench; seed = m.last_workbench_path)
+                return
+            end
+        end
+        return  # absorb other keys (left/right pan, digits, …) — no fall-through
+    end
+
+    # Global quit (dashboard only — modes already returned above)
     if evt.key == :escape || (evt.key == :char && evt.char == 'q')
         m.quit = true
         return
@@ -2290,7 +2788,19 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
 
     if evt.key == :char
         c = evt.char
-        if c == 'p' || c == 'P'
+        if c == 'm' || c == 'M'
+            # Open chart library (GC-PR2)
+            m.view_mode = :library
+            m.library_selected = clamp(m.active, 1, max(1, length(m.charts)))
+            m.pending_delete = false
+            m.prompt_kind = nothing
+            _sync_library_scroll!(m)
+            m.last_event = "library open"
+            return
+        elseif _handle_filter_char!(m, c)
+            # GC-PR4: f cycles filter prompt; F clears all (dashboard)
+            return
+        elseif c == 'p' || c == 'P'
             m.paused = !m.paused
             m.last_event = m.paused ? "paused" : "resumed"
         elseif c == 'r' || c == 'R' || c == 'z' || c == 'Z'
@@ -2381,14 +2891,11 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.last_event = "builder open"
             return
         elseif c == ']' || c == '>'
-            m.active = min(length(m.charts), m.active + 1)
-            _ensure_charts!(m)
-            m.last_event = "chart $(m.active)"
+            # GC-PR4: step only among visible_charts (absolute indices)
+            _cycle_active_visible!(m, +1)
             return
         elseif c == '[' || c == '<'
-            m.active = max(1, m.active - 1)
-            _ensure_charts!(m)
-            m.last_event = "chart $(m.active)"
+            _cycle_active_visible!(m, -1)
             return
         end
         _sync_active_back!(m)
@@ -2411,14 +2918,16 @@ end
 
 function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     _ensure_charts!(m)
+    # Modal / library / prompt / pending_delete: keyboard-only (KD16)
     if m.config_open || m.editing !== nothing ||
        m.view_mode == :help || m.view_mode == :keymap ||
-       m.view_mode == :library || m.view_mode == :builder
+       m.view_mode == :library || m.view_mode == :builder ||
+       m.prompt_kind !== nothing || m.pending_delete
         m.last_event = string(evt.action, " ", evt.button, " (modal)")
         m.hover_x = nothing
         m.hovered = nothing
         if evt.action == mouse_release
-            m.drag_start = nothing
+            m.drag_start = nothing   # avoid stuck drag if mode opened mid-drag
         end
         return
     end
@@ -2509,12 +3018,15 @@ function view(m::SPCWorkbenchModel, f::Frame)
         return
     end
 
-    # Mode overlays: help / keymap / builder (dedicated pages; no dashboard bleed)
+    # Mode overlays: help / keymap / library / builder (dedicated pages; no dashboard bleed)
     if m.view_mode == :help
         _render_help_page!(buf, area, m)
         return
     elseif m.view_mode == :keymap
         _render_keymap_page!(buf, area, m)
+        return
+    elseif m.view_mode == :library
+        _render_library_page!(buf, area, m)
         return
     elseif m.view_mode == :builder
         _render_builder_page!(buf, area, m)
@@ -2561,8 +3073,29 @@ function view(m::SPCWorkbenchModel, f::Frame)
     end
 
     # header
-    hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
+    hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [m]library [f]filter [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
+
+    # A6: empty filter match — plot message + side list (Charts: 0/N) + footer (no full early return)
+    if npanes == 0 && _any_filter_active(m)
+        set_string!(buf, plot_rect.x + 2, plot_rect.y + max(1, plot_rect.height ÷ 2),
+            "No charts match filters", tstyle(:warning, bold=true))
+        set_string!(buf, plot_rect.x + 2, plot_rect.y + max(2, plot_rect.height ÷ 2 + 1),
+            "Press [f] to edit filters or [F] to clear. Demo tools may be empty.", tstyle(:text_dim))
+        m.plot_area = plot_rect
+        # Side panel still shows filtered count (design: side list always uses visible_charts)
+        side_block = Block(title="Side Stats (chart $(m.active)/$(max(1,length(m.charts))) • dashboard)", border_style=tstyle(:border))
+        side_inner = render(side_block, side_rect, buf)
+        m.side_area = side_inner
+        nch_all = length(m.charts)
+        set_string!(buf, side_inner.x, side_inner.y, "Charts: 0/$nch_all", tstyle(:text_dim))
+        if side_inner.y + 1 <= bottom(side_inner)
+            set_string!(buf, side_inner.x, side_inner.y + 1, " (no match)", tstyle(:warning))
+        end
+        left = " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
+        render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+        return
+    end
 
     if m.config_open
         # overlay (slice 4) — no bleed; Tab cycles WECO → Lines → Visual
@@ -3108,17 +3641,30 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 y += 1
             end
         end
-        # dashboard multi hint (lowest priority when cramped)
-        if length(m.charts) > 1
+        # dashboard multi hint (lowest priority when cramped) — filtered list (GC-PR4)
+        side_vis = visible_charts(m)
+        nch_all = length(m.charts)
+        nvis_side = length(side_vis)
+        if nch_all > 1 || _any_filter_active(m)
             if y <= bottom(side_inner) - 1
-                set_string!(buf, x, y, "Charts: $(length(m.charts))", tstyle(:text_dim))
+                cnt = _any_filter_active(m) ? "Charts: $nvis_side/$nch_all" : "Charts: $nch_all"
+                set_string!(buf, x, y, cnt, tstyle(:text_dim))
                 y += 1
             end
-            for (ci, c) in enumerate(m.charts)
-                if y > bottom(side_inner) - 1; break; end
-                cctx = resolve_chart_render_context(c; sigma_method=:mr)
-                set_string!(buf, x, y, " $(ci==m.active ? "▶" : " ") $(c.name[1:min(8,length(c.name))]) cpk=$(_fmt(cctx.cpk))", tstyle(ci==m.active ? :accent : :text_dim))
-                y += 1
+            if nvis_side == 0 && _any_filter_active(m)
+                if y <= bottom(side_inner) - 1
+                    set_string!(buf, x, y, " (no match)", tstyle(:warning))
+                    y += 1
+                end
+            else
+                act_id = current_chart(m).id
+                for c in side_vis
+                    if y > bottom(side_inner) - 1; break; end
+                    cctx = resolve_chart_render_context(c; sigma_method=:mr)
+                    is_act = c.id == act_id
+                    set_string!(buf, x, y, " $(is_act ? "▶" : " ") $(c.name[1:min(8,length(c.name))]) cpk=$(_fmt(cctx.cpk))", tstyle(is_act ? :accent : :text_dim))
+                    y += 1
+                end
             end
         end
     else
@@ -3164,7 +3710,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     else
         " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
     end
-    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
 end
 
 # small helper for fmt
@@ -3208,6 +3754,89 @@ function _side_viol_msgs_by_index(
     return sorted[start:end]
 end
 
+# ── Chart Library page (GC-PR2 / A5) — list uses visible_charts (GC-PR4) ─
+function _render_library_page!(buf, area, m)
+    m.library_area = area
+    set_string!(buf, area.x + 1, area.y, "CHART LIBRARY  (Esc/q close → dashboard)", tstyle(:title, bold=true))
+    y = area.y + 2
+    nch = length(m.charts)
+    if nch >= 1
+        m.library_selected = clamp(m.library_selected, 1, nch)
+    end
+    vis_charts = visible_charts(m)
+    nvis = length(vis_charts)
+    filt_bits = String[]
+    !isempty(m.filter_tool) && push!(filt_bits, "tool=$(m.filter_tool)")
+    !isempty(m.filter_type) && push!(filt_bits, "type=$(m.filter_type)")
+    !isempty(m.filter_owner) && push!(filt_bits, "owner=$(m.filter_owner)")
+    filt_lbl = isempty(filt_bits) ? "none" : join(filt_bits, " ")
+    set_string!(buf, area.x + 2, y,
+        "Charts: $nvis/$nch   active=$(m.active)   selected=$(m.library_selected)   filters: $filt_lbl",
+        tstyle(:text_dim))
+    y += 2
+    # Visible window over filtered list; library_selected remains absolute into m.charts
+    list_bottom = bottom(area) - 4
+    capacity = max(1, list_bottom - y + 1)
+    _sync_library_scroll_vis!(m, vis_charts, capacity)
+    if nvis == 0
+        msg = _any_filter_active(m) ? "No charts match filters" : "No charts"
+        set_string!(buf, area.x + 2, y, msg, tstyle(:warning, bold=true))
+        y += 1
+        if _any_filter_active(m)
+            set_string!(buf, area.x + 2, y,
+                "  [f] edit filter  [F] clear  (demo tools may be empty)",
+                tstyle(:text_dim))
+            y += 1
+        end
+    else
+        first_i = m.library_scroll + 1
+        last_i = min(nvis, m.library_scroll + capacity)
+        for vi in first_i:last_i
+            c = vis_charts[vi]
+            abs_i = findfirst(x -> x.id == c.id, m.charts)
+            abs_i = abs_i === nothing ? 0 : abs_i
+            marker = abs_i == m.library_selected ? "▶" : " "
+            act = abs_i == m.active ? "*" : " "
+            nvals = length(c.data.values)
+            live = c.live_enabled ? "live" : "off"
+            line = "$marker$act $abs_i. $(c.name)  [$(c.chart_type)] n=$nvals live=$live"
+            sty = abs_i == m.library_selected ? tstyle(:accent, bold=true) : tstyle(:text)
+            set_string!(buf, area.x + 2, y, line, sty)
+            y += 1
+        end
+    end
+    y = min(y + 1, bottom(area) - 3)
+    # Prompt / pending delete status
+    if m.pending_delete && nch >= 1
+        nm = m.charts[m.library_selected].name
+        set_string!(buf, area.x + 2, y,
+            "DELETE \"$nm\"?  press y to confirm, any other key cancel",
+            tstyle(:error, bold=true))
+        y += 1
+    elseif m.prompt_kind !== nothing
+        kind_lbl = string(m.prompt_kind)
+        set_string!(buf, area.x + 2, y,
+            "PROMPT [$kind_lbl]: $(m.prompt_buf)_",
+            tstyle(:accent, bold=true))
+        y += 1
+        set_string!(buf, area.x + 2, y,
+            "  Enter=apply  Esc=cancel  (q types into buffer)",
+            tstyle(:text_dim))
+        y += 1
+    end
+    # Footer keys — I/O wired (GC-PR3) + filters (GC-PR4)
+    if y <= bottom(area) - 1
+        set_string!(buf, area.x + 2, bottom(area) - 1,
+            "↑↓ select  Enter activate  a add  c clone  d+y delete  n rename  i/e/w/W I/O  f/F filter  Esc/q close",
+            tstyle(:text_dim))
+    end
+    if y <= bottom(area)
+        set_string!(buf, area.x + 2, bottom(area),
+            " last=$(m.last_event)",
+            tstyle(:text_dim))
+    end
+end
+
 # ── Dedicated Help page (adapted from HTML quickstart + WECO defs + workflow) ──
 function _render_help_page!(buf, area, m)
     # simple full area text page
@@ -3221,6 +3850,9 @@ function _render_help_page!(buf, area, m)
         "  c/C     open/close WECO rule config (1-8 toggle; Tab→Lines→Visual)",
         "  v/V     open chart-line visibility config (CL/±σ/specs)",
         "  o/O     open Visual Preferences (solid series line, …)",
+        "  m/M     open chart library (list / add / clone / delete / rename)",
+        "  f       cycle filter prompt (tool → type → owner); Enter apply; Esc cancel",
+        "  F       clear all filters (tool/type/owner); rehomes active if needed",
         "  b/B     open chart builder (name, cols, tools, manual limits, WECO)",
         "  u/U t/T l/L  edit USL / Target / LSL (enter to set, esc cancel)",
         "  s/S     clear all spec limits",
@@ -3232,7 +3864,12 @@ function _render_help_page!(buf, area, m)
         "  [ ]     switch active chart (multi-dashboard)",
         "  h/?     this help",
         "  k       keyboard map page",
-        "  q/esc   quit (close builder/help first)",
+        "  q/esc   quit (close library/builder/help first)",
+        "",
+        "LIBRARY (m): ↑↓ select · Enter activate · a add · c clone · d+y delete · n rename",
+        "  i import CSV · e export CSV · w save JSON · W load JSON (path prompts)",
+        "  f/F filters same as dashboard (list shows visible_charts only)",
+        "  Note: seed demos often have empty tools — tool filter may hide all until assigned.",
         "",
         "RICH VISUALS:",
         "  ◆ = OOC (WECO violation, accent)",
@@ -3258,6 +3895,7 @@ function _render_keymap_page!(buf, area, m)
     y = area.y + 2
     kbd = [
         "KEYS:",
+        "  m M / f F   Library (↑↓ a c d n i/e/w/W) / filters (cycle tool→type→owner; F clear)",
         "  p/P         Pause/Resume live mode",
         "  g/G         Toggle live_enabled on active chart",
         "  r R z Z     Reset view (full range + auto y)",
@@ -3268,7 +3906,7 @@ function _render_keymap_page!(buf, area, m)
         "  [ ] < >     Prev / Next chart (dashboard)",
         "  ← →         Pan left/right",
         "  h ? / k     Help / This keymap",
-        "  q Esc       Quit (in builder: close mode, not quit)",
+        "  q Esc       Quit (library/builder: close mode, not quit)",
         "",
         "MOUSE:",
         "  Move        Hover + vertical follow │ + tooltip",
@@ -3280,6 +3918,7 @@ function _render_keymap_page!(buf, area, m)
         "",
         "Config: Tab WECO↔Lines; ↑↓/digits/space; Esc/c/v close. Lines ●=draw on chart.",
         "Builder: ↑↓ fields; Enter edit/toggle; a apply/materialize; 1-8 WECO; y type.",
+        "Library i/e/w/W + f/F filters (session-only; demo tools may be empty).",
     ]
     for (i, ln) in enumerate(kbd)
         if y + i - 1 > bottom(area); break; end
@@ -3358,13 +3997,8 @@ function _live_may_advance(m::SPCWorkbenchModel)::Bool
     m.paused && return false
     m.editing !== nothing && return false
     m.config_open && return false
-    # Optional fields from library/prompt PR (PR2b+); skip if not present yet
-    if hasfield(typeof(m), :prompt_kind) && getfield(m, :prompt_kind) !== nothing
-        return false
-    end
-    if hasfield(typeof(m), :pending_delete) && getfield(m, :pending_delete) === true
-        return false
-    end
+    m.prompt_kind !== nothing && return false
+    m.pending_delete && return false
     m.view_mode in (:help, :keymap, :library, :builder) && return false
     ch = current_chart(m)
     (isempty(ch.data.values) || !ch.live_enabled) && return false

@@ -667,16 +667,14 @@ function _clear_load_ephemerals!(m::SPCWorkbenchModel)
     m.hover_x = nothing
     m.drag_start = nothing
     m.view_mode = :dashboard
-    # Optional fields added by later PRs (prompt state machine)
-    if hasfield(typeof(m), :prompt_kind)
-        setfield!(m, :prompt_kind, nothing)
-    end
-    if hasfield(typeof(m), :prompt_buf)
-        setfield!(m, :prompt_buf, "")
-    end
-    if hasfield(typeof(m), :pending_delete)
-        setfield!(m, :pending_delete, false)
-    end
+    m.prompt_kind = nothing
+    m.prompt_buf = ""
+    m.pending_delete = false
+    # Session-ephemeral filters (GC-PR4) — not in JSON schema; always reset on load
+    m.filter_tool = ""
+    m.filter_type = ""
+    m.filter_owner = ""
+    m.filter_prompt_field = :tool
     return nothing
 end
 
@@ -769,10 +767,8 @@ function _normalize_load_err(msg::AbstractString)::String
 end
 
 function _clear_prompt_kind_keep_buf!(m::SPCWorkbenchModel)
-    # On load err: clear prompt_kind when present; keep prompt_buf for path edit
-    if hasfield(typeof(m), :prompt_kind)
-        setfield!(m, :prompt_kind, nothing)
-    end
+    # On load err: clear prompt_kind; keep prompt_buf for path edit
+    m.prompt_kind = nothing
     return nothing
 end
 
@@ -795,9 +791,7 @@ function save_workbench(m::SPCWorkbenchModel, path::AbstractString)::Union{Nothi
         open(path, "w") do io
             JSON.print(io, d)
         end
-        if hasfield(typeof(m), :last_workbench_path)
-            m.last_workbench_path = String(path)
-        end
+        m.last_workbench_path = String(path)
         m.last_event = "saved $(basename(String(path)))"
         return nothing
     catch e
@@ -822,9 +816,7 @@ function load_workbench(path::AbstractString)::Union{SPCWorkbenchModel,String}
     end
     m = workbench_from_dict(d)
     m isa String && return _normalize_load_err(m)
-    if hasfield(typeof(m), :last_workbench_path)
-        m.last_workbench_path = String(path)
-    end
+    m.last_workbench_path = String(path)
     m.last_event = "loaded $(basename(String(path)))"
     return m
 end
@@ -834,7 +826,7 @@ end
 
 In-session reload into existing model (library W). Fail closed on chart mutate.
 Sets `m.last_event` to `"loaded …"` or `"load err: …"`; clears `prompt_kind`
-on err (keeps `prompt_buf` when present).
+on err (keeps `prompt_buf`).
 """
 function load_workbench!(m::SPCWorkbenchModel, path::AbstractString)::Union{Nothing,String}
     local d
@@ -848,9 +840,7 @@ function load_workbench!(m::SPCWorkbenchModel, path::AbstractString)::Union{Noth
     if err !== nothing
         return _set_load_err!(m, err)
     end
-    if hasfield(typeof(m), :last_workbench_path)
-        m.last_workbench_path = String(path)
-    end
+    m.last_workbench_path = String(path)
     m.last_event = "loaded $(basename(String(path)))"
     return nothing
 end
@@ -1220,9 +1210,7 @@ function load_html_archive(path::AbstractString)::Union{SPCWorkbenchModel,String
     d isa String && return _normalize_load_err(d)
     m = html_state_to_workbench(d)
     m isa String && return _normalize_load_err(m)
-    if hasfield(typeof(m), :last_workbench_path)
-        m.last_workbench_path = String(path)
-    end
+    m.last_workbench_path = String(path)
     m.last_event = "loaded html $(basename(String(path)))"
     return m
 end
@@ -1242,9 +1230,7 @@ function load_html_archive!(m::SPCWorkbenchModel, path::AbstractString)::Union{N
     if err !== nothing
         return _set_load_err!(m, err)
     end
-    if hasfield(typeof(m), :last_workbench_path)
-        m.last_workbench_path = String(path)
-    end
+    m.last_workbench_path = String(path)
     m.last_event = "loaded html $(basename(String(path)))"
     return nothing
 end
