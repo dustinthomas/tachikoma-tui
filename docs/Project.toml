@@ -1,0 +1,12 @@
+# Docs-only environment (Documenter is NOT a runtime dep of TachikomaTUI).
+# Scaffold for PR0; full docs/make.jl green is a PR11 gate.
+#
+# Instantiate + develop path dep:
+#   julia --project=docs -e 'using Pkg; Pkg.develop(path=".."); Pkg.instantiate()'
+
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+
+[compat]
+Documenter = "1"
+julia = "1.10"

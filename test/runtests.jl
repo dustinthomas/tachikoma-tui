@@ -6,9 +6,14 @@ const T = Tachikoma
 
 # Include component tests
 include("test_hello.jl")
-# NOTE: prior to PR1 / execute-plan slice 1, runtests.jl only included test_hello.jl
-# (test_spc.jl existed but was not wired here; this additive include ensures
-# full-suite gates actually execute new + existing SPC-related tests).
+# KD24 (PR0): classic SPC chart tests were orphaned; hard-wire into full suite.
+# Isolated module: test_spc.jl does `using TachikomaTUI` (imports Viewport / helpers),
+# while test_spc_workbench.jl raw-includes src/spc_workbench.jl into Main and defines
+# a parallel Viewport when TachikomaTUI is not the host module (KD22 collision).
+module TestSPCChart
+include("test_spc.jl")
+end
+# SPC workbench (pure WECO via raw include + UI TestBackend)
 include("test_spc_workbench.jl")
 # include("test_my_feature.jl")
 
