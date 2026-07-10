@@ -34,6 +34,7 @@ export I_MR, Xbar_R, Xbar_S, p_chart, np_chart, c_chart, u_chart
 export SharedTable, mean_or_0, std_or_0, compute_chart_series, materialize_chart_from_table!
 export shared_table_from_columns_rows, fill_shared_table!
 export ToolEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
+export visible_charts, dashboard_pane_charts
 export workbench_to_dict, workbench_from_dict, workbench_from_dict!
 export export_csv_series, chart_for_export
 export save_workbench, load_workbench, load_workbench!
