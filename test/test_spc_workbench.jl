@@ -1298,3 +1298,265 @@ end
         @test braille_on >= 2
     end
 end
+
+# ═══════════════════════════════════════════════════════════════════════
+# PR3 CSV import + live_enabled gates — package-module path (KD22).
+# Isolated module so raw-include of spc_workbench.jl into Main does not
+# collide with TachikomaTUI types.
+# ═══════════════════════════════════════════════════════════════════════
+
+module TestSPCWorkbenchCSVImport
+using Test
+using TachikomaTUI
+using Tachikoma
+using Random
+
+const T = Tachikoma
+
+# Private workbench helpers (not all exported)
+const WB = TachikomaTUI
+const _ensure_charts! = WB._ensure_charts!
+const current_chart = WB.current_chart
+const _live_may_advance = WB._live_may_advance
+const advance_live! = WB.advance_live!
+
+const FIX_DIR = joinpath(@__DIR__, "fixtures", "spc")
+const SAMPLE = joinpath(FIX_DIR, "sample_value.csv")
+
+function _write_csv(path::AbstractString, content::AbstractString)
+    open(path, "w") do io
+        write(io, content)
+    end
+    return path
+end
+
+@testset "PR3 CSV import + live gates (using TachikomaTUI)" begin
+    @testset "parse_csv_table: good sample_value.csv" begin
+        r = parse_csv_table(SAMPLE)
+        @test r isa CsvParseOk
+        @test r.value_col == "Value"
+        @test "Value" in r.columns
+        @test length(r.values) == 10
+        @test r.values[1] ≈ 100.1
+        @test r.values[end] ≈ 99.7
+        @test isempty(r.warnings)
+    end
+
+    @testset "parse_csv_table: empty / missing / no Value / all non-numeric / too_large" begin
+        mktempdir() do dir
+            empty_p = _write_csv(joinpath(dir, "empty.csv"), "\n  \n")
+            r_empty = parse_csv_table(empty_p)
+            @test r_empty isa CsvParseErr
+            @test r_empty.kind === :empty
+
+            miss = joinpath(dir, "nope.csv")
+            r_miss = parse_csv_table(miss)
+            @test r_miss isa CsvParseErr
+            @test r_miss.kind === :not_found
+
+            no_val = _write_csv(joinpath(dir, "novalue.csv"), "Time,Reading\n1,10.0\n2,11.0\n")
+            r_nv = parse_csv_table(no_val)
+            @test r_nv isa CsvParseErr
+            @test r_nv.kind === :no_header_match
+
+            # value_col override works when column present
+            r_ok = parse_csv_table(no_val; value_col = "Reading")
+            @test r_ok isa CsvParseOk
+            @test r_ok.values == [10.0, 11.0]
+
+            bad_all = _write_csv(joinpath(dir, "bad.csv"), "Value\nfoo\nbar\n")
+            r_bad = parse_csv_table(bad_all)
+            @test r_bad isa CsvParseErr
+            @test r_bad.kind === :all_invalid
+
+            header_only = _write_csv(joinpath(dir, "hdr.csv"), "Value\n")
+            r_hdr = parse_csv_table(header_only)
+            @test r_hdr isa CsvParseErr
+            @test r_hdr.kind === :no_numeric
+
+            # single column, no header (all numeric)
+            single = _write_csv(joinpath(dir, "single.csv"), "1.5\n2.5\n3.5\n")
+            r_s = parse_csv_table(single)
+            @test r_s isa CsvParseOk
+            @test r_s.values == [1.5, 2.5, 3.5]
+
+            # too_large
+            lines = ["Value"; ["$(i).0" for i in 1:10]]
+            big = _write_csv(joinpath(dir, "big.csv"), join(lines, "\n") * "\n")
+            r_big = parse_csv_table(big; max_rows = 5)
+            @test r_big isa CsvParseErr
+            @test r_big.kind === :too_large
+
+            # mixed: some non-numeric warnings but still Ok
+            mix = _write_csv(joinpath(dir, "mix.csv"), "Value\n1.0\nx\n2.0\n")
+            r_mix = parse_csv_table(mix)
+            @test r_mix isa CsvParseOk
+            @test r_mix.values == [1.0, 2.0]
+            @test !isempty(r_mix.warnings)
+        end
+    end
+
+    @testset "import_csv_into_chart! + model: live off; err no mutate" begin
+        d = generate_spc_workbench_data(20; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = false, seed_demos = :triple)
+        _ensure_charts!(m)
+        @test length(m.charts) >= 3
+        @test all(c -> c.live_enabled === true, m.charts)
+
+        ch = current_chart(m)
+        other = m.charts[2]
+        other_live = other.live_enabled
+        other_vals = copy(other.data.values)
+        n_charts = length(m.charts)
+
+        r = import_csv_into_model!(m, SAMPLE)
+        @test r isa CsvParseOk
+        @test length(r.values) == 10
+        @test ch.live_enabled === false
+        @test other.live_enabled === other_live  # other charts unchanged
+        @test other.data.values == other_vals
+        @test m.paused === true
+        @test occursin("imported 10 values", m.last_event)
+        @test occursin("sample_value.csv", m.last_event)
+        @test length(ch.data.values) == 10
+        @test ch.viewport.x0 == 1 && ch.viewport.x1 == 10
+        @test length(m.charts) == n_charts
+
+        # err path does not mutate
+        snap = [copy(c.data.values) for c in m.charts]
+        live_snap = [c.live_enabled for c in m.charts]
+        r_err = import_csv_into_model!(m, joinpath(FIX_DIR, "does_not_exist.csv"))
+        @test r_err isa CsvParseErr
+        @test r_err.kind === :not_found
+        @test startswith(m.last_event, "import err:")
+        for i in eachindex(m.charts)
+            @test m.charts[i].data.values == snap[i]
+            @test m.charts[i].live_enabled === live_snap[i]
+        end
+        @test length(m.charts) == n_charts
+    end
+
+    @testset "import→unpause does not grow while live_enabled=false; g re-enables" begin
+        d = generate_spc_workbench_data(15; seed = 3)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        r = import_csv_into_model!(m, SAMPLE)
+        @test r isa CsvParseOk
+        @test current_chart(m).live_enabled === false
+        @test m.paused === true
+
+        n0 = length(current_chart(m).data.values)
+        @test n0 == 10
+
+        # Unpause alone must not append while live_enabled=false
+        m.paused = false
+        @test _live_may_advance(m) === false
+        for _ in 1:30
+            advance_live!(m)
+        end
+        @test length(current_chart(m).data.values) == n0
+        @test length(m.data.values) == n0
+
+        # L must still be LSL, not live toggle
+        T.update!(m, T.KeyEvent('L'))
+        @test m.editing === :lsl
+        @test current_chart(m).live_enabled === false
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.editing === nothing
+
+        # g toggles live on
+        T.update!(m, T.KeyEvent('g'))
+        @test current_chart(m).live_enabled === true
+        @test m.last_event == "live on"
+        @test m.paused === false  # still unpaused
+        @test _live_may_advance(m) === true
+
+        for _ in 1:5
+            advance_live!(m)
+        end
+        @test length(current_chart(m).data.values) > n0
+
+        # g again → live off
+        T.update!(m, T.KeyEvent('G'))
+        @test current_chart(m).live_enabled === false
+        @test m.last_event == "live off"
+        n1 = length(current_chart(m).data.values)
+        for _ in 1:10
+            advance_live!(m)
+        end
+        @test length(current_chart(m).data.values) == n1
+    end
+
+    @testset "live gates: help/keymap/config/edit/empty block advance" begin
+        d = generate_spc_workbench_data(12; seed = 9)
+        m = SPCWorkbenchModel(data = d, paused = false, seed_demos = :triple)
+        _ensure_charts!(m)
+        @test current_chart(m).live_enabled === true
+        @test _live_may_advance(m) === true
+
+        m.view_mode = :help
+        @test _live_may_advance(m) === false
+        m.view_mode = :keymap
+        @test _live_may_advance(m) === false
+        m.view_mode = :library
+        @test _live_may_advance(m) === false
+        m.view_mode = :builder
+        @test _live_may_advance(m) === false
+        m.view_mode = :dashboard
+        @test _live_may_advance(m) === true
+
+        m.config_open = true
+        @test _live_may_advance(m) === false
+        m.config_open = false
+        m.editing = :usl
+        @test _live_may_advance(m) === false
+        m.editing = nothing
+        m.paused = true
+        @test _live_may_advance(m) === false
+        m.paused = false
+
+        # empty chart
+        m_empty = SPCWorkbenchModel(data = empty_workbench_data(), paused = false, seed_demos = :none)
+        _ensure_charts!(m_empty)
+        @test isempty(current_chart(m_empty).data.values)
+        @test _live_may_advance(m_empty) === false
+    end
+
+    @testset "import_csv_new_chart! adds chart; help mentions g/G" begin
+        d = generate_spc_workbench_data(10; seed = 1)
+        m = SPCWorkbenchModel(data = d, paused = false, seed_demos = :single)
+        _ensure_charts!(m)
+        n0 = length(m.charts)
+        lives_before = [c.live_enabled for c in m.charts]
+        r = import_csv_new_chart!(m, SAMPLE; name = "FromCSV")
+        @test r isa CsvParseOk
+        @test length(m.charts) == n0 + 1
+        @test m.charts[end].name == "FromCSV"
+        @test m.charts[end].live_enabled === false
+        @test m.paused === true
+        for i in 1:n0
+            @test m.charts[i].live_enabled === lives_before[i]
+        end
+
+        # help/keymap list g/G
+        m2 = SPCWorkbenchModel(data = d, paused = true)
+        T.update!(m2, T.KeyEvent('h'))
+        tb = T.TestBackend(90, 22); T.reset!(tb.buf)
+        T.view(m2, T.Frame(tb.buf, T.Rect(1, 1, 90, 22), [], []))
+        help_txt = join([string(T.row_text(tb, i)) for i in 1:22 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("g/G", help_txt) || occursin("g/G", help_txt)
+        T.update!(m2, T.KeyEvent(:escape))
+        T.update!(m2, T.KeyEvent('k'))
+        tb2 = T.TestBackend(90, 22); T.reset!(tb2.buf)
+        T.view(m2, T.Frame(tb2.buf, T.Rect(1, 1, 90, 22), [], []))
+        ktxt = join([string(T.row_text(tb2, i)) for i in 1:22 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("g/G", ktxt) || occursin("live_enabled", ktxt) || occursin("live", lowercase(ktxt))
+    end
+
+    @testset "seed_demos default remains :triple" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 1), paused = true)
+        @test m.seed_demos === :triple
+    end
+end
+
+end # module TestSPCWorkbenchCSVImport

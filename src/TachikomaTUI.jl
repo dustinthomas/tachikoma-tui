@@ -10,6 +10,7 @@ export Tachikoma
 include("hello.jl")
 include("spc.jl")
 include("spc_workbench.jl")
+include("spc_workbench_io.jl")  # PR3: CSV import (after workbench types)
 
 # Public demo runners
 export HelloModel, hello_tachikoma, run_hello
@@ -30,6 +31,10 @@ export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_
 export I_MR, Xbar_R, Xbar_S, p_chart, np_chart, c_chart, u_chart
 export ToolEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
 export spc_workbench_demo, run_spc_workbench, spc_workbench, advanced_spc, run_advanced_spc
+
+# SPC Workbench I/O (PR3 CSV import)
+export CsvParseOk, CsvParseErr, parse_csv_table
+export import_csv_into_chart!, import_csv_new_chart!, import_csv_into_model!
 
 # Add your own includes here as the project grows:
 # include("my_dashboard.jl")
