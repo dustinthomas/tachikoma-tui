@@ -104,6 +104,82 @@ function parse_chart_type(s::AbstractString)::Union{ChartType,Nothing}
     get(CHART_TYPE_FROM_WIRE, String(s), nothing)
 end
 
+# ── Subgroup size factors (HTML SS_FACTORS n=2..25) ─────────────────────
+# A2/D3/D4 for X̄-R; A3/B3/B4 for X̄-S; d2 unbiases R̄→σ̂; c4 unbiases s̄→σ̂ (Cpk).
+const SS_FACTORS = Dict{Int,NamedTuple{(:A2, :D3, :D4, :A3, :B3, :B4, :d2, :c4),NTuple{8,Float64}}}(
+    2  => (A2 = 1.880, D3 = 0.0,   D4 = 3.267, A3 = 2.659, B3 = 0.0,   B4 = 3.267, d2 = 1.128, c4 = 0.7979),
+    3  => (A2 = 1.023, D3 = 0.0,   D4 = 2.575, A3 = 1.954, B3 = 0.0,   B4 = 2.568, d2 = 1.693, c4 = 0.8862),
+    4  => (A2 = 0.729, D3 = 0.0,   D4 = 2.282, A3 = 1.628, B3 = 0.0,   B4 = 2.266, d2 = 2.059, c4 = 0.9213),
+    5  => (A2 = 0.577, D3 = 0.0,   D4 = 2.115, A3 = 1.427, B3 = 0.0,   B4 = 2.089, d2 = 2.326, c4 = 0.9400),
+    6  => (A2 = 0.483, D3 = 0.0,   D4 = 2.004, A3 = 1.287, B3 = 0.030, B4 = 1.970, d2 = 2.534, c4 = 0.9515),
+    7  => (A2 = 0.419, D3 = 0.076, D4 = 1.924, A3 = 1.182, B3 = 0.118, B4 = 1.882, d2 = 2.704, c4 = 0.9594),
+    8  => (A2 = 0.373, D3 = 0.136, D4 = 1.864, A3 = 1.099, B3 = 0.185, B4 = 1.815, d2 = 2.847, c4 = 0.9650),
+    9  => (A2 = 0.337, D3 = 0.184, D4 = 1.816, A3 = 1.032, B3 = 0.239, B4 = 1.761, d2 = 2.970, c4 = 0.9693),
+    10 => (A2 = 0.308, D3 = 0.223, D4 = 1.777, A3 = 0.975, B3 = 0.284, B4 = 1.716, d2 = 3.078, c4 = 0.9727),
+    11 => (A2 = 0.285, D3 = 0.256, D4 = 1.744, A3 = 0.927, B3 = 0.321, B4 = 1.679, d2 = 3.173, c4 = 0.9754),
+    12 => (A2 = 0.266, D3 = 0.283, D4 = 1.717, A3 = 0.886, B3 = 0.354, B4 = 1.646, d2 = 3.258, c4 = 0.9776),
+    13 => (A2 = 0.249, D3 = 0.307, D4 = 1.693, A3 = 0.850, B3 = 0.382, B4 = 1.618, d2 = 3.336, c4 = 0.9794),
+    14 => (A2 = 0.235, D3 = 0.328, D4 = 1.672, A3 = 0.817, B3 = 0.406, B4 = 1.594, d2 = 3.407, c4 = 0.9810),
+    15 => (A2 = 0.223, D3 = 0.347, D4 = 1.653, A3 = 0.789, B3 = 0.428, B4 = 1.572, d2 = 3.472, c4 = 0.9823),
+    16 => (A2 = 0.212, D3 = 0.363, D4 = 1.637, A3 = 0.763, B3 = 0.448, B4 = 1.552, d2 = 3.532, c4 = 0.9835),
+    17 => (A2 = 0.203, D3 = 0.378, D4 = 1.622, A3 = 0.739, B3 = 0.466, B4 = 1.534, d2 = 3.588, c4 = 0.9845),
+    18 => (A2 = 0.194, D3 = 0.391, D4 = 1.608, A3 = 0.718, B3 = 0.482, B4 = 1.518, d2 = 3.640, c4 = 0.9854),
+    19 => (A2 = 0.187, D3 = 0.403, D4 = 1.597, A3 = 0.698, B3 = 0.497, B4 = 1.503, d2 = 3.689, c4 = 0.9862),
+    20 => (A2 = 0.180, D3 = 0.415, D4 = 1.585, A3 = 0.680, B3 = 0.510, B4 = 1.490, d2 = 3.735, c4 = 0.9869),
+    21 => (A2 = 0.173, D3 = 0.425, D4 = 1.575, A3 = 0.663, B3 = 0.523, B4 = 1.477, d2 = 3.778, c4 = 0.9876),
+    22 => (A2 = 0.167, D3 = 0.434, D4 = 1.566, A3 = 0.647, B3 = 0.534, B4 = 1.466, d2 = 3.819, c4 = 0.9882),
+    23 => (A2 = 0.162, D3 = 0.443, D4 = 1.557, A3 = 0.633, B3 = 0.545, B4 = 1.455, d2 = 3.858, c4 = 0.9887),
+    24 => (A2 = 0.157, D3 = 0.451, D4 = 1.548, A3 = 0.619, B3 = 0.555, B4 = 1.445, d2 = 3.895, c4 = 0.9892),
+    25 => (A2 = 0.153, D3 = 0.459, D4 = 1.541, A3 = 0.606, B3 = 0.565, B4 = 1.435, d2 = 3.931, c4 = 0.9896),
+)
+
+"""Clamp subgroup size to HTML range [2, 25]."""
+_clamp_subgroup_n(n::Int)::Int = clamp(n, 2, 25)
+
+"""
+    subgroup_means_and_ranges(values, n) -> (xbar, ranges, groups)
+
+Consecutive complete chunks of size `n` (clamped 2..25). Incomplete tail dropped.
+"""
+function subgroup_means_and_ranges(values::AbstractVector{<:Real}, n::Int)
+    n = _clamp_subgroup_n(n)
+    vs = Float64.(values)
+    xbar = Float64[]
+    ranges = Float64[]
+    groups = Vector{Vector{Float64}}()
+    i = 1
+    while i + n - 1 <= length(vs)
+        g = vs[i:(i + n - 1)]
+        push!(groups, g)
+        push!(xbar, mean(g))
+        push!(ranges, maximum(g) - minimum(g))
+        i += n
+    end
+    return (xbar, ranges, groups)
+end
+
+"""
+    subgroup_means_and_s(values, n) -> (xbar, svals, groups)
+
+Like `subgroup_means_and_ranges` but secondary is sample std (corrected=true) per group.
+"""
+function subgroup_means_and_s(values::AbstractVector{<:Real}, n::Int)
+    n = _clamp_subgroup_n(n)
+    vs = Float64.(values)
+    xbar = Float64[]
+    svals = Float64[]
+    groups = Vector{Vector{Float64}}()
+    i = 1
+    while i + n - 1 <= length(vs)
+        g = vs[i:(i + n - 1)]
+        push!(groups, g)
+        push!(xbar, mean(g))
+        push!(svals, std(g; corrected = true))
+        i += n
+    end
+    return (xbar, svals, groups)
+end
+
 """Empty but valid series — always a legal ChartSpec.data."""
 empty_workbench_data() = WorkbenchData(values = Float64[], cl = 0.0, sigma = 0.0)
 
@@ -566,98 +642,168 @@ struct ChartRenderContext
     viol_indices::Set{Int}
     cpk::Union{Float64,Nothing}
     band::Symbol
+    # Plotted primary series (individuals for I-MR; X̄ for Xbar_R/S)
+    primary_values::Vector{Float64}
+    # Side-panel secondary summary (R̄ / s̄); dual canvas remains P2
+    secondary_name::String
+    secondary_bar::Union{Float64,Nothing}
 end
 
 """
-    auto_limits(vs; chart_type=I_MR, subgroup_size=5, sigma_method=:mr)
+    _limits_from_cl_sigma(cl, sigma) -> LimitsAndZones
 
-PR1 thin alias to `compute_limits_and_zones` (I-MR / :mr path).
-PR7 fills type-aware auto (X̄-R/S, attributes); kwargs reserved as the hook.
+Zones at ±1/2/3σ of process/chart sigma. UCL/LCL = cl ± 3σ.
+"""
+function _limits_from_cl_sigma(cl::Float64, sigma::Float64)::LimitsAndZones
+    LimitsAndZones(
+        cl, sigma,
+        cl + 3 * sigma, cl - 3 * sigma,
+        cl + 2 * sigma, cl - 2 * sigma,
+        cl + 1 * sigma, cl - 1 * sigma,
+    )
+end
+
+"""
+    _limits_xbar(cl, process_sigma, half_width) -> LimitsAndZones
+
+X̄ chart: UCL/LCL from A2·R̄ or A3·s̄ (`half_width`); WECO zones from `process_sigma`
+(HTML: Xbar-R σ=R̄/d2, Xbar-S σ=s̄).
+"""
+function _limits_xbar(cl::Float64, process_sigma::Float64, half_width::Float64)::LimitsAndZones
+    LimitsAndZones(
+        cl, process_sigma,
+        cl + half_width, cl - half_width,
+        cl + 2 * process_sigma, cl - 2 * process_sigma,
+        cl + 1 * process_sigma, cl - 1 * process_sigma,
+    )
+end
+
+"""
+    auto_limits(values; chart_type=I_MR, subgroup_size=5, sigma_method=:mr,
+                limits_mode=:auto, manual_cl=nothing, manual_ucl=nothing, manual_lcl=nothing)
+        -> LimitsAndZones
+
+Type-aware control limits. I_MR uses existing :mr / :std paths.
+Xbar_R / Xbar_S use SS_FACTORS on consecutive series chunks (incomplete tail dropped).
+Attribute p/np/c/u deferred to PR8 (fall back to I_MR).
+Manual kwargs reserved for PR5 (ignored here — do not rewrite manual branch).
 """
 function auto_limits(
-    vs;
+    values::AbstractVector{<:Real};
     chart_type::ChartType = I_MR,
     subgroup_size::Int = 5,
     sigma_method::Symbol = :mr,
+    limits_mode::Symbol = :auto,
+    manual_cl = nothing,
+    manual_ucl = nothing,
+    manual_lcl = nothing,
 )::LimitsAndZones
-    # PR1: ignore chart_type / subgroup_size; always existing I-MR path
-    compute_limits_and_zones(vs; sigma_method = sigma_method)
+    # manual kwargs intentionally unused (PR5 owns manual branch in resolver)
+    if chart_type == Xbar_R
+        n = _clamp_subgroup_n(subgroup_size)
+        xbar, ranges, _ = subgroup_means_and_ranges(values, n)
+        if isempty(xbar)
+            return _limits_from_cl_sigma(0.0, 0.0)
+        end
+        f = SS_FACTORS[n]
+        cl = mean(xbar)
+        rbar = mean(ranges)
+        process_sigma = rbar / f.d2
+        half = f.A2 * rbar
+        return _limits_xbar(cl, process_sigma, half)
+    elseif chart_type == Xbar_S
+        n = _clamp_subgroup_n(subgroup_size)
+        xbar, svals, _ = subgroup_means_and_s(values, n)
+        if isempty(xbar)
+            return _limits_from_cl_sigma(0.0, 0.0)
+        end
+        f = SS_FACTORS[n]
+        cl = mean(xbar)
+        sbar = mean(svals)
+        # HTML: out.sigma = sBar; UCL = m + A3*sBar
+        half = f.A3 * sbar
+        return _limits_xbar(cl, sbar, half)
+    else
+        # I_MR and (for now) attribute types → existing path
+        return compute_limits_and_zones(values; sigma_method = sigma_method)
+    end
 end
 
 """
-    _manual_limits_effective(ch) -> Bool
+    _primary_and_secondary(ch) -> (primary, secondary_name, secondary_bar)
 
-Same predicate as the resolver manual branch: mode is :manual, all three
-manual_cl/ucl/lcl set, and sigma = (ucl - cl) / 3 is strictly positive.
-Incomplete or non-positive-σ manual falls through to auto (badge + gateway).
+Series-chunk primary for plotting/WECO; R̄/s̄ for side panel.
 """
-function _manual_limits_effective(ch::ChartSpec)::Bool
-    ch.limits_mode == :manual || return false
-    (ch.manual_cl === nothing || ch.manual_ucl === nothing || ch.manual_lcl === nothing) && return false
-    return Float64(ch.manual_ucl) > Float64(ch.manual_cl)  # σ = (ucl-cl)/3 > 0
-end
-
-"""
-    _limits_from_manual(ch) -> LimitsAndZones
-
-HTML computeChart manual path (~2369–2371): sigma = (ucl - cl) / 3; zones from that sigma.
-Uses provided CL/UCL/LCL as control limits; zone A/B/C from sigma (cl ± kσ).
-Requires `_manual_limits_effective(ch)` (caller checks).
-"""
-function _limits_from_manual(ch::ChartSpec)::LimitsAndZones
-    cl = Float64(ch.manual_cl)
-    ucl = Float64(ch.manual_ucl)
-    lcl = Float64(ch.manual_lcl)
-    sigma = (ucl - cl) / 3
-    LimitsAndZones(
-        cl,
-        sigma,
-        ucl,
-        lcl,
-        cl + 2 * sigma,
-        cl - 2 * sigma,
-        cl + 1 * sigma,
-        cl - 1 * sigma,
-    )
+function _primary_and_secondary(ch::ChartSpec)
+    vs = ch.data.values
+    if ch.chart_type == Xbar_R
+        n = _clamp_subgroup_n(ch.subgroup_size)
+        xbar, ranges, _ = subgroup_means_and_ranges(vs, n)
+        bar = isempty(ranges) ? nothing : mean(ranges)
+        return (xbar, "R", bar)
+    elseif ch.chart_type == Xbar_S
+        n = _clamp_subgroup_n(ch.subgroup_size)
+        xbar, svals, _ = subgroup_means_and_s(vs, n)
+        bar = isempty(svals) ? nothing : mean(svals)
+        return (xbar, "s", bar)
+    else
+        return (Float64.(vs), "", nothing)
+    end
 end
 
 """
     resolve_chart_render_context(ch; sigma_method=:mr)
 
-Pure resolver gateway. Returns canonical lz (with chosen sigma), WECO viol set, cpk, band.
-All OOC/OOS/Cpk decisions and labels must derive from this to guarantee consistency.
+Pure resolver gateway. Returns canonical lz, WECO viol set, cpk, band, primary series,
+and secondary (R̄/s̄) side-panel stats.
 
-Manual branch (PR5): when `_manual_limits_effective` (mode + all three set + σ>0),
-sigma = (ucl - cl) / 3. Non-positive σ and incomplete manual fall through to auto.
-Auto path stays I_MR/:mr until PR7 fills type-aware auto.
+PR5 fills manual limits (gateway left intact — fall through to auto until then).
+PR7 fills type-aware auto for Xbar_R / Xbar_S (series chunks).
 """
 function resolve_chart_render_context(ch::ChartSpec; sigma_method::Symbol = :mr)::ChartRenderContext
     vs = ch.data.values
-    if _manual_limits_effective(ch)
-        lz = _limits_from_manual(ch)
+    primary, sec_name, sec_bar = _primary_and_secondary(ch)
+
+    # PR1 gateway: branch on limits_mode; PR5 fills manual (until then fall through to auto)
+    if ch.limits_mode == :manual &&
+       ch.manual_cl !== nothing && ch.manual_ucl !== nothing && ch.manual_lcl !== nothing
+        # PR5 fills: sigma = (ucl - cl) / 3; zones from that sigma
+        # Until PR5: fall through to auto
+        lz = auto_limits(vs; chart_type = ch.chart_type, subgroup_size = ch.subgroup_size,
+                         sigma_method = sigma_method)
     else
-        # PR7 fills type-aware auto; until then always I_MR :mr path via auto_limits
         lz = auto_limits(vs; chart_type = ch.chart_type, subgroup_size = ch.subgroup_size,
                          sigma_method = sigma_method)
     end
-    viols = weco_detect(vs, lz.cl, lz.sigma; enabled_rules = ch.enabled_rules)
+
+    # WECO against primary (X̄ for subgroup charts, individuals for I-MR)
+    viols = weco_detect(primary, lz.cl, lz.sigma; enabled_rules = ch.enabled_rules)
     viol_set = Set(v.index for v in viols)
-    cr = compute_capability(vs, lz.cl, lz.sigma; usl = ch.usl, lsl = ch.lsl)
+
+    # Cpk: Xbar-S unbiases s̄ with c4 (HTML ~2388–2392); Xbar-R/I-MR already process σ̂
+    cpk_sigma = if ch.chart_type == Xbar_S && sec_bar !== nothing
+        n = _clamp_subgroup_n(ch.subgroup_size)
+        c4 = SS_FACTORS[n].c4
+        c4 > 0 ? sec_bar / c4 : lz.sigma
+    else
+        lz.sigma
+    end
+    cr = compute_capability(primary, lz.cl, cpk_sigma; usl = ch.usl, lsl = ch.lsl)
     b = cpk_band(cr.cpk)
-    ChartRenderContext(lz, viol_set, cr.cpk, b)
+    ChartRenderContext(lz, viol_set, cr.cpk, b, primary, sec_name, sec_bar)
 end
 
 """
     point_status(i, ctx, ch) -> :oos | :ooc | :ok
 
-Canonical classification for a point. Used by hover labels and marker choice.
+Canonical classification for a primary-series point (index into `ctx.primary_values`).
 """
 function point_status(i::Int, ctx::ChartRenderContext, ch::ChartSpec)::Symbol
-    n = length(ch.data.values)
+    n = length(ctx.primary_values)
     if i < 1 || i > n
         return :ok
     end
-    v = ch.data.values[i]
+    v = ctx.primary_values[i]
     if (ch.usl !== nothing && v > ch.usl) || (ch.lsl !== nothing && v < ch.lsl)
         return :oos
     elseif i in ctx.viol_indices
@@ -730,6 +876,7 @@ export weco_detect, compute_limits_and_zones, compute_capability, generate_spc_w
 export detect_oos, cpk_band, cpk_color_for_band
 export compute_fit_y_range, y_extras_from_limits, fit_viewport_y!, auto_fit_viewport_y!
 export ChartRenderContext, resolve_chart_render_context, point_status, auto_limits
+export SS_FACTORS, subgroup_means_and_ranges, subgroup_means_and_s
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS
 export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_type, chart_type_to_string
@@ -1299,37 +1446,7 @@ function set_active_chart!(m::SPCWorkbenchModel, idx::Int)
     return nothing
 end
 
-# ── Multi-plot pane selection (PR2a) ────────────────────────────────────
-
-"""
-    visible_charts(m) -> Vector{ChartSpec}
-
-Phase A / PR2a: identity — all charts in library order (shared refs).
-PR9 will filter by tool/type/owner.
-"""
-function visible_charts(m::SPCWorkbenchModel)::Vector{ChartSpec}
-    return m.charts
-end
-
-"""
-    dashboard_pane_charts(m; k=3) -> Vector{ChartSpec}
-
-Active chart plus the next (k-1) visible neighbors. Primary interactive plot
-is panes[1]; read-only extras are panes[2:end]. Fixes the hard-coded
-`charts[2]`/`charts[3]` lock (active==2 duplicate / post-delete hazards).
-"""
-function dashboard_pane_charts(m::SPCWorkbenchModel; k::Int = 3)::Vector{ChartSpec}
-    vis = visible_charts(m)
-    isempty(vis) && return ChartSpec[]
-    act = current_chart(m)
-    i = findfirst(c -> c.id == act.id, vis)
-    i === nothing && (i = 1)
-    j = min(i + k - 1, length(vis))
-    return vis[i:j]
-end
-
 export ToolEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
-export visible_charts, dashboard_pane_charts
 
 # ── Update (Key + Mouse, full fidelity) ─────────────────────────────────
 
@@ -1530,12 +1647,6 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.edit_buf = m.lsl === nothing ? "" : string(m.lsl)
             m.last_event = "edit lsl: $(m.edit_buf)"
             return
-        elseif c == 'g' || c == 'G'
-            # PR3: per-chart live toggle (NOT L — L remains LSL)
-            chg = current_chart(m)
-            chg.live_enabled = !chg.live_enabled
-            m.last_event = chg.live_enabled ? "live on" : "live off"
-            return
         elseif c == 's' || c == 'S'
             m.usl = m.target = m.lsl = nothing
             ch.usl = ch.target = ch.lsl = nothing
@@ -1663,8 +1774,8 @@ function view(m::SPCWorkbenchModel, f::Frame)
     ch = current_chart(m)
     n = length(m.data.values)
 
-    # live (slice 6 / PR3) — on active; shared gate with advance_live!
-    if _live_may_advance(m) && (m.tick % 4 == 0)
+    # live (slice 6) — on active
+    if !m.paused && m.editing === nothing && !m.config_open && (m.tick % 4 == 0)
         advance_live!(m)
         if n > 0 && m.viewport.x1 >= n - 1
             m.viewport.x1 = n
@@ -1707,15 +1818,14 @@ function view(m::SPCWorkbenchModel, f::Frame)
     plot_rect = cols[1]
     side_rect = cols[2]
 
-    # Dashboard: up to k panes from active + following visible neighbors (not charts[2]/[3] lock)
-    panes = dashboard_pane_charts(m; k = 3)
-    npanes = length(panes)
-    is_dashboard_multi = (m.view_mode == :dashboard && npanes >= 2)
+    # Dashboard: render multiple (up to 3) charts simultaneously for rich visual
+    ncharts = length(m.charts)
+    is_dashboard_multi = (m.view_mode == :dashboard && ncharts >= 2)
     active_plot_rect = plot_rect
     second_plot_rect = nothing
     third_plot_rect = nothing
     if is_dashboard_multi
-        nc = min(3, npanes)
+        nc = min(3, ncharts)
         if nc == 3
             h1 = max(8, (plot_rect.height * 5) ÷ 10)
             h2 = max(5, (plot_rect.height - h1 - 2) * 5 ÷ 10)
@@ -1730,7 +1840,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     end
 
     # header
-    hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
+    hdr = "SPC Workbench [dashboard]  [p]pause [r]reset [c]config [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
 
     if m.config_open
@@ -1803,168 +1913,181 @@ function view(m::SPCWorkbenchModel, f::Frame)
         ch_act = current_chart(m)
         ctx = resolve_chart_render_context(ch_act; sigma_method = :mr)
         viol_set = ctx.viol_indices
-        lz_disp = ctx.lz   # canonical mr-based
-        # Auto-scale Y so visible points + enabled limit/spec lines stay inside the plot
-        auto_fit_viewport_y!(m.viewport, m.data.values, lz_disp;
-            usl = m.usl, lsl = m.lsl, show_lines = m.show_chart_lines)
-        ch_act.viewport = m.viewport
+        lz_disp = ctx.lz   # type-aware limits (I-MR :mr or Xbar A2/A3)
+        # Plot primary series: individuals (I-MR) or subgroup means (Xbar_R/S)
+        plot_vals = ctx.primary_values
+        n_plot = length(plot_vals)
+        if n_plot > 0
+            # Keep viewport within primary length (Xbar has fewer points than raw series)
+            clamp_viewport!(m.viewport, n_plot)
+            # Auto-scale Y so visible points + enabled limit/spec lines stay inside the plot
+            auto_fit_viewport_y!(m.viewport, plot_vals, lz_disp;
+                usl = m.usl, lsl = m.lsl, show_lines = m.show_chart_lines)
+            ch_act.viewport = m.viewport
 
-        c = create_canvas(cw, ch; style = !isempty(viol_set) ? tstyle(:accent) : tstyle(:primary))
-        dw, dh = canvas_dot_size(c)
+            c = create_canvas(cw, ch; style = !isempty(viol_set) ? tstyle(:accent) : tstyle(:primary))
+            dw, dh = canvas_dot_size(c)
 
-        prev = nothing
-        for i in m.viewport.x0:m.viewport.x1
-            if i < 1 || i > n
-                continue
+            prev = nothing
+            for i in m.viewport.x0:m.viewport.x1
+                if i < 1 || i > n_plot
+                    continue
+                end
+                v = plot_vals[i]
+                dx = map_to_dot_x(i, m.viewport, dw)
+                dy = map_to_dot_y(v, m.viewport, dh)
+                set_point!(c, dx, dy)
+                if prev !== nothing && _pref_on(m, "braille_series")
+                    line!(c, prev[1], prev[2], dx, dy)
+                end
+                prev = (dx, dy)
             end
-            v = m.data.values[i]
-            dx = map_to_dot_x(i, m.viewport, dw)
-            dy = map_to_dot_y(v, m.viewport, dh)
-            set_point!(c, dx, dy)
-            if prev !== nothing && _pref_on(m, "braille_series")
-                line!(c, prev[1], prev[2], dx, dy)
-            end
-            prev = (dx, dy)
-        end
 
-        # limits + zones (slice 5) -- use MR disp; gated by show_chart_lines
-        lz = lz_disp
-        if _line_on(m, "sigma1")
-            for (z, dash) in [(lz.ucl1, 2), (lz.lcl1, 2)]
-                zy = map_to_dot_y(z, m.viewport, dh)
-                dashed_line!(c, 0, zy, dw-1, zy; dash = dash)
-            end
-        end
-        if _line_on(m, "sigma2")
-            for (z, dash) in [(lz.ucl2, 3), (lz.lcl2, 3)]
-                zy = map_to_dot_y(z, m.viewport, dh)
-                dashed_line!(c, 0, zy, dw-1, zy; dash = dash)
-            end
-        end
-        if _line_on(m, "sigma3")
-            dashed_line!(c, 0, map_to_dot_y(lz.ucl, m.viewport, dh), dw-1, map_to_dot_y(lz.ucl, m.viewport, dh); dash=4)
-            dashed_line!(c, 0, map_to_dot_y(lz.lcl, m.viewport, dh), dw-1, map_to_dot_y(lz.lcl, m.viewport, dh); dash=4)
-        end
-        if _line_on(m, "cl")
-            line!(c, 0, map_to_dot_y(lz.cl, m.viewport, dh), dw-1, map_to_dot_y(lz.cl, m.viewport, dh))
-        end
-
-        # spec lines if set (slice 5)
-        if _line_on(m, "specs")
-            if m.usl !== nothing
-                sy = map_to_dot_y(m.usl, m.viewport, dh)
-                dashed_line!(c, 0, sy, dw-1, sy; dash=2)
-            end
-            if m.lsl !== nothing
-                sy = map_to_dot_y(m.lsl, m.viewport, dh)
-                dashed_line!(c, 0, sy, dw-1, sy; dash=2)
-            end
-        end
-
-        render_canvas(c, plot_inner, f)
-
-        # Colorized limit/zone/spec lines (distinct styles; gated by show_chart_lines)
-        lz_c = lz_disp  # already :mr
-        function _draw_lim_line!(rect, val, sty, step=3)
-            yy = data_val_to_cell_row(val, rect, m.viewport)
-            for xx in rect.x:right(rect)
-                if (xx % step) == 0
-                    set_char!(buf, xx, yy, '-', sty)
+            # limits + zones (slice 5) -- gated by show_chart_lines
+            lz = lz_disp
+            if _line_on(m, "sigma1")
+                for (z, dash) in [(lz.ucl1, 2), (lz.lcl1, 2)]
+                    zy = map_to_dot_y(z, m.viewport, dh)
+                    dashed_line!(c, 0, zy, dw-1, zy; dash = dash)
                 end
             end
-        end
-        if _line_on(m, "specs")
-            if m.usl !== nothing; _draw_lim_line!(plot_inner, m.usl, tstyle(:error, bold=true), 2); end
-            if m.lsl !== nothing; _draw_lim_line!(plot_inner, m.lsl, tstyle(:error, bold=true), 2); end
-        end
-        if _line_on(m, "sigma3")
-            _draw_lim_line!(plot_inner, lz_c.ucl, tstyle(:warning, bold=true), 4)
-            _draw_lim_line!(plot_inner, lz_c.lcl, tstyle(:warning, bold=true), 4)
-        end
-        if _line_on(m, "sigma2")
-            _draw_lim_line!(plot_inner, lz_c.ucl2, tstyle(:secondary), 3)
-            _draw_lim_line!(plot_inner, lz_c.lcl2, tstyle(:secondary), 3)
-        end
-        if _line_on(m, "sigma1")
-            _draw_lim_line!(plot_inner, lz_c.ucl1, tstyle(:text_dim), 2)
-            _draw_lim_line!(plot_inner, lz_c.lcl1, tstyle(:text_dim), 2)
-        end
-        if _line_on(m, "cl")
-            cly = data_val_to_cell_row(lz_c.cl, plot_inner, m.viewport)
-            for xx in plot_inner.x:right(plot_inner); set_char!(buf, xx, cly, '─', tstyle(:accent)); end
-        end
-
-        # overlays (fidelity)
-        if m.hover_x !== nothing
-            hx = clamp(m.hover_x, plot_inner.x, right(plot_inner))
-            for y in (plot_inner.y+1):(bottom(plot_inner)-1)
-                set_char!(buf, hx, y, '│', tstyle(:accent))
+            if _line_on(m, "sigma2")
+                for (z, dash) in [(lz.ucl2, 3), (lz.lcl2, 3)]
+                    zy = map_to_dot_y(z, m.viewport, dh)
+                    dashed_line!(c, 0, zy, dw-1, zy; dash = dash)
+                end
             end
-        end
-        if (si = m.selected) !== nothing && 1 <= si <= n && si >= m.viewport.x0 && si <= m.viewport.x1
-            hx = data_index_to_cell(si, plot_inner, m.viewport)
-            for y in (plot_inner.y+1):(bottom(plot_inner)-1)
-                set_char!(buf, hx, y, '┃', tstyle(:secondary, bold=true))
+            if _line_on(m, "sigma3")
+                dashed_line!(c, 0, map_to_dot_y(lz.ucl, m.viewport, dh), dw-1, map_to_dot_y(lz.ucl, m.viewport, dh); dash=4)
+                dashed_line!(c, 0, map_to_dot_y(lz.lcl, m.viewport, dh), dw-1, map_to_dot_y(lz.lcl, m.viewport, dh); dash=4)
             end
-        end
-        if (hi = m.hovered) !== nothing && 1 <= hi <= n && hi >= m.viewport.x0 && hi <= m.viewport.x1
-            hy = data_val_to_cell_row(m.data.values[hi], plot_inner, m.viewport)
-            set_char!(buf, plot_inner.x + 1, hy, '─', tstyle(:accent))
-        end
-
-        # Series connectors (visual prefs): dotted • and/or solid box-drawing stroke
-        draw_series_connectors!(buf, plot_inner, m.data.values, m.viewport, m)
-
-        # markers
-        for i in m.viewport.x0:m.viewport.x1
-            if i < 1 || i > n
-                continue
+            if _line_on(m, "cl")
+                line!(c, 0, map_to_dot_y(lz.cl, m.viewport, dh), dw-1, map_to_dot_y(lz.cl, m.viewport, dh))
             end
-            dx = data_index_to_cell(i, plot_inner, m.viewport)
-            dy = data_val_to_cell_row(m.data.values[i], plot_inner, m.viewport)
-            is_v = i in viol_set
-            vval = m.data.values[i]
-            is_oos = (m.usl !== nothing && vval > m.usl) || (m.lsl !== nothing && vval < m.lsl)
-            if is_oos
-                sym = '✕'
-                sty = tstyle(:error, bold=true)
-            else
-                sym = is_v ? '◆' : '●'
-                sty = is_v ? tstyle(:accent, bold=true) : tstyle(:primary, bold=true)
+
+            # spec lines if set (slice 5)
+            if _line_on(m, "specs")
+                if m.usl !== nothing
+                    sy = map_to_dot_y(m.usl, m.viewport, dh)
+                    dashed_line!(c, 0, sy, dw-1, sy; dash=2)
+                end
+                if m.lsl !== nothing
+                    sy = map_to_dot_y(m.lsl, m.viewport, dh)
+                    dashed_line!(c, 0, sy, dw-1, sy; dash=2)
+                end
             end
-            set_char!(buf, dx, dy, sym, sty)
-        end
 
-        # tooltip
-        if (hi = m.hovered) !== nothing && hi >= m.viewport.x0 && hi <= m.viewport.x1 && m.drag_start === nothing
-            draw_hover_tooltip!(buf, plot_inner, hi, m.data.values[hi], hi in viol_set, m.viewport; usl=m.usl, target=m.target, lsl=m.lsl)
-        end
+            render_canvas(c, plot_inner, f)
 
-        # labels
-        set_string!(buf, plot_inner.x, plot_inner.y + ch - 1, string(m.viewport.x0), tstyle(:text_dim))
-        set_string!(buf, right(plot_inner)-3, plot_inner.y + ch - 1, string(m.viewport.x1), tstyle(:text_dim))
+            # Colorized limit/zone/spec lines (distinct styles; gated by show_chart_lines)
+            lz_c = lz_disp
+            function _draw_lim_line!(rect, val, sty, step=3)
+                yy = data_val_to_cell_row(val, rect, m.viewport)
+                for xx in rect.x:right(rect)
+                    if (xx % step) == 0
+                        set_char!(buf, xx, yy, '-', sty)
+                    end
+                end
+            end
+            if _line_on(m, "specs")
+                if m.usl !== nothing; _draw_lim_line!(plot_inner, m.usl, tstyle(:error, bold=true), 2); end
+                if m.lsl !== nothing; _draw_lim_line!(plot_inner, m.lsl, tstyle(:error, bold=true), 2); end
+            end
+            if _line_on(m, "sigma3")
+                _draw_lim_line!(plot_inner, lz_c.ucl, tstyle(:warning, bold=true), 4)
+                _draw_lim_line!(plot_inner, lz_c.lcl, tstyle(:warning, bold=true), 4)
+            end
+            if _line_on(m, "sigma2")
+                _draw_lim_line!(plot_inner, lz_c.ucl2, tstyle(:secondary), 3)
+                _draw_lim_line!(plot_inner, lz_c.lcl2, tstyle(:secondary), 3)
+            end
+            if _line_on(m, "sigma1")
+                _draw_lim_line!(plot_inner, lz_c.ucl1, tstyle(:text_dim), 2)
+                _draw_lim_line!(plot_inner, lz_c.lcl1, tstyle(:text_dim), 2)
+            end
+            if _line_on(m, "cl")
+                cly = data_val_to_cell_row(lz_c.cl, plot_inner, m.viewport)
+                for xx in plot_inner.x:right(plot_inner); set_char!(buf, xx, cly, '─', tstyle(:accent)); end
+            end
+
+            # overlays (fidelity)
+            if m.hover_x !== nothing
+                hx = clamp(m.hover_x, plot_inner.x, right(plot_inner))
+                for y in (plot_inner.y+1):(bottom(plot_inner)-1)
+                    set_char!(buf, hx, y, '│', tstyle(:accent))
+                end
+            end
+            if (si = m.selected) !== nothing && 1 <= si <= n_plot && si >= m.viewport.x0 && si <= m.viewport.x1
+                hx = data_index_to_cell(si, plot_inner, m.viewport)
+                for y in (plot_inner.y+1):(bottom(plot_inner)-1)
+                    set_char!(buf, hx, y, '┃', tstyle(:secondary, bold=true))
+                end
+            end
+            if (hi = m.hovered) !== nothing && 1 <= hi <= n_plot && hi >= m.viewport.x0 && hi <= m.viewport.x1
+                hy = data_val_to_cell_row(plot_vals[hi], plot_inner, m.viewport)
+                set_char!(buf, plot_inner.x + 1, hy, '─', tstyle(:accent))
+            end
+
+            # Series connectors (visual prefs): dotted • and/or solid box-drawing stroke
+            draw_series_connectors!(buf, plot_inner, plot_vals, m.viewport, m)
+
+            # markers on primary (X̄ for Xbar charts)
+            for i in m.viewport.x0:m.viewport.x1
+                if i < 1 || i > n_plot
+                    continue
+                end
+                dx = data_index_to_cell(i, plot_inner, m.viewport)
+                dy = data_val_to_cell_row(plot_vals[i], plot_inner, m.viewport)
+                st = point_status(i, ctx, ch_act)
+                if st == :oos
+                    sym = '✕'
+                    sty = tstyle(:error, bold=true)
+                elseif st == :ooc
+                    sym = '◆'
+                    sty = tstyle(:accent, bold=true)
+                else
+                    sym = '●'
+                    sty = tstyle(:primary, bold=true)
+                end
+                set_char!(buf, dx, dy, sym, sty)
+            end
+
+            # tooltip
+            if (hi = m.hovered) !== nothing && 1 <= hi <= n_plot && hi >= m.viewport.x0 && hi <= m.viewport.x1 && m.drag_start === nothing
+                draw_hover_tooltip!(buf, plot_inner, hi, plot_vals[hi], hi in viol_set, m.viewport; usl=m.usl, target=m.target, lsl=m.lsl)
+            end
+
+            # labels
+            set_string!(buf, plot_inner.x, plot_inner.y + ch - 1, string(m.viewport.x0), tstyle(:text_dim))
+            set_string!(buf, right(plot_inner)-3, plot_inner.y + ch - 1, string(m.viewport.x1), tstyle(:text_dim))
+        end
     end
 
-    # Read-only extra panes from dashboard_pane_charts (panes[2], panes[3]) — not m.charts[2]/[3]
-    if is_dashboard_multi && second_plot_rect !== nothing && npanes >= 2
-        ch2 = panes[2]
-        n2 = length(ch2.data.values)
-        if n2 > 0 && second_plot_rect.width > 4 && second_plot_rect.height > 3
+    # SECOND simultaneous chart for dashboard (rich multi visible)
+    if is_dashboard_multi && second_plot_rect !== nothing && length(m.charts) >= 2
+        ch2 = m.charts[2]
+        n2_raw = length(ch2.data.values)
+        if n2_raw > 0 && second_plot_rect.width > 4 && second_plot_rect.height > 3
             blk2 = Block(title = "Chart 2: $(ch2.name) (read-only view)", border_style = tstyle(:border), title_style = tstyle(:text_dim))
             inn2 = render(blk2, second_plot_rect, buf)
             cw2, ch2h = inn2.width, inn2.height
             if cw2 > 0 && ch2h > 0
                 ctx2 = resolve_chart_render_context(ch2; sigma_method=:mr)
                 viol2 = ctx2.viol_indices
-                auto_fit_viewport_y!(ch2.viewport, ch2.data.values, ctx2.lz;
-                    usl = ch2.usl, lsl = ch2.lsl, show_lines = m.show_chart_lines)
+                plot2 = ctx2.primary_values
+                n2 = length(plot2)
+                if n2 > 0
+                    clamp_viewport!(ch2.viewport, n2)
+                    auto_fit_viewport_y!(ch2.viewport, plot2, ctx2.lz;
+                        usl = ch2.usl, lsl = ch2.lsl, show_lines = m.show_chart_lines)
+                end
                 c2 = create_canvas(cw2, ch2h; style = !isempty(viol2) ? tstyle(:accent) : tstyle(:primary))
                 dw2, dh2 = canvas_dot_size(c2)
                 prev2 = nothing
                 vp2 = ch2.viewport
                 for i in vp2.x0 : vp2.x1
                     (i<1 || i>n2) && continue
-                    v = ch2.data.values[i]
+                    v = plot2[i]
                     dx = map_to_dot_x(i, vp2, dw2)
                     dy = map_to_dot_y(v, vp2, dh2)
                     set_point!(c2, dx, dy)
@@ -2029,12 +2152,12 @@ function view(m::SPCWorkbenchModel, f::Frame)
                     cly2 = data_val_to_cell_row(lz2.cl, inn2, vp2)
                     for xx in inn2.x:right(inn2); set_char!(buf, xx, cly2, '─', tstyle(:accent)); end
                 end
-                draw_series_connectors!(buf, inn2, ch2.data.values, vp2, m)
-                # markers for ch2 (OOC/OOS)
+                draw_series_connectors!(buf, inn2, plot2, vp2, m)
+                # markers for ch2 (OOC/OOS) on primary series
                 for i in vp2.x0:vp2.x1
                     (i<1||i>n2) && continue
                     dx = data_index_to_cell(i, inn2, vp2)
-                    dy = data_val_to_cell_row(ch2.data.values[i], inn2, vp2)
+                    dy = data_val_to_cell_row(plot2[i], inn2, vp2)
                     st2 = point_status(i, ctx2, ch2)
                     if st2 == :oos
                         sym2 = '✕'; sty2 = tstyle(:error, bold=true)
@@ -2049,26 +2172,31 @@ function view(m::SPCWorkbenchModel, f::Frame)
         end
     end
 
-    # THIRD pane when panes has a third neighbor
-    if third_plot_rect !== nothing && npanes >= 3
-        ch3 = panes[3]
-        n3 = length(ch3.data.values)
-        if n3 > 0 && third_plot_rect.width > 4 && third_plot_rect.height > 3
+    # THIRD simultaneous chart when >=3
+    if third_plot_rect !== nothing && ncharts >= 3
+        ch3 = m.charts[3]
+        n3_raw = length(ch3.data.values)
+        if n3_raw > 0 && third_plot_rect.width > 4 && third_plot_rect.height > 3
             blk3 = Block(title = "Chart 3: $(ch3.name) (read-only)", border_style = tstyle(:border), title_style = tstyle(:text_dim))
             inn3 = render(blk3, third_plot_rect, buf)
             cw3, ch3h = inn3.width, inn3.height
             if cw3 > 0 && ch3h > 0
                 ctx3 = resolve_chart_render_context(ch3; sigma_method=:mr)
                 viol3 = ctx3.viol_indices
-                auto_fit_viewport_y!(ch3.viewport, ch3.data.values, ctx3.lz;
-                    usl = ch3.usl, lsl = ch3.lsl, show_lines = m.show_chart_lines)
+                plot3 = ctx3.primary_values
+                n3 = length(plot3)
+                if n3 > 0
+                    clamp_viewport!(ch3.viewport, n3)
+                    auto_fit_viewport_y!(ch3.viewport, plot3, ctx3.lz;
+                        usl = ch3.usl, lsl = ch3.lsl, show_lines = m.show_chart_lines)
+                end
                 c3 = create_canvas(cw3, ch3h; style = !isempty(viol3) ? tstyle(:accent) : tstyle(:primary))
                 dw3, dh3 = canvas_dot_size(c3)
                 prev3 = nothing
                 vp3 = ch3.viewport
                 for i in vp3.x0:vp3.x1
                     (i<1 || i>n3) && continue
-                    v = ch3.data.values[i]
+                    v = plot3[i]
                     dx = map_to_dot_x(i, vp3, dw3)
                     dy = map_to_dot_y(v, vp3, dh3)
                     set_point!(c3, dx, dy)
@@ -2118,10 +2246,10 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 if _line_on(m, "cl")
                     cly3 = data_val_to_cell_row(lz3.cl, inn3, vp3); for xx in inn3.x:right(inn3); set_char!(buf,xx,cly3,'─',tstyle(:accent)); end
                 end
-                draw_series_connectors!(buf, inn3, ch3.data.values, vp3, m)
+                draw_series_connectors!(buf, inn3, plot3, vp3, m)
                 for i in vp3.x0:vp3.x1
                     (i<1||i>n3)&&continue
-                    dx=data_index_to_cell(i,inn3,vp3); dy=data_val_to_cell_row(ch3.data.values[i],inn3,vp3)
+                    dx=data_index_to_cell(i,inn3,vp3); dy=data_val_to_cell_row(plot3[i],inn3,vp3)
                     st3 = point_status(i, ctx3, ch3)
                     if st3 == :oos
                         sym3 = '✕'; sty3 = tstyle(:error, bold=true)
@@ -2143,14 +2271,18 @@ function view(m::SPCWorkbenchModel, f::Frame)
     x = side_inner.x
     y = side_inner.y
     if n > 0
-        # Use the resolved ctx for active (canonical :mr + band) to avoid duplication
+        # Use the resolved ctx for active (canonical limits + band) to avoid duplication
         act_ch = current_chart(m)
         act_ctx = resolve_chart_render_context(act_ch; sigma_method=:mr)
         lz = act_ctx.lz
-        # Mode badge = effective gateway path (same predicate as resolve_chart_render_context)
-        mode_lbl = _manual_limits_effective(act_ch) ? "limits:manual" : "limits:auto"
-        set_string!(buf, x, y, "n=$n $mode_lbl", tstyle(:text)); y += 1
+        n_primary = length(act_ctx.primary_values)
+        set_string!(buf, x, y, "n=$n_primary", tstyle(:text)); y += 1
         set_string!(buf, x, y, "cl=$(round(lz.cl;digits=2)) σ=$(round(lz.sigma;digits=2))", tstyle(:text_dim)); y += 1
+        # Secondary subgroup stats (Rbar / sbar) for Xbar charts — dual canvas remains P2
+        if act_ctx.secondary_bar !== nothing && !isempty(act_ctx.secondary_name)
+            label = act_ctx.secondary_name == "R" ? "Rbar" : (act_ctx.secondary_name == "s" ? "sbar" : act_ctx.secondary_name)
+            set_string!(buf, x, y, "$label=$(round(act_ctx.secondary_bar; digits=2))", tstyle(:text_dim)); y += 1
+        end
         cpk_s = act_ctx.cpk === nothing ? "—" : _fmt(act_ctx.cpk)
         band = act_ctx.band
         cpk_st = band == :green ? tstyle(:success, bold=true) : (band == :red ? tstyle(:error, bold=true) : (band == :amber ? tstyle(:warning, bold=true) : tstyle(:text)))
@@ -2161,10 +2293,10 @@ function view(m::SPCWorkbenchModel, f::Frame)
         if m.usl !== nothing || m.lsl !== nothing
             set_string!(buf, x, y, "USL=$(m.usl===nothing ? "—" : round(m.usl;digits=1)) T=$(m.target===nothing ? "—" : round(m.target;digits=1)) LSL=$(m.lsl===nothing ? "—" : round(m.lsl;digits=1))", tstyle(:text_dim)); y += 1
         end
-        # Hover first (priority over long line list when side is short)
-        if (hi = m.hovered) !== nothing && 1 <= hi <= n
+        # Hover first (priority over long line list when side is short) — primary series index
+        if (hi = m.hovered) !== nothing && 1 <= hi <= n_primary
             if y <= bottom(side_inner) - 1
-                v = act_ch.data.values[hi]
+                v = act_ctx.primary_values[hi]
                 st = point_status(hi, act_ctx, act_ch)
                 stat = st == :oos ? "OOS" : (st == :ooc ? "OOC" : "OK")
                 set_string!(buf, x, y, "h[$hi]=$(round(v;digits=2)) $stat", tstyle(:accent, bold=true))
@@ -2208,7 +2340,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 bx = bx0
                 for i in 1:8
                     rid = "WECO-$i"
-                    on = get(act_ch.enabled_rules, rid, false)
+                    on = get(m.enabled_rules, rid, false)
                     if bx <= right(side_inner)
                         set_char!(buf, bx, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
                     end
@@ -2225,23 +2357,6 @@ function view(m::SPCWorkbenchModel, f::Frame)
                     end
                     y += 1
                 end
-            end
-        end
-        # Last-N WECO msgs by sample index (most recent); chart-scoped data/rules (PR5 / P1.8)
-        side_viols = weco_detect(act_ch.data.values, lz.cl, lz.sigma; enabled_rules = act_ch.enabled_rules)
-        show_viols = _side_viol_msgs_by_index(side_viols; n = SIDE_VIOL_MSG_MAX)
-        nv = length(side_viols)
-        if y <= bot
-            set_string!(buf, x, y, "Viols: $nv", nv > 0 ? tstyle(:warning) : tstyle(:text_dim))
-            y += 1
-        end
-        if !isempty(show_viols)
-            maxw = max(4, side_inner.width - 1)
-            for v in show_viols
-                y > bot && break
-                line = _side_trunc("$(v.rule) $(v.msg)", maxw)
-                set_string!(buf, x, y, line, tstyle(:warning))
-                y += 1
             end
         end
         # dashboard multi hint (lowest priority when cramped)
@@ -2300,7 +2415,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     else
         " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
     end
-    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p r c v o u t l s] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
 end
 
 # small helper for fmt
@@ -2311,39 +2426,6 @@ function _fmt(x)
     x < 1 ? string(round(x; digits=3)) : string(round(x; digits=2))
 end
 
-# Side-panel WECO violation message list (last N by sample index; PR5 / P1.8)
-const SIDE_VIOL_MSG_MAX = 5
-
-function _side_trunc(s::AbstractString, maxw::Int)::String
-    maxw <= 0 && return ""
-    io = IOBuffer()
-    n = 0
-    for c in s
-        n += 1
-        n > maxw && break
-        print(io, c)
-    end
-    String(take!(io))
-end
-
-"""
-    _side_viol_msgs_by_index(viols; n=SIDE_VIOL_MSG_MAX) -> Vector{WECOViolation}
-
-Policy: last-N by **sample index** (most recent points), not rule-number tail of
-`weco_detect` order. Stable secondary key is rule name. Returns ascending index
-order for display (oldest of the selected window first).
-"""
-function _side_viol_msgs_by_index(
-    viols::AbstractVector{WECOViolation};
-    n::Int = SIDE_VIOL_MSG_MAX,
-)::Vector{WECOViolation}
-    isempty(viols) && return WECOViolation[]
-    n <= 0 && return WECOViolation[]
-    sorted = sort(collect(viols); by = v -> (v.index, v.rule))
-    start = max(1, length(sorted) - n + 1)
-    return sorted[start:end]
-end
-
 # ── Dedicated Help page (adapted from HTML quickstart + WECO defs + workflow) ──
 function _render_help_page!(buf, area, m)
     # simple full area text page
@@ -2352,7 +2434,6 @@ function _render_help_page!(buf, area, m)
     lines = [
         "QUICK START (TUI):",
         "  p/P     toggle pause / live append",
-        "  g/G     toggle live append on active chart (live on/off)",
         "  r/R/z/Z reset viewport to full data",
         "  c/C     open/close WECO rule config (1-8 toggle; Tab→Lines→Visual)",
         "  v/V     open chart-line visibility config (CL/±σ/specs)",
@@ -2392,7 +2473,6 @@ function _render_keymap_page!(buf, area, m)
     kbd = [
         "KEYS:",
         "  p/P         Pause/Resume live mode",
-        "  g/G         Toggle live_enabled on active chart",
         "  r R z Z     Reset view (full range + auto y)",
         "  c C / v V / o O  Config WECO / Lines / Visual prefs",
         "  u t l / s   Edit USL/Target/LSL / clear specs",
@@ -2433,28 +2513,12 @@ const WECO_RULE_DESCS = [
     "8 outside 1σ",
 ]
 
-# ── Live (slice 6) — PR3: per-chart live_enabled + modal gates ─────────
-
-"""Shared predicate for view tick path and advance_live! (defensive)."""
-function _live_may_advance(m::SPCWorkbenchModel)::Bool
-    m.paused && return false
-    m.editing !== nothing && return false
-    m.config_open && return false
-    # Optional fields from library/prompt PR (PR2b+); skip if not present yet
-    if hasfield(typeof(m), :prompt_kind) && getfield(m, :prompt_kind) !== nothing
-        return false
-    end
-    if hasfield(typeof(m), :pending_delete) && getfield(m, :pending_delete) === true
-        return false
-    end
-    m.view_mode in (:help, :keymap, :library, :builder) && return false
-    ch = current_chart(m)
-    (isempty(ch.data.values) || !ch.live_enabled) && return false
-    return true
-end
+# ── Live (slice 6) ──────────────────────────────────────────────────────
 
 function advance_live!(m::SPCWorkbenchModel)
-    _live_may_advance(m) || return
+    if m.paused || m.editing !== nothing || m.config_open
+        return
+    end
     n = length(m.data.values)
     if n >= m.live_max || n == 0
         return
@@ -2517,11 +2581,7 @@ end
 
 Static/paused public runner.
 """
-function spc_workbench_demo(;
-    load::Union{Nothing,AbstractString} = nothing,
-    seed_demos::Symbol = :triple,
-    value_col::String = "Value",
-)
+function spc_workbench_demo()
     d = generate_spc_workbench_data(40; seed=42)
     n = length(d.values)
     vp = Viewport(x0 = n > 0 ? 1 : 0, x1 = n > 0 ? n : 0)
@@ -2529,34 +2589,22 @@ function spc_workbench_demo(;
         lz = compute_limits_and_zones(d.values; sigma_method = :mr)
         auto_fit_viewport_y!(vp, d.values, lz)
     end
-    m = SPCWorkbenchModel(data = d, viewport = vp, paused = true, seed_demos = seed_demos)
+    m = SPCWorkbenchModel(data = d, viewport = vp, paused = true)
     if n > 0
         clamp_viewport!(m.viewport, n)
     end
     _ensure_charts!(m)
-    if load !== nothing
-        import_csv_new_chart!(m, load; value_col = value_col)
-        # import forces paused=true; keep demo static
-        m.paused = true
-    end
     app(m)
 end
 
 const run_spc_workbench = spc_workbench_demo
 
 """
-    spc_workbench(; paused=false, load=nothing, seed_demos=:triple, value_col="Value")
+    spc_workbench(; paused=false)
 
-Live/interactive workbench. `load=` imports a CSV series as a new chart
-(that chart live_enabled=false, activated as current, model paused=true on success).
-`seed_demos` default remains `:triple` — never flip.
+Live/interactive.
 """
-function spc_workbench(;
-    paused::Bool = false,
-    load::Union{Nothing,AbstractString} = nothing,
-    seed_demos::Symbol = :triple,
-    value_col::String = "Value",
-)
+function spc_workbench(; paused::Bool = false)
     d = generate_spc_workbench_data(40; seed=42)
     n = length(d.values)
     vp = Viewport(x0 = n > 0 ? 1 : 0, x1 = n > 0 ? n : 0)
@@ -2564,15 +2612,11 @@ function spc_workbench(;
         lz = compute_limits_and_zones(d.values; sigma_method = :mr)
         auto_fit_viewport_y!(vp, d.values, lz)
     end
-    m = SPCWorkbenchModel(data = d, viewport = vp, paused = paused, seed_demos = seed_demos)
+    m = SPCWorkbenchModel(data = d, viewport = vp, paused = paused)
     if n > 0
         clamp_viewport!(m.viewport, n)
     end
     _ensure_charts!(m)
-    if load !== nothing
-        import_csv_new_chart!(m, load; value_col = value_col)
-        # successful import sets paused=true; failed import leaves seed charts
-    end
     app(m)
 end
 
