@@ -577,6 +577,83 @@ include("../src/spc_workbench.jl")
         @test m.tools isa Vector{ToolEntry}
         @test isempty(m.tools)
     end
+
+    @testset "dashboard_pane_charts (active neighborhood, no charts[2]/[3] lock)" begin
+        d = generate_spc_workbench_data(12; seed = 11)
+        m = SPCWorkbenchModel(data = d, paused = true)
+        @test m.seed_demos === :triple
+        _ensure_charts!(m)
+        @test length(m.charts) == 3
+
+        # Phase A: visible_charts is identity (all charts, same refs order)
+        vis = visible_charts(m)
+        @test length(vis) == 3
+        @test all(i -> vis[i] === m.charts[i], 1:3)
+
+        # active==1 → panes 1,2,3
+        set_active_chart!(m, 1)
+        p1 = dashboard_pane_charts(m; k = 3)
+        @test length(p1) == 3
+        @test p1[1].id == m.charts[1].id
+        @test p1[2].id == m.charts[2].id
+        @test p1[3].id == m.charts[3].id
+
+        # 1) active==2, 3 charts → panes are charts 2,3 only (no duplicate of chart 2)
+        set_active_chart!(m, 2)
+        p2 = dashboard_pane_charts(m; k = 3)
+        @test length(p2) == 2
+        @test p2[1].id == m.charts[2].id
+        @test p2[2].id == m.charts[3].id
+        @test p2[1].id != p2[2].id
+        # primary must not reappear as secondary
+        @test count(c -> c.id == m.charts[2].id, p2) == 1
+
+        # 2) delete to 2 charts → no throw / no former charts[3]
+        # delete chart 1 so remaining are former 2,3; active stays on former-2 now index 1
+        m_del = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_del)
+        set_active_chart!(m_del, 2)
+        id_active = m_del.charts[2].id
+        id_next = m_del.charts[3].id
+        @test delete_chart!(m_del, 1) === true
+        @test length(m_del.charts) == 2
+        # After delete of chart before active: active clamps to former chart2 now at index 1
+        panes_del = dashboard_pane_charts(m_del; k = 3)
+        @test length(panes_del) >= 1
+        # Must not throw and must only reference remaining charts
+        remaining_ids = Set(c.id for c in m_del.charts)
+        @test all(c -> c.id in remaining_ids, panes_del)
+        # former charts[3] still present as neighbor when active is former-2
+        @test any(c -> c.id == id_next || c.id == id_active, panes_del)
+
+        # delete last remaining extra while active is last → single primary, no charts[3]
+        m_two = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_two)
+        @test delete_chart!(m_two, 3) === true
+        @test length(m_two.charts) == 2
+        set_active_chart!(m_two, 2)
+        p_two = dashboard_pane_charts(m_two; k = 3)
+        @test length(p_two) == 1
+        @test p_two[1].id == m_two.charts[2].id
+        # no BoundsError accessing former charts[3] via panes
+        @test_nowarn dashboard_pane_charts(m_two; k = 3)
+
+        # 3) active==last → single primary pane
+        m_last = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_last)
+        set_active_chart!(m_last, 3)
+        p_last = dashboard_pane_charts(m_last; k = 3)
+        @test length(p_last) == 1
+        @test p_last[1].id == m_last.charts[3].id
+        @test p_last[1] === current_chart(m_last)
+
+        # empty charts → empty panes (after manual clear; _ensure would reseed)
+        m_empty = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        empty!(m_empty.charts)
+        m_empty.active = 1
+        @test isempty(visible_charts(m_empty))
+        @test isempty(dashboard_pane_charts(m_empty))
+    end
 end
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -751,6 +828,59 @@ end
         end
         # Require marker drawing from secondary (not just dashes from any panel)
         @test occursin("◆", full) || occursin("✕", full)  # at least one OOC/OOS marker must come from the forced secondary
+    end
+
+    @testset "dashboard_pane_charts view: active=2 secondary is next neighbor (not duplicate)" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(15; seed = 99), paused = true)
+        _ensure_charts!(m)
+        @test length(m.charts) == 3
+        # Distinct names for pane title assertions
+        m.charts[1].name = "Alpha"
+        m.charts[2].name = "Bravo"
+        m.charts[3].name = "Charlie"
+        set_active_chart!(m, 2)
+
+        panes = dashboard_pane_charts(m; k = 3)
+        @test length(panes) == 2
+        @test panes[1].name == "Bravo"
+        @test panes[2].name == "Charlie"
+
+        tb = T.TestBackend(90, 28); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 28), [], []))
+        rows = [T.row_text(tb, i) for i in 1:28]
+        full = join([string(r) for r in rows if r !== nothing], "\n")
+        # Primary dashboard title shows active chart (Bravo)
+        @test occursin("Dashboard: Bravo", full) || occursin("Bravo [2/3]", full)
+        # Secondary read-only pane is next neighbor Charlie — not a second Bravo
+        @test occursin("Chart 2: Charlie", full) || occursin("Charlie (read-only", full)
+        @test occursin("Chart 2", full)  # secondary pane label
+        # Must NOT render a third pane (only 2 panes when active==2)
+        @test !occursin("Chart 3", full)
+        # Alpha may appear in side chart *list*, but must not be a plot pane title
+        @test !occursin("Dashboard: Alpha", full)
+        @test !occursin("Chart 2: Alpha", full)
+        @test !occursin("Chart 2: Bravo", full)  # no duplicate of primary as secondary
+    end
+
+    @testset "dashboard_pane_charts view: delete to 2 charts no throw; active=last single pane" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(12; seed = 7), paused = true)
+        _ensure_charts!(m)
+        m.charts[1].name = "One"
+        m.charts[2].name = "Two"
+        m.charts[3].name = "Three"
+        @test delete_chart!(m, 3) === true
+        @test length(m.charts) == 2
+        set_active_chart!(m, 2)
+        @test length(dashboard_pane_charts(m)) == 1
+
+        tb = T.TestBackend(90, 24); T.reset!(tb.buf)
+        @test_nowarn T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 24), [], []))
+        rows = [T.row_text(tb, i) for i in 1:24]
+        full = join([string(r) for r in rows if r !== nothing], "\n")
+        @test occursin("Two", full)
+        @test !occursin("Chart 2", full)  # single primary only when active==last of 2
+        @test !occursin("Three", full)    # deleted chart gone
+        @test !occursin("Chart 3", full)
     end
 
     @testset "rich visuals — colorized OOC ◆ , OOS markers, Cpk bands text, dashed zones" begin

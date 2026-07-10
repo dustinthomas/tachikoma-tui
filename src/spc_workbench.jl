@@ -1266,7 +1266,37 @@ function set_active_chart!(m::SPCWorkbenchModel, idx::Int)
     return nothing
 end
 
+# ── Multi-plot pane selection (PR2a) ────────────────────────────────────
+
+"""
+    visible_charts(m) -> Vector{ChartSpec}
+
+Phase A / PR2a: identity — all charts in library order (shared refs).
+PR9 will filter by tool/type/owner.
+"""
+function visible_charts(m::SPCWorkbenchModel)::Vector{ChartSpec}
+    return m.charts
+end
+
+"""
+    dashboard_pane_charts(m; k=3) -> Vector{ChartSpec}
+
+Active chart plus the next (k-1) visible neighbors. Primary interactive plot
+is panes[1]; read-only extras are panes[2:end]. Fixes the hard-coded
+`charts[2]`/`charts[3]` lock (active==2 duplicate / post-delete hazards).
+"""
+function dashboard_pane_charts(m::SPCWorkbenchModel; k::Int = 3)::Vector{ChartSpec}
+    vis = visible_charts(m)
+    isempty(vis) && return ChartSpec[]
+    act = current_chart(m)
+    i = findfirst(c -> c.id == act.id, vis)
+    i === nothing && (i = 1)
+    j = min(i + k - 1, length(vis))
+    return vis[i:j]
+end
+
 export ToolEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
+export visible_charts, dashboard_pane_charts
 
 # ── Update (Key + Mouse, full fidelity) ─────────────────────────────────
 
@@ -1638,14 +1668,15 @@ function view(m::SPCWorkbenchModel, f::Frame)
     plot_rect = cols[1]
     side_rect = cols[2]
 
-    # Dashboard: render multiple (up to 3) charts simultaneously for rich visual
-    ncharts = length(m.charts)
-    is_dashboard_multi = (m.view_mode == :dashboard && ncharts >= 2)
+    # Dashboard: up to k panes from active + following visible neighbors (not charts[2]/[3] lock)
+    panes = dashboard_pane_charts(m; k = 3)
+    npanes = length(panes)
+    is_dashboard_multi = (m.view_mode == :dashboard && npanes >= 2)
     active_plot_rect = plot_rect
     second_plot_rect = nothing
     third_plot_rect = nothing
     if is_dashboard_multi
-        nc = min(3, ncharts)
+        nc = min(3, npanes)
         if nc == 3
             h1 = max(8, (plot_rect.height * 5) ÷ 10)
             h2 = max(5, (plot_rect.height - h1 - 2) * 5 ÷ 10)
@@ -1875,9 +1906,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
         set_string!(buf, right(plot_inner)-3, plot_inner.y + ch - 1, string(m.viewport.x1), tstyle(:text_dim))
     end
 
-    # SECOND simultaneous chart for dashboard (rich multi visible)
-    if is_dashboard_multi && second_plot_rect !== nothing && length(m.charts) >= 2
-        ch2 = m.charts[2]
+    # Read-only extra panes from dashboard_pane_charts (panes[2], panes[3]) — not m.charts[2]/[3]
+    if is_dashboard_multi && second_plot_rect !== nothing && npanes >= 2
+        ch2 = panes[2]
         n2 = length(ch2.data.values)
         if n2 > 0 && second_plot_rect.width > 4 && second_plot_rect.height > 3
             blk2 = Block(title = "Chart 2: $(ch2.name) (read-only view)", border_style = tstyle(:border), title_style = tstyle(:text_dim))
@@ -1979,9 +2010,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
         end
     end
 
-    # THIRD simultaneous chart when >=3
-    if third_plot_rect !== nothing && ncharts >= 3
-        ch3 = m.charts[3]
+    # THIRD pane when panes has a third neighbor
+    if third_plot_rect !== nothing && npanes >= 3
+        ch3 = panes[3]
         n3 = length(ch3.data.values)
         if n3 > 0 && third_plot_rect.width > 4 && third_plot_rect.height > 3
             blk3 = Block(title = "Chart 3: $(ch3.name) (read-only)", border_style = tstyle(:border), title_style = tstyle(:text_dim))
