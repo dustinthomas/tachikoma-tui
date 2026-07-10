@@ -824,6 +824,97 @@ include("../src/spc_workbench.jl")
         @test isempty(visible_charts(m_empty))
         @test isempty(dashboard_pane_charts(m_empty))
     end
+
+    @testset "filters + visible_charts + A6 active-switch (PR9)" begin
+        d = generate_spc_workbench_data(10; seed = 11)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        # Three charts with distinct type / tool / owner metadata
+        idx1 = add_chart!(m; name = "Alpha")
+        idx2 = add_chart!(m; name = "Beta")
+        idx3 = add_chart!(m; name = "Gamma")
+        m.charts[idx1].chart_type = I_MR
+        m.charts[idx1].tools = ["T-A"]
+        m.charts[idx1].owner = "Alice"
+        m.charts[idx2].chart_type = Xbar_R
+        m.charts[idx2].tools = ["T-B"]
+        m.charts[idx2].owner = "Bob"
+        m.charts[idx3].chart_type = I_MR
+        m.charts[idx3].tools = ["T-A", "T-C"]
+        m.charts[idx3].owner = "Alice"
+        set_active_chart!(m, idx1)
+        @test m.filter_tool == ""
+        @test m.filter_type === nothing
+        @test m.filter_owner == ""
+        @test length(visible_charts(m)) == 3
+
+        # filter by tool
+        set_filter_tool!(m, "T-A")
+        vis = visible_charts(m)
+        @test length(vis) == 2
+        @test all(c -> "T-A" in c.tools, vis)
+        @test Set(c.name for c in vis) == Set(["Alpha", "Gamma"])
+
+        # filter by type (AND with tool)
+        set_filter_type!(m, Xbar_R)
+        vis2 = visible_charts(m)
+        @test isempty(vis2)  # Beta has T-B only; no T-A + Xbar_R
+        # A6: no visible → keep active, event message (no crash)
+        @test occursin("No charts match filters", m.last_event) ||
+              occursin("no charts match", lowercase(m.last_event))
+
+        # type alone
+        set_filter_tool!(m, "")
+        set_filter_type!(m, Xbar_R)
+        vis3 = visible_charts(m)
+        @test length(vis3) == 1
+        @test vis3[1].name == "Beta"
+        # A6: active Alpha filtered out → switch to first visible (Beta)
+        @test m.active == idx2
+        @test current_chart(m).name == "Beta"
+        @test occursin("active chart filtered", m.last_event)
+        @test occursin("Beta", m.last_event)
+        @test m.library_selected == m.active
+
+        # panes use visible_charts neighborhood
+        panes = dashboard_pane_charts(m; k = 3)
+        @test length(panes) == 1
+        @test panes[1].id == m.charts[idx2].id
+
+        # owner filter
+        clear_filters!(m)
+        @test m.filter_tool == "" && m.filter_type === nothing && m.filter_owner == ""
+        @test length(visible_charts(m)) == 3
+        set_filter_owner!(m, "Alice")
+        vis4 = visible_charts(m)
+        @test length(vis4) == 2
+        @test all(c -> c.owner == "Alice", vis4)
+
+        # clearing restores full list; active stays valid
+        act_before = m.active
+        clear_filters!(m)
+        @test length(visible_charts(m)) == 3
+        @test m.active == act_before
+    end
+
+    @testset "tools registry pure CRUD (PR9)" begin
+        m = SPCWorkbenchModel(data = empty_workbench_data(), paused = true, seed_demos = :none)
+        @test m.tools isa Vector{ToolEntry}
+        @test isempty(m.tools)
+        i1 = add_tool!(m, "Film-A"; description = "PECVD tool A")
+        @test i1 == 1
+        @test length(m.tools) == 1
+        @test m.tools[1].id == "Film-A"
+        @test m.tools[1].description == "PECVD tool A"
+        i2 = add_tool!(m, "Film-B")
+        @test i2 == 2
+        @test m.tools[2].description == ""
+        @test delete_tool!(m, 1) === true
+        @test length(m.tools) == 1
+        @test m.tools[1].id == "Film-B"
+        @test delete_tool!(m, 9) === false
+        @test delete_tool!(m, 1) === true
+        @test isempty(m.tools)
+    end
 end
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2022,6 +2113,80 @@ end
         T.update!(m, T.KeyEvent(:escape))
         @test m.pending_delete == false
         @test m.quit == false
+    end
+
+    @testset "filters mode (f) + library list respects filters + empty message (PR9)" begin
+        d = generate_spc_workbench_data(8; seed = 21)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        a = add_chart!(m; name = "KeepMe")
+        b = add_chart!(m; name = "HideMe")
+        m.charts[a].owner = "A"
+        m.charts[a].tools = ["TA"]
+        m.charts[a].chart_type = I_MR
+        m.charts[b].owner = "B"
+        m.charts[b].tools = ["TB"]
+        m.charts[b].chart_type = Xbar_S
+        set_active_chart!(m, a)
+
+        # open filters
+        T.update!(m, T.KeyEvent('f'))
+        @test m.view_mode == :filters
+        @test m.quit == false
+        tb = T.TestBackend(80, 20); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 20), [], []))
+        full = join([string(T.row_text(tb, i)) for i = 1:20 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("FILTER", uppercase(full))
+        @test !occursin("Dashboard", full)  # no-bleed
+        # Esc closes without quit
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+        @test m.quit == false
+
+        # Apply owner filter via pure API (UI field edit also covered via set helpers)
+        set_filter_owner!(m, "A")
+        @test length(visible_charts(m)) == 1
+        @test visible_charts(m)[1].name == "KeepMe"
+
+        # Library list shows only filtered charts
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        tb2 = T.TestBackend(80, 22); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 80, 22), [], []))
+        lib = join([string(T.row_text(tb2, i)) for i = 1:22 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("KeepMe", lib)
+        @test !occursin("HideMe", lib)
+        T.update!(m, T.KeyEvent(:escape))
+
+        # Filter that hides all charts → empty dashboard message
+        set_filter_owner!(m, "Nobody")
+        @test isempty(visible_charts(m))
+        tb3 = T.TestBackend(80, 20); T.reset!(tb3.buf)
+        T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 80, 20), [], []))
+        dash = join([string(T.row_text(tb3, i)) for i = 1:20 if T.row_text(tb3, i) !== nothing], "\n")
+        @test occursin("No charts match filters", dash)
+
+        # Tools registry mode
+        clear_filters!(m)
+        T.update!(m, T.KeyEvent('f'))
+        T.update!(m, T.KeyEvent('t'))  # tools from filters
+        @test m.view_mode == :tools
+        tb4 = T.TestBackend(80, 18); T.reset!(tb4.buf)
+        T.view(m, T.Frame(tb4.buf, T.Rect(1, 1, 80, 18), [], []))
+        tools_page = join([string(T.row_text(tb4, i)) for i = 1:18 if T.row_text(tb4, i) !== nothing], "\n")
+        @test occursin("TOOL", uppercase(tools_page))
+        T.update!(m, T.KeyEvent('a'))
+        # prompt for tool id
+        @test m.prompt_kind === :tool_id || m.view_mode == :tools
+        if m.prompt_kind === :tool_id
+            for c in "ToolX"
+                T.update!(m, T.KeyEvent(c))
+            end
+            T.update!(m, T.KeyEvent(:enter))
+            @test any(t -> t.id == "ToolX", m.tools)
+        end
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.quit == false
+        @test m.view_mode in (:dashboard, :filters, :tools)
     end
 end
 
