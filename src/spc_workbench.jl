@@ -1612,6 +1612,8 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.library_selected = clamp(m.active, 1, length(m.charts))
             m.pending_delete = false
             m.prompt_kind = nothing
+            # One-shot: start with active row in view (height may be 0 until first paint)
+            _ensure_library_selected_visible!(m)
             m.last_event = "library open"
             return
         elseif c == 'p' || c == 'P'
@@ -2542,9 +2544,15 @@ function _render_library_page!(buf, area, m)
     first_y = y
     max_list_y = bottom(area) - 4
     visible = max(0, max_list_y - first_y + 1)
+    # First paint (height was 0): one-shot ensure so active/selected starts on-screen.
+    # Later paints: clamp only — ensure-on-every-frame rewinds wheel browse past selection.
+    first_layout = m.library_area.height <= 0
     m.library_area = Rect(area.x + 2, first_y, max(1, area.width - 4), max(0, visible))
-    _ensure_library_selected_visible!(m)
-    _clamp_library_scroll!(m)
+    if first_layout
+        _ensure_library_selected_visible!(m)
+    else
+        _clamp_library_scroll!(m)
+    end
     # List charts (scrolled window)
     if visible > 0 && nch > 0
         start_i = m.library_scroll + 1

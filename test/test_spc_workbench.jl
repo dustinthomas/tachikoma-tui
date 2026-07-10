@@ -1718,18 +1718,38 @@ end
         la = m.library_area
         @test la.height > 0
         @test length(m.charts) > la.height
+        # Keep selection at top so wheel can browse past it without keyboard ensure-visible
+        m.library_selected = 1
+        m.library_scroll = 0
         s0 = m.library_scroll
         T.update!(m, T.MouseEvent(la.x, la.y, T.mouse_scroll_down, T.mouse_press, false, false, false))
         @test m.library_scroll == s0 + 1
+        # CRITICAL: scroll must survive re-render (no snap-back to selection)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 12), [], []))
+        @test m.library_scroll == s0 + 1
+        @test T.find_text(tb, "CHART LIBRARY") !== nothing
+        # further wheels still stick after paint
+        T.update!(m, T.MouseEvent(la.x, la.y, T.mouse_scroll_down, T.mouse_press, false, false, false))
+        T.update!(m, T.MouseEvent(la.x, la.y, T.mouse_scroll_down, T.mouse_press, false, false, false))
+        scrolled = m.library_scroll
+        @test scrolled >= s0 + 3
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 12), [], []))
+        @test m.library_scroll == scrolled
+        # wheel back
         T.update!(m, T.MouseEvent(la.x, la.y, T.mouse_scroll_up, T.mouse_press, false, false, false))
-        @test m.library_scroll == s0
+        @test m.library_scroll == scrolled - 1
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 12), [], []))
+        @test m.library_scroll == scrolled - 1
         # clamp at top
         m.library_scroll = 0
         T.update!(m, T.MouseEvent(la.x, la.y, T.mouse_scroll_up, T.mouse_press, false, false, false))
         @test m.library_scroll == 0
-        # re-render after scroll — still library, no crash
         T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 12), [], []))
+        @test m.library_scroll == 0
         @test T.find_text(tb, "CHART LIBRARY") !== nothing
     end
 
