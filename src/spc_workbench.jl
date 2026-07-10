@@ -3298,7 +3298,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
                     sty = tstyle(:error, bold=true)
                 elseif st == :ooc
                     sym = '◆'
-                    sty = tstyle(:accent, bold=true)
+                    sty = tstyle(:warning, bold=true)  # yellow WECO / OOC diamond
                 else
                     sym = '●'
                     sty = tstyle(:primary, bold=true)
@@ -3416,7 +3416,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
                     if st2 == :oos
                         sym2 = '✕'; sty2 = tstyle(:error, bold=true)
                     elseif st2 == :ooc
-                        sym2 = '◆'; sty2 = tstyle(:accent, bold=true)
+                        sym2 = '◆'; sty2 = tstyle(:warning, bold=true)  # yellow WECO / OOC diamond
                     else
                         sym2 = '●'; sty2 = tstyle(:primary, bold=true)
                     end
@@ -3508,7 +3508,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
                     if st3 == :oos
                         sym3 = '✕'; sty3 = tstyle(:error, bold=true)
                     elseif st3 == :ooc
-                        sym3 = '◆'; sty3 = tstyle(:accent, bold=true)
+                        sym3 = '◆'; sty3 = tstyle(:warning, bold=true)  # yellow WECO / OOC diamond
                     else
                         sym3 = '●'; sty3 = tstyle(:primary, bold=true)
                     end
@@ -3872,7 +3872,7 @@ function _render_help_page!(buf, area, m)
         "  Note: seed demos often have empty tools — tool filter may hide all until assigned.",
         "",
         "RICH VISUALS:",
-        "  ◆ = OOC (WECO violation, accent)",
+        "  ◆ = OOC (WECO violation, yellow/warning)",
         "  ✕ = OOS (outside USL/LSL when set, red/danger)",
         "  Cpk colored by band: ≥1.67 green, ≥1.33 navy, ≥1.00 amber, <1 red",
         "  Dashed: zone lines (±1/2/3σ), specs (USL/LSL red)",

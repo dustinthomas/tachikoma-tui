@@ -1720,6 +1720,49 @@ end
         @test occursin("Cpk=", band_text)
     end
 
+    @testset "OOC ◆ WECO violation markers are yellow (:warning)" begin
+        # Pure OOC (no USL/LSL): WECO-1 diamond must use yellow/warning, not accent/error.
+        # Mutate legacy m.data before view/_ensure_charts! so Primary bootstraps the OOC point.
+        d = generate_spc_workbench_data(20; seed=123, hints=Dict{String,Any}("trigger"=>"WECO-1"))
+        m = SPCWorkbenchModel(data=d, paused=true)
+        m.usl = nothing
+        m.lsl = nothing
+        mu = mean(m.data.values)
+        sig = max(std(m.data.values; corrected=true), 1e-6)
+        m.data.values[1] = mu + 5 * sig   # extreme OOC (WECO-1)
+        m.viewport.x0 = 1
+        m.viewport.x1 = max(m.viewport.x1, 5)
+
+        _ensure_charts!(m)
+        ch = m.charts[1]
+        ch.usl = nothing
+        ch.lsl = nothing
+        # Confirm pure resolver marks index 1 as OOC (not OOS)
+        ctx = resolve_chart_render_context(ch; sigma_method=:mr)
+        @test point_status(1, ctx, ch) == :ooc
+
+        tb = T.TestBackend(70, 16); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,70,16),[],[]))
+        # Scan buffer for ◆ and assert yellow warning style
+        yellow = T.tstyle(:warning, bold=true)
+        found_yellow_diamond = false
+        found_any_diamond = false
+        for y in 1:16
+            row = T.row_text(tb, y)
+            row === nothing && continue
+            for x in 1:length(row)
+                if T.char_at(tb, x, y) == '◆'
+                    found_any_diamond = true
+                    if T.style_at(tb, x, y) == yellow
+                        found_yellow_diamond = true
+                    end
+                end
+            end
+        end
+        @test found_any_diamond
+        @test found_yellow_diamond
+    end
+
     @testset "mouse hover/click/drag/zoom drive state + re-render shows updates (no crash)" begin
         d = generate_spc_workbench_data(18; seed=55)
         n = length(d.values)
