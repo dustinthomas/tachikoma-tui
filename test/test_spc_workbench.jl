@@ -398,6 +398,262 @@ include("../src/spc_workbench.jl")
             @test 0 <= dy <= dh - 1
         end
     end
+
+    @testset "ChartType + wire parse + empty data + ChartSpec metadata defaults" begin
+        @test I_MR isa ChartType
+        @test Xbar_R isa ChartType
+        @test Xbar_S isa ChartType
+        @test p_chart isa ChartType
+        @test CHART_TYPE_WIRE[I_MR] == "I-MR"
+        @test CHART_TYPE_WIRE[Xbar_R] == "Xbar-R"
+        @test CHART_TYPE_WIRE[p_chart] == "p"
+        @test parse_chart_type("I-MR") === I_MR
+        @test parse_chart_type("Xbar-S") === Xbar_S
+        @test parse_chart_type("u") === u_chart
+        @test parse_chart_type("I_MR") === I_MR
+        @test parse_chart_type("Xbar_R") === Xbar_R
+        @test parse_chart_type("Xbar_S") === Xbar_S
+        @test parse_chart_type("p_chart") === p_chart
+        @test parse_chart_type("nope") === nothing
+
+        ed = empty_workbench_data()
+        @test ed.values == Float64[]
+        @test ed.cl == 0.0
+        @test ed.sigma == 0.0
+
+        ch = ChartSpec()  # valid empty chart via defaults
+        @test ch.chart_type === I_MR
+        @test isempty(ch.data.values)
+        @test ch.limits_mode === :auto
+        @test ch.live_enabled === true
+        @test ch.subgroup_size == 5
+        @test ch.param == ""
+        @test ch.units == ""
+        @test ch.owner == ""
+        @test ch.tools == String[]
+        @test ch.manual_cl === nothing
+        # backward-compat construction still works
+        ch2 = ChartSpec(name = "legacy", data = WorkbenchData(values=[1.0], cl=1.0, sigma=0.1))
+        @test ch2.name == "legacy"
+        @test ch2.chart_type === I_MR
+        @test ch2.live_enabled === true
+    end
+
+    @testset "empty chart resolve + auto_limits alias" begin
+        ch = ChartSpec()
+        ctx = resolve_chart_render_context(ch)
+        @test ctx.lz.cl == 0.0
+        @test ctx.lz.sigma == 0.0
+        @test isempty(ctx.viol_indices)
+        @test ctx.cpk === nothing
+        @test ctx.band === :none
+
+        # auto_limits is thin alias to existing I-MR path
+        vs = [1.0, 2.0, 3.0, 4.0, 5.0]
+        lz_a = auto_limits(vs; chart_type = I_MR, sigma_method = :mr)
+        lz_b = compute_limits_and_zones(vs; sigma_method = :mr)
+        @test lz_a.cl == lz_b.cl
+        @test lz_a.sigma == lz_b.sigma
+        @test lz_a.ucl == lz_b.ucl
+
+        # limits_mode :manual with all set still resolves (PR1 falls through to auto until PR5)
+        ch_m = ChartSpec(data = WorkbenchData(values = vs, cl = 3.0, sigma = 1.0),
+            limits_mode = :manual, manual_cl = 10.0, manual_ucl = 13.0, manual_lcl = 7.0)
+        ctx_m = resolve_chart_render_context(ch_m)
+        @test ctx_m.lz.cl == lz_b.cl  # auto path until PR5
+    end
+
+    @testset "pure chart library CRUD + seed_demos" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true)
+        @test m.seed_demos === :triple  # NEVER flip default
+        _ensure_charts!(m)
+        @test length(m.charts) == 3
+        @test m.charts[1].name == "Primary"
+        @test occursin("Secondary", m.charts[2].name)
+        @test m.charts[3].name == "Tertiary"
+        @test all(c -> c.live_enabled === true, m.charts)
+
+        # add
+        n0 = length(m.charts)
+        idx = add_chart!(m; name = "Added")
+        @test idx == n0 + 1
+        @test m.charts[idx].name == "Added"
+        @test isempty(m.charts[idx].data.values)
+        @test m.charts[idx].live_enabled === true
+
+        # rename
+        rename_chart!(m, idx, "Renamed")
+        @test m.charts[idx].name == "Renamed"
+
+        # set_active
+        set_active_chart!(m, idx)
+        @test m.active == idx
+        @test m.data === m.charts[idx].data || m.data.values == m.charts[idx].data.values
+
+        # clone deep-copy
+        src = m.charts[1]
+        src.data.values[1] = 999.0
+        src.usl = 42.0
+        src.enabled_rules["WECO-6"] = true
+        src.param = "thickness"
+        cidx = clone_chart!(m, 1)
+        cloned = m.charts[cidx]
+        @test occursin("(copy)", cloned.name)
+        @test cloned.id != src.id
+        @test cloned.data.values == src.data.values
+        @test cloned.data.values !== src.data.values  # deep copy
+        @test cloned.usl == 42.0
+        @test cloned.enabled_rules["WECO-6"] === true
+        @test cloned.enabled_rules !== src.enabled_rules
+        @test cloned.param == "thickness"
+        cloned.data.values[1] = -1.0
+        @test src.data.values[1] == 999.0  # independent
+
+        # delete refuses last
+        m_one = SPCWorkbenchModel(data = empty_workbench_data(), paused = true, seed_demos = :none)
+        _ensure_charts!(m_one)
+        @test length(m_one.charts) == 1
+        @test delete_chart!(m_one, 1) === false
+        @test length(m_one.charts) == 1
+
+        # delete clamps active + library_selected
+        m_del = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_del)
+        set_active_chart!(m_del, 3)
+        m_del.library_selected = 3
+        @test delete_chart!(m_del, 3) === true
+        @test length(m_del.charts) == 2
+        @test m_del.active == 2
+        @test m_del.library_selected == 2
+
+        # delete syncs active mirror edits before removing a different chart
+        m_sync = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_sync)
+        set_active_chart!(m_sync, 1)
+        m_sync.usl = 77.0
+        @test delete_chart!(m_sync, 2) === true
+        @test m_sync.active == 1
+        @test m_sync.usl == 77.0
+        @test m_sync.charts[1].usl == 77.0
+
+        # add_chart! deep-copies nested meta
+        nested = Dict{String,Any}("nested" => Dict{String,Any}("k" => 1))
+        src_d = WorkbenchData(values = [1.0, 2.0], cl = 1.5, sigma = 0.5, meta = nested)
+        m_meta = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_meta)
+        aidx = add_chart!(m_meta; name = "Meta", data = src_d)
+        @test m_meta.charts[aidx].data.meta !== nested
+        @test m_meta.charts[aidx].data.meta["nested"] !== nested["nested"]
+        nested["nested"]["k"] = 99
+        @test m_meta.charts[aidx].data.meta["nested"]["k"] == 1
+
+        # seed :single
+        m_s = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m_s)
+        @test length(m_s.charts) == 1
+        @test m_s.charts[1].name == "Primary"
+        @test !isempty(m_s.charts[1].data.values)
+        @test m_s.charts[1].live_enabled === true
+
+        # seed :none
+        m_n = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        _ensure_charts!(m_n)
+        @test length(m_n.charts) == 1
+        @test isempty(m_n.charts[1].data.values)
+        ctx_n = resolve_chart_render_context(m_n.charts[1])
+        @test ctx_n.cpk === nothing
+        @test m_n.charts[1].live_enabled === true
+
+        # unknown seed_demos falls back to :triple (safe default)
+        m_bad = SPCWorkbenchModel(data = d, paused = true, seed_demos = :foo)
+        _ensure_charts!(m_bad)
+        @test length(m_bad.charts) == 3
+        @test m_bad.charts[1].name == "Primary"
+        @test occursin("Secondary", m_bad.charts[2].name)
+        @test m_bad.charts[3].name == "Tertiary"
+
+        # ToolEntry exists on model
+        @test m.tools isa Vector{ToolEntry}
+        @test isempty(m.tools)
+    end
+
+    @testset "dashboard_pane_charts (active neighborhood, no charts[2]/[3] lock)" begin
+        d = generate_spc_workbench_data(12; seed = 11)
+        m = SPCWorkbenchModel(data = d, paused = true)
+        @test m.seed_demos === :triple
+        _ensure_charts!(m)
+        @test length(m.charts) == 3
+
+        # Phase A: visible_charts is identity (all charts, same refs order)
+        vis = visible_charts(m)
+        @test length(vis) == 3
+        @test all(i -> vis[i] === m.charts[i], 1:3)
+
+        # active==1 → panes 1,2,3
+        set_active_chart!(m, 1)
+        p1 = dashboard_pane_charts(m; k = 3)
+        @test length(p1) == 3
+        @test p1[1].id == m.charts[1].id
+        @test p1[2].id == m.charts[2].id
+        @test p1[3].id == m.charts[3].id
+
+        # 1) active==2, 3 charts → panes are charts 2,3 only (no duplicate of chart 2)
+        set_active_chart!(m, 2)
+        p2 = dashboard_pane_charts(m; k = 3)
+        @test length(p2) == 2
+        @test p2[1].id == m.charts[2].id
+        @test p2[2].id == m.charts[3].id
+        @test p2[1].id != p2[2].id
+        # primary must not reappear as secondary
+        @test count(c -> c.id == m.charts[2].id, p2) == 1
+
+        # 2) delete to 2 charts → no throw / no former charts[3]
+        # delete chart 1 so remaining are former 2,3; active stays on former-2 now index 1
+        m_del = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_del)
+        set_active_chart!(m_del, 2)
+        id_active = m_del.charts[2].id
+        id_next = m_del.charts[3].id
+        @test delete_chart!(m_del, 1) === true
+        @test length(m_del.charts) == 2
+        # After delete of chart before active: active clamps to former chart2 now at index 1
+        panes_del = dashboard_pane_charts(m_del; k = 3)
+        @test length(panes_del) >= 1
+        # Must not throw and must only reference remaining charts
+        remaining_ids = Set(c.id for c in m_del.charts)
+        @test all(c -> c.id in remaining_ids, panes_del)
+        # former charts[3] still present as neighbor when active is former-2
+        @test any(c -> c.id == id_next || c.id == id_active, panes_del)
+
+        # delete last remaining extra while active is last → single primary, no charts[3]
+        m_two = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_two)
+        @test delete_chart!(m_two, 3) === true
+        @test length(m_two.charts) == 2
+        set_active_chart!(m_two, 2)
+        p_two = dashboard_pane_charts(m_two; k = 3)
+        @test length(p_two) == 1
+        @test p_two[1].id == m_two.charts[2].id
+        # no BoundsError accessing former charts[3] via panes
+        @test_nowarn dashboard_pane_charts(m_two; k = 3)
+
+        # 3) active==last → single primary pane
+        m_last = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_last)
+        set_active_chart!(m_last, 3)
+        p_last = dashboard_pane_charts(m_last; k = 3)
+        @test length(p_last) == 1
+        @test p_last[1].id == m_last.charts[3].id
+        @test p_last[1] === current_chart(m_last)
+
+        # empty charts → empty panes (after manual clear; _ensure would reseed)
+        m_empty = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        empty!(m_empty.charts)
+        m_empty.active = 1
+        @test isempty(visible_charts(m_empty))
+        @test isempty(dashboard_pane_charts(m_empty))
+    end
 end
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -572,6 +828,59 @@ end
         end
         # Require marker drawing from secondary (not just dashes from any panel)
         @test occursin("◆", full) || occursin("✕", full)  # at least one OOC/OOS marker must come from the forced secondary
+    end
+
+    @testset "dashboard_pane_charts view: active=2 secondary is next neighbor (not duplicate)" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(15; seed = 99), paused = true)
+        _ensure_charts!(m)
+        @test length(m.charts) == 3
+        # Distinct names for pane title assertions
+        m.charts[1].name = "Alpha"
+        m.charts[2].name = "Bravo"
+        m.charts[3].name = "Charlie"
+        set_active_chart!(m, 2)
+
+        panes = dashboard_pane_charts(m; k = 3)
+        @test length(panes) == 2
+        @test panes[1].name == "Bravo"
+        @test panes[2].name == "Charlie"
+
+        tb = T.TestBackend(90, 28); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 28), [], []))
+        rows = [T.row_text(tb, i) for i in 1:28]
+        full = join([string(r) for r in rows if r !== nothing], "\n")
+        # Primary dashboard title shows active chart (Bravo)
+        @test occursin("Dashboard: Bravo", full) || occursin("Bravo [2/3]", full)
+        # Secondary read-only pane is next neighbor Charlie — not a second Bravo
+        @test occursin("Chart 2: Charlie", full) || occursin("Charlie (read-only", full)
+        @test occursin("Chart 2", full)  # secondary pane label
+        # Must NOT render a third pane (only 2 panes when active==2)
+        @test !occursin("Chart 3", full)
+        # Alpha may appear in side chart *list*, but must not be a plot pane title
+        @test !occursin("Dashboard: Alpha", full)
+        @test !occursin("Chart 2: Alpha", full)
+        @test !occursin("Chart 2: Bravo", full)  # no duplicate of primary as secondary
+    end
+
+    @testset "dashboard_pane_charts view: delete to 2 charts no throw; active=last single pane" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(12; seed = 7), paused = true)
+        _ensure_charts!(m)
+        m.charts[1].name = "One"
+        m.charts[2].name = "Two"
+        m.charts[3].name = "Three"
+        @test delete_chart!(m, 3) === true
+        @test length(m.charts) == 2
+        set_active_chart!(m, 2)
+        @test length(dashboard_pane_charts(m)) == 1
+
+        tb = T.TestBackend(90, 24); T.reset!(tb.buf)
+        @test_nowarn T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 24), [], []))
+        rows = [T.row_text(tb, i) for i in 1:24]
+        full = join([string(r) for r in rows if r !== nothing], "\n")
+        @test occursin("Two", full)
+        @test !occursin("Chart 2", full)  # single primary only when active==last of 2
+        @test !occursin("Three", full)    # deleted chart gone
+        @test !occursin("Chart 3", full)
     end
 
     @testset "rich visuals — colorized OOC ◆ , OOS markers, Cpk bands text, dashed zones" begin

@@ -53,19 +53,8 @@ struct CapabilityResult
     cpk_sigma::Float64
 end
 
-# Per-chart state (moved early for pure context resolver to be usable in include order)
-@kwdef mutable struct ChartSpec
-    id::String = "CHT-" * string(rand(1000:9999))
-    name::String = "Series-1"
-    data::WorkbenchData
-    viewport::Viewport = Viewport()
-    usl::Union{Float64,Nothing} = nothing
-    target::Union{Float64,Nothing} = nothing
-    lsl::Union{Float64,Nothing} = nothing
-    enabled_rules::Dict{String,Bool} = copy(DEFAULT_WECO_RULES)
-end
-
 # ── Defaults matching HTML mockup exactly ───────────────────────────────
+# (Defined before ChartSpec so @kwdef defaults can reference them at construct time.)
 
 const DEFAULT_WECO_RULES = Dict{String,Bool}(
     "WECO-1" => true,
@@ -77,6 +66,69 @@ const DEFAULT_WECO_RULES = Dict{String,Bool}(
     "WECO-7" => false,
     "WECO-8" => false,
 )
+
+# ── Chart types (wire format aligned with HTML) ─────────────────────────
+
+@enum ChartType begin
+    I_MR
+    Xbar_R
+    Xbar_S
+    p_chart
+    np_chart
+    c_chart
+    u_chart
+end
+
+const CHART_TYPE_WIRE = Dict(
+    I_MR => "I-MR",
+    Xbar_R => "Xbar-R",
+    Xbar_S => "Xbar-S",
+    p_chart => "p",
+    np_chart => "np",
+    c_chart => "c",
+    u_chart => "u",
+)
+
+# Reverse wire lookup + Julia enum-name aliases (string(t) for each ChartType)
+const CHART_TYPE_FROM_WIRE = let d = Dict{String,ChartType}()
+    for (t, w) in CHART_TYPE_WIRE
+        d[w] = t
+        d[string(t)] = t  # e.g. "I_MR", "Xbar_R", "p_chart"
+    end
+    d
+end
+
+chart_type_to_string(t::ChartType) = CHART_TYPE_WIRE[t]
+
+function parse_chart_type(s::AbstractString)::Union{ChartType,Nothing}
+    get(CHART_TYPE_FROM_WIRE, String(s), nothing)
+end
+
+"""Empty but valid series — always a legal ChartSpec.data."""
+empty_workbench_data() = WorkbenchData(values = Float64[], cl = 0.0, sigma = 0.0)
+
+# Per-chart state (moved early for pure context resolver to be usable in include order)
+@kwdef mutable struct ChartSpec
+    id::String = "CHT-" * string(rand(1000:9999))
+    name::String = "Series-1"
+    chart_type::ChartType = I_MR
+    data::WorkbenchData = empty_workbench_data()
+    viewport::Viewport = Viewport(x0 = 0, x1 = 0, ylo = 0.0, yhi = 1.0)
+    usl::Union{Float64,Nothing} = nothing
+    target::Union{Float64,Nothing} = nothing
+    lsl::Union{Float64,Nothing} = nothing
+    enabled_rules::Dict{String,Bool} = copy(DEFAULT_WECO_RULES)
+    param::String = ""
+    units::String = ""
+    owner::String = ""
+    tools::Vector{String} = String[]
+    limits_mode::Symbol = :auto   # :auto | :manual
+    manual_cl::Union{Float64,Nothing} = nothing
+    manual_ucl::Union{Float64,Nothing} = nothing
+    manual_lcl::Union{Float64,Nothing} = nothing
+    subgroup_size::Int = 5
+    live_enabled::Bool = true
+end
 
 # Chart limit-line visibility (side panel params + which lines are drawn on the plot)
 const CHART_LINE_KEYS = ["cl", "sigma1", "sigma2", "sigma3", "specs"]
@@ -517,14 +569,44 @@ struct ChartRenderContext
 end
 
 """
+    auto_limits(vs; chart_type=I_MR, subgroup_size=5, sigma_method=:mr)
+
+PR1 thin alias to `compute_limits_and_zones` (I-MR / :mr path).
+PR7 fills type-aware auto (X̄-R/S, attributes); kwargs reserved as the hook.
+"""
+function auto_limits(
+    vs;
+    chart_type::ChartType = I_MR,
+    subgroup_size::Int = 5,
+    sigma_method::Symbol = :mr,
+)::LimitsAndZones
+    # PR1: ignore chart_type / subgroup_size; always existing I-MR path
+    compute_limits_and_zones(vs; sigma_method = sigma_method)
+end
+
+"""
     resolve_chart_render_context(ch; sigma_method=:mr)
 
-Pure resolver. Returns canonical lz (with chosen sigma), WECO viol set, cpk, band.
+Pure resolver gateway. Returns canonical lz (with chosen sigma), WECO viol set, cpk, band.
 All OOC/OOS/Cpk decisions and labels must derive from this to guarantee consistency.
+
+PR1 skeleton: branches on `limits_mode` / `chart_type` but all paths still I_MR/:mr.
+PR5 fills manual limits; PR7 fills type-aware auto.
 """
 function resolve_chart_render_context(ch::ChartSpec; sigma_method::Symbol = :mr)::ChartRenderContext
     vs = ch.data.values
-    lz = compute_limits_and_zones(vs; sigma_method = sigma_method)
+    # PR1 skeleton — all paths currently reduce to I_MR/:mr behavior:
+    if ch.limits_mode == :manual &&
+       ch.manual_cl !== nothing && ch.manual_ucl !== nothing && ch.manual_lcl !== nothing
+        # PR5 fills: sigma = (ucl - cl) / 3; zones from that sigma
+        # Until PR5: fall through to auto
+        lz = auto_limits(vs; chart_type = ch.chart_type, subgroup_size = ch.subgroup_size,
+                         sigma_method = sigma_method)
+    else
+        # PR7 fills type-aware auto; until then always I_MR :mr path via auto_limits
+        lz = auto_limits(vs; chart_type = ch.chart_type, subgroup_size = ch.subgroup_size,
+                         sigma_method = sigma_method)
+    end
     viols = weco_detect(vs, lz.cl, lz.sigma; enabled_rules = ch.enabled_rules)
     viol_set = Set(v.index for v in viols)
     cr = compute_capability(vs, lz.cl, lz.sigma; usl = ch.usl, lsl = ch.lsl)
@@ -614,9 +696,11 @@ export WECOViolation, WorkbenchData, LimitsAndZones, CapabilityResult
 export weco_detect, compute_limits_and_zones, compute_capability, generate_spc_workbench_data
 export detect_oos, cpk_band, cpk_color_for_band
 export compute_fit_y_range, y_extras_from_limits, fit_viewport_y!, auto_fit_viewport_y!
-export ChartRenderContext, resolve_chart_render_context, point_status
+export ChartRenderContext, resolve_chart_render_context, point_status, auto_limits
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS
+export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_type, chart_type_to_string
+export I_MR, Xbar_R, Xbar_S, p_chart, np_chart, c_chart, u_chart
 
 # UI requires Tachikoma (slices 2+). Pure tests include will pull it in.
 using Tachikoma
@@ -912,6 +996,13 @@ end
 
 # (ChartSpec definition was moved earlier for pure context resolver parse order)
 
+# ── Tool registry entry (Phase A may keep empty) ────────────────────────
+
+@kwdef struct ToolEntry
+    id::String
+    description::String = ""
+end
+
 # ── Model (slice 2+) ────────────────────────────────────────────────────
 
 @kwdef mutable struct SPCWorkbenchModel <: Model
@@ -950,42 +1041,70 @@ end
     # Dashboard multi-chart (AC2/AC3)
     charts::Vector{ChartSpec} = ChartSpec[]
     active::Int = 1
+    library_selected::Int = 1
     view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap
+    # Seed policy when charts empty — NEVER flip default from :triple
+    seed_demos::Symbol = :triple     # :triple | :single | :none
+    tools::Vector{ToolEntry} = ToolEntry[]
 end
 
 should_quit(m::SPCWorkbenchModel) = m.quit
 
+function _boot_viewport(d::WorkbenchData; usl=nothing, lsl=nothing, show_lines=DEFAULT_CHART_LINES)
+    nn = length(d.values)
+    nn <= 0 && return Viewport(x0 = 0, x1 = 0, ylo = 0.0, yhi = 1.0)
+    lz = compute_limits_and_zones(d.values; sigma_method = :mr)
+    vp = Viewport(x0 = 1, x1 = nn)
+    auto_fit_viewport_y!(vp, d.values, lz; usl = usl, lsl = lsl, show_lines = show_lines)
+    return vp
+end
+
+function _normalize_seed_demos(seed::Symbol)::Symbol
+    if seed === :triple || seed === :single || seed === :none
+        return seed
+    end
+    @warn "unknown seed_demos=$(seed); treating as :triple"
+    return :triple
+end
+
 function _ensure_charts!(m::SPCWorkbenchModel)
     if isempty(m.charts)
-        # bootstrap from any provided legacy data + add 2+ for rich multi-chart dashboard
-        n = max(8, length(m.data.values))
-        base = if n == length(m.data.values) && !isempty(m.data.values)
-            deepcopy(m.data)
+        seed = _normalize_seed_demos(m.seed_demos)
+        if seed === :none
+            push!(m.charts, ChartSpec(
+                name = "Primary",
+                data = empty_workbench_data(),
+                viewport = Viewport(x0 = 0, x1 = 0, ylo = 0.0, yhi = 1.0),
+                enabled_rules = copy(m.enabled_rules),
+            ))
+            m.active = 1
+            m.library_selected = 1
         else
-            generate_spc_workbench_data(n; seed=42)
+            # :triple (default) or :single — bootstrap from legacy data + demos
+            n = max(8, length(m.data.values))
+            base = if n == length(m.data.values) && !isempty(m.data.values)
+                deepcopy(m.data)
+            else
+                generate_spc_workbench_data(n; seed=42)
+            end
+            push!(m.charts, ChartSpec(
+                name = "Primary",
+                data = base,
+                viewport = _boot_viewport(base; usl = m.usl, lsl = m.lsl, show_lines = m.show_chart_lines),
+                usl = m.usl, target = m.target, lsl = m.lsl,
+                enabled_rules = copy(m.enabled_rules),
+            ))
+            if seed === :triple
+                d2 = generate_spc_workbench_data(n; seed=123)
+                push!(m.charts, ChartSpec(name="Secondary (demo)", data=d2,
+                    viewport = _boot_viewport(d2; show_lines = m.show_chart_lines)))
+                d3 = generate_spc_workbench_data(15; seed=55, μ=100.0, σ=2.0)
+                push!(m.charts, ChartSpec(name="Tertiary", data=d3,
+                    viewport = _boot_viewport(d3; show_lines = m.show_chart_lines)))
+            end
+            m.active = 1
+            m.library_selected = 1
         end
-        function _boot_vp(d::WorkbenchData; usl=nothing, lsl=nothing)
-            nn = length(d.values)
-            nn <= 0 && return Viewport()
-            lz = compute_limits_and_zones(d.values; sigma_method = :mr)
-            vp = Viewport(x0 = 1, x1 = nn)
-            auto_fit_viewport_y!(vp, d.values, lz; usl = usl, lsl = lsl, show_lines = m.show_chart_lines)
-            return vp
-        end
-        push!(m.charts, ChartSpec(
-            name = "Primary",
-            data = base,
-            viewport = _boot_vp(base; usl = m.usl, lsl = m.lsl),
-            usl = m.usl, target = m.target, lsl = m.lsl,
-            enabled_rules = copy(m.enabled_rules)
-        ))
-        d2 = generate_spc_workbench_data(n; seed=123)
-        push!(m.charts, ChartSpec(name="Secondary (demo)", data=d2,
-            viewport = _boot_vp(d2)))
-        d3 = generate_spc_workbench_data(15; seed=55, μ=100.0, σ=2.0)
-        push!(m.charts, ChartSpec(name="Tertiary", data=d3,
-            viewport = _boot_vp(d3)))
-        m.active = 1
     end
     ch = m.charts[clamp(m.active, 1, length(m.charts))]
     # sync legacy for any remaining direct refs in old paths / live
@@ -1011,6 +1130,173 @@ function _sync_active_back!(m::SPCWorkbenchModel)
         ch.enabled_rules = copy(m.enabled_rules)
     end
 end
+
+# ── Pure chart library CRUD ─────────────────────────────────────────────
+
+"""
+    add_chart!(m; name="New chart", data=empty_workbench_data()) -> Int
+
+Append a valid ChartSpec. Returns new 1-based index. Sets library_selected;
+does not change active unless charts was empty.
+"""
+function add_chart!(
+    m::SPCWorkbenchModel;
+    name::AbstractString = "New chart",
+    data::WorkbenchData = empty_workbench_data(),
+)::Int
+    was_empty = isempty(m.charts)
+    d = WorkbenchData(
+        values = copy(data.values),
+        cl = data.cl,
+        sigma = data.sigma,
+        meta = deepcopy(data.meta),
+    )
+    ch = ChartSpec(
+        name = String(name),
+        data = d,
+        viewport = _boot_viewport(d; show_lines = m.show_chart_lines),
+        enabled_rules = copy(DEFAULT_WECO_RULES),
+    )
+    push!(m.charts, ch)
+    idx = length(m.charts)
+    m.library_selected = idx
+    if was_empty
+        m.active = idx
+        _ensure_charts!(m)  # sync legacy mirrors
+    end
+    return idx
+end
+
+"""
+    clone_chart!(m, idx) -> Int
+
+Deep-copy chart at idx (values/rules/specs/viewport/meta); new id; name *= \" (copy)\".
+Returns new index.
+"""
+function clone_chart!(m::SPCWorkbenchModel, idx::Int)::Int
+    n = length(m.charts)
+    (idx < 1 || idx > n) && throw(BoundsError(m.charts, idx))
+    src = m.charts[idx]
+    d = WorkbenchData(
+        values = copy(src.data.values),
+        cl = src.data.cl,
+        sigma = src.data.sigma,
+        meta = deepcopy(src.data.meta),
+    )
+    vp = Viewport(x0 = src.viewport.x0, x1 = src.viewport.x1,
+                  ylo = src.viewport.ylo, yhi = src.viewport.yhi)
+    cloned = ChartSpec(
+        id = "CHT-" * string(rand(1000:9999)),
+        name = src.name * " (copy)",
+        chart_type = src.chart_type,
+        data = d,
+        viewport = vp,
+        usl = src.usl,
+        target = src.target,
+        lsl = src.lsl,
+        enabled_rules = copy(src.enabled_rules),
+        param = src.param,
+        units = src.units,
+        owner = src.owner,
+        tools = copy(src.tools),
+        limits_mode = src.limits_mode,
+        manual_cl = src.manual_cl,
+        manual_ucl = src.manual_ucl,
+        manual_lcl = src.manual_lcl,
+        subgroup_size = src.subgroup_size,
+        live_enabled = src.live_enabled,
+    )
+    push!(m.charts, cloned)
+    new_idx = length(m.charts)
+    m.library_selected = new_idx
+    return new_idx
+end
+
+"""
+    delete_chart!(m, idx) -> Bool
+
+Refuse if only one chart remains. Clamps active + library_selected. Returns true if deleted.
+"""
+function delete_chart!(m::SPCWorkbenchModel, idx::Int)::Bool
+    n = length(m.charts)
+    n <= 1 && return false
+    (idx < 1 || idx > n) && return false
+    # Persist unsynced legacy mirror edits on the current active chart before removal
+    # (same pattern as set_active_chart!). Without this, delete of a *different* chart
+    # would drop m.usl/target/lsl/rules via _ensure_charts! overwrite.
+    _sync_active_back!(m)
+    deleteat!(m.charts, idx)
+    # clamp active
+    if m.active > length(m.charts)
+        m.active = length(m.charts)
+    elseif m.active > idx
+        m.active = m.active - 1
+    elseif m.active == idx
+        m.active = min(idx, length(m.charts))
+    end
+    m.active = clamp(m.active, 1, length(m.charts))
+    # clamp library_selected
+    if m.library_selected > length(m.charts)
+        m.library_selected = length(m.charts)
+    elseif m.library_selected > idx
+        m.library_selected = m.library_selected - 1
+    elseif m.library_selected == idx
+        m.library_selected = min(idx, length(m.charts))
+    end
+    m.library_selected = clamp(m.library_selected, 1, length(m.charts))
+    _ensure_charts!(m)  # resync legacy mirrors from new active
+    return true
+end
+
+function rename_chart!(m::SPCWorkbenchModel, idx::Int, name::AbstractString)
+    n = length(m.charts)
+    (idx < 1 || idx > n) && throw(BoundsError(m.charts, idx))
+    m.charts[idx].name = String(name)
+    return nothing
+end
+
+function set_active_chart!(m::SPCWorkbenchModel, idx::Int)
+    n = length(m.charts)
+    n == 0 && return
+    (idx < 1 || idx > n) && throw(BoundsError(m.charts, idx))
+    _sync_active_back!(m)
+    m.active = idx
+    m.library_selected = idx
+    _ensure_charts!(m)  # sync legacy mirrors from new active
+    return nothing
+end
+
+# ── Multi-plot pane selection (PR2a) ────────────────────────────────────
+
+"""
+    visible_charts(m) -> Vector{ChartSpec}
+
+Phase A / PR2a: identity — all charts in library order (shared refs).
+PR9 will filter by tool/type/owner.
+"""
+function visible_charts(m::SPCWorkbenchModel)::Vector{ChartSpec}
+    return m.charts
+end
+
+"""
+    dashboard_pane_charts(m; k=3) -> Vector{ChartSpec}
+
+Active chart plus the next (k-1) visible neighbors. Primary interactive plot
+is panes[1]; read-only extras are panes[2:end]. Fixes the hard-coded
+`charts[2]`/`charts[3]` lock (active==2 duplicate / post-delete hazards).
+"""
+function dashboard_pane_charts(m::SPCWorkbenchModel; k::Int = 3)::Vector{ChartSpec}
+    vis = visible_charts(m)
+    isempty(vis) && return ChartSpec[]
+    act = current_chart(m)
+    i = findfirst(c -> c.id == act.id, vis)
+    i === nothing && (i = 1)
+    j = min(i + k - 1, length(vis))
+    return vis[i:j]
+end
+
+export ToolEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
+export visible_charts, dashboard_pane_charts
 
 # ── Update (Key + Mouse, full fidelity) ─────────────────────────────────
 
@@ -1382,14 +1668,15 @@ function view(m::SPCWorkbenchModel, f::Frame)
     plot_rect = cols[1]
     side_rect = cols[2]
 
-    # Dashboard: render multiple (up to 3) charts simultaneously for rich visual
-    ncharts = length(m.charts)
-    is_dashboard_multi = (m.view_mode == :dashboard && ncharts >= 2)
+    # Dashboard: up to k panes from active + following visible neighbors (not charts[2]/[3] lock)
+    panes = dashboard_pane_charts(m; k = 3)
+    npanes = length(panes)
+    is_dashboard_multi = (m.view_mode == :dashboard && npanes >= 2)
     active_plot_rect = plot_rect
     second_plot_rect = nothing
     third_plot_rect = nothing
     if is_dashboard_multi
-        nc = min(3, ncharts)
+        nc = min(3, npanes)
         if nc == 3
             h1 = max(8, (plot_rect.height * 5) ÷ 10)
             h2 = max(5, (plot_rect.height - h1 - 2) * 5 ÷ 10)
@@ -1465,7 +1752,8 @@ function view(m::SPCWorkbenchModel, f::Frame)
 
     # normal (or dashboard multi) render for active
     chname = isempty(m.charts) ? "Data" : current_chart(m).name
-    plot_block = Block(title = "Dashboard: $(chname) [$(m.active)/$(length(m.charts))] (│ hover  ┃ select  drag pan  wheel zoom)  [ ] switch", border_style = tstyle(:border), title_style = tstyle(:title))
+    empty_hint = (n == 0) ? " — No data — import CSV or clone a demo" : ""
+    plot_block = Block(title = "Dashboard: $(chname) [$(m.active)/$(length(m.charts))] (│ hover  ┃ select  drag pan  wheel zoom)  [ ] switch$(empty_hint)", border_style = tstyle(:border), title_style = tstyle(:title))
     plot_inner = render(plot_block, active_plot_rect, buf)
     m.plot_area = plot_inner
 
@@ -1618,9 +1906,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
         set_string!(buf, right(plot_inner)-3, plot_inner.y + ch - 1, string(m.viewport.x1), tstyle(:text_dim))
     end
 
-    # SECOND simultaneous chart for dashboard (rich multi visible)
-    if is_dashboard_multi && second_plot_rect !== nothing && length(m.charts) >= 2
-        ch2 = m.charts[2]
+    # Read-only extra panes from dashboard_pane_charts (panes[2], panes[3]) — not m.charts[2]/[3]
+    if is_dashboard_multi && second_plot_rect !== nothing && npanes >= 2
+        ch2 = panes[2]
         n2 = length(ch2.data.values)
         if n2 > 0 && second_plot_rect.width > 4 && second_plot_rect.height > 3
             blk2 = Block(title = "Chart 2: $(ch2.name) (read-only view)", border_style = tstyle(:border), title_style = tstyle(:text_dim))
@@ -1722,9 +2010,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
         end
     end
 
-    # THIRD simultaneous chart when >=3
-    if third_plot_rect !== nothing && ncharts >= 3
-        ch3 = m.charts[3]
+    # THIRD pane when panes has a third neighbor
+    if third_plot_rect !== nothing && npanes >= 3
+        ch3 = panes[3]
         n3 = length(ch3.data.values)
         if n3 > 0 && third_plot_rect.width > 4 && third_plot_rect.height > 3
             blk3 = Block(title = "Chart 3: $(ch3.name) (read-only)", border_style = tstyle(:border), title_style = tstyle(:text_dim))
