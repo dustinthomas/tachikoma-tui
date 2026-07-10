@@ -463,6 +463,170 @@ include("../src/spc_workbench.jl")
         @test ctx_m.lz.cl == lz_b.cl  # auto path until PR5
     end
 
+    @testset "SS_FACTORS table (HTML n=2..25)" begin
+        @test haskey(SS_FACTORS, 2) && haskey(SS_FACTORS, 25)
+        @test !haskey(SS_FACTORS, 1) && !haskey(SS_FACTORS, 26)
+        # Spot-check vs HTML SS_FACTORS
+        f2 = SS_FACTORS[2]
+        @test f2.A2 == 1.880
+        @test f2.A3 == 2.659
+        @test f2.d2 == 1.128
+        @test f2.c4 == 0.7979
+        @test f2.D3 == 0.0
+        @test f2.D4 == 3.267
+        @test f2.B3 == 0.0
+        @test f2.B4 == 3.267
+        f5 = SS_FACTORS[5]
+        @test f5.A2 == 0.577
+        @test f5.A3 == 1.427
+        @test f5.d2 == 2.326
+        @test f5.c4 == 0.9400
+        f10 = SS_FACTORS[10]
+        @test f10.A2 == 0.308
+        @test f10.A3 == 0.975
+        @test f10.d2 == 3.078
+        @test f10.c4 == 0.9727
+        f25 = SS_FACTORS[25]
+        @test f25.A2 == 0.153
+        @test f25.A3 == 0.606
+        @test f25.d2 == 3.931
+        @test f25.c4 == 0.9896
+    end
+
+    @testset "subgroup_means_and_ranges / subgroup_means_and_s (series chunks)" begin
+        # 12 values → 4 complete groups of n=3; remainder dropped
+        vals = [10.0, 12.0, 11.0,  20.0, 22.0, 18.0,  30.0, 28.0, 32.0,  40.0, 41.0]
+        xbar, ranges, groups = subgroup_means_and_ranges(vals, 3)
+        @test length(xbar) == 3
+        @test length(ranges) == 3
+        @test length(groups) == 3
+        @test xbar[1] ≈ mean([10.0, 12.0, 11.0])
+        @test ranges[1] ≈ 2.0  # 12-10
+        @test xbar[2] ≈ mean([20.0, 22.0, 18.0])
+        @test ranges[2] ≈ 4.0  # 22-18
+        @test xbar[3] ≈ mean([30.0, 28.0, 32.0])
+        @test ranges[3] ≈ 4.0  # 32-28
+        # incomplete tail (40,41) discarded
+        @test length(groups[1]) == 3
+
+        xbar_s, svals, g2 = subgroup_means_and_s(vals, 3)
+        @test length(xbar_s) == 3
+        @test xbar_s ≈ xbar
+        @test svals[1] ≈ std([10.0, 12.0, 11.0]; corrected = true)
+        @test svals[2] ≈ std([20.0, 22.0, 18.0]; corrected = true)
+
+        # too few for one full subgroup → empty
+        xb0, r0, g0 = subgroup_means_and_ranges([1.0, 2.0], 5)
+        @test isempty(xb0) && isempty(r0) && isempty(g0)
+
+        # n clamped by helpers to [2,25]
+        xb2, r2, _ = subgroup_means_and_ranges(collect(1.0:10.0), 1)  # treat as 2
+        @test length(xb2) == 5
+    end
+
+    @testset "auto_limits Xbar_R / Xbar_S (HTML formulas)" begin
+        # Crafted series: 3 subgroups of size 5
+        # SG1 mean=10, R=4; SG2 mean=12, R=2; SG3 mean=11, R=6
+        raw = Float64[
+            8, 10, 12, 9, 11,   # mean 10, R=4
+            11, 12, 13, 12, 12, # mean 12, R=2
+            8, 14, 10, 11, 12,  # mean 11, R=6
+        ]
+        n = 5
+        f = SS_FACTORS[n]
+        xbar, ranges, _ = subgroup_means_and_ranges(raw, n)
+        @test length(xbar) == 3
+        rbar = mean(ranges)
+        xbb = mean(xbar)
+        lz_r = auto_limits(raw; chart_type = Xbar_R, subgroup_size = n)
+        @test lz_r.cl ≈ xbb
+        @test lz_r.sigma ≈ rbar / f.d2
+        @test lz_r.ucl ≈ xbb + f.A2 * rbar
+        @test lz_r.lcl ≈ xbb - f.A2 * rbar
+        # intermediate zones from process σ (WECO scale)
+        @test lz_r.ucl1 ≈ xbb + 1 * lz_r.sigma
+        @test lz_r.ucl2 ≈ xbb + 2 * lz_r.sigma
+        @test lz_r.lcl1 ≈ xbb - 1 * lz_r.sigma
+        @test lz_r.lcl2 ≈ xbb - 2 * lz_r.sigma
+
+        xbar_s, svals, _ = subgroup_means_and_s(raw, n)
+        sbar = mean(svals)
+        lz_s = auto_limits(raw; chart_type = Xbar_S, subgroup_size = n)
+        @test lz_s.cl ≈ mean(xbar_s)
+        @test lz_s.sigma ≈ sbar  # HTML: sigma = sBar
+        @test lz_s.ucl ≈ mean(xbar_s) + f.A3 * sbar
+        @test lz_s.lcl ≈ mean(xbar_s) - f.A3 * sbar
+
+        # empty / incomplete → zero limits
+        lz0 = auto_limits(Float64[1, 2, 3]; chart_type = Xbar_R, subgroup_size = 5)
+        @test lz0.cl == 0.0 && lz0.sigma == 0.0 && lz0.ucl == 0.0
+
+        # I_MR path unchanged
+        vs = [1.0, 2.0, 3.0, 4.0, 5.0]
+        @test auto_limits(vs; chart_type = I_MR, sigma_method = :mr).sigma ==
+              compute_limits_and_zones(vs; sigma_method = :mr).sigma
+    end
+
+    @testset "resolve Xbar_R / Xbar_S primary series + Cpk c4 + secondary stats" begin
+        raw = Float64[
+            8, 10, 12, 9, 11,
+            11, 12, 13, 12, 12,
+            8, 14, 10, 11, 12,
+        ]
+        n = 5
+        f = SS_FACTORS[n]
+        usl, lsl = 20.0, 0.0
+
+        ch_r = ChartSpec(
+            name = "XbarR test",
+            chart_type = Xbar_R,
+            data = WorkbenchData(values = raw, cl = 0.0, sigma = 0.0),
+            subgroup_size = n,
+            usl = usl,
+            lsl = lsl,
+        )
+        ctx_r = resolve_chart_render_context(ch_r)
+        xbar, ranges, _ = subgroup_means_and_ranges(raw, n)
+        @test ctx_r.primary_values ≈ xbar
+        @test length(ctx_r.primary_values) == 3
+        @test ctx_r.lz.ucl ≈ mean(xbar) + f.A2 * mean(ranges)
+        @test ctx_r.secondary_name == "R"
+        @test ctx_r.secondary_bar ≈ mean(ranges)
+        # Xbar-R Cpk uses process σ = R̄/d2 (already lz.sigma)
+        cr_r = compute_capability(xbar, ctx_r.lz.cl, ctx_r.lz.sigma; usl = usl, lsl = lsl)
+        @test ctx_r.cpk ≈ cr_r.cpk
+
+        ch_s = ChartSpec(
+            name = "XbarS test",
+            chart_type = Xbar_S,
+            data = WorkbenchData(values = raw, cl = 0.0, sigma = 0.0),
+            subgroup_size = n,
+            usl = usl,
+            lsl = lsl,
+        )
+        ctx_s = resolve_chart_render_context(ch_s)
+        xbar_s, svals, _ = subgroup_means_and_s(raw, n)
+        sbar = mean(svals)
+        @test ctx_s.primary_values ≈ xbar_s
+        @test ctx_s.secondary_name == "s"
+        @test ctx_s.secondary_bar ≈ sbar
+        # Xbar-S Cpk unbiases s̄ with c4 (HTML)
+        cpk_sigma = sbar / f.c4
+        cr_s = compute_capability(xbar_s, ctx_s.lz.cl, cpk_sigma; usl = usl, lsl = lsl)
+        @test ctx_s.cpk ≈ cr_s.cpk
+        # c4-unbiased sigma differs from raw s̄
+        cr_wrong = compute_capability(xbar_s, ctx_s.lz.cl, sbar; usl = usl, lsl = lsl)
+        @test ctx_s.cpk !== nothing && cr_wrong.cpk !== nothing
+        @test abs(ctx_s.cpk - cr_wrong.cpk) > 1e-9
+
+        # I_MR primary is raw values; no secondary bar
+        ch_i = ChartSpec(data = WorkbenchData(values = raw, cl = 0.0, sigma = 0.0))
+        ctx_i = resolve_chart_render_context(ch_i)
+        @test ctx_i.primary_values ≈ raw
+        @test ctx_i.secondary_name == ""
+        @test ctx_i.secondary_bar === nothing
+    end
+
     @testset "pure chart library CRUD + seed_demos" begin
         d = generate_spc_workbench_data(12; seed = 7)
         m = SPCWorkbenchModel(data = d, paused = true)
