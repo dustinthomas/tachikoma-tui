@@ -34,6 +34,9 @@ export workbench_to_dict, workbench_from_dict, workbench_from_dict!
 export save_workbench, load_workbench, load_workbench!
 export spc_workbench_demo, run_spc_workbench, spc_workbench, advanced_spc, run_advanced_spc
 
+# PrecompileTools workload (construct / resolve / view / serialize) — no new runtime behavior
+include("precompile.jl")
+
 # Add your own includes here as the project grows:
 # include("my_dashboard.jl")
 # include("my_app.jl")
