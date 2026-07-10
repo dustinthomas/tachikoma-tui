@@ -18,7 +18,7 @@ end
 
 struct CsvParseErr
     kind::Symbol  # :not_found | :unreadable | :empty | :no_header_match |
-                  # :no_numeric | :all_invalid | :too_large
+                  # :no_numeric | :all_invalid | :too_large | :bad_index
     message::String
 end
 
@@ -38,6 +38,8 @@ function _import_err_suffix(err::CsvParseErr)::String
         return "no numeric values"
     elseif err.kind === :too_large
         return "too many rows"
+    elseif err.kind === :bad_index
+        return "bad chart index"
     else
         return err.message
     end
@@ -216,8 +218,9 @@ end
     import_csv_new_chart!(m, path; name=..., value_col="Value", max_rows=50_000)
 
 Add a new chart from CSV. On success: live_enabled=false on that chart only,
-m.paused=true, last_event="imported N values from path". On err: no chart mutation;
-sets last_event to import err prefix.
+sets active to the new chart (so runner `load=` surfaces the series), m.paused=true,
+last_event="imported N values from path". On err: no chart mutation; sets last_event
+to import err prefix.
 """
 function import_csv_new_chart!(
     m::SPCWorkbenchModel,
@@ -253,6 +256,8 @@ function import_csv_new_chart!(
     end
     # Safety: never leave charts shorter than before on success path
     @assert length(m.charts) == n_before + 1
+    # Focus imported series (runner load= / CLI ingress surfaces CSV, not Primary demo)
+    set_active_chart!(m, idx)
     m.paused = true
     m.last_event = "imported $(length(parsed.values)) values from $path"
     return parsed
@@ -275,7 +280,11 @@ function import_csv_into_model!(
 )::Union{CsvParseOk,CsvParseErr}
     _ensure_charts!(m)
     idx = chart_idx === nothing ? clamp(m.active, 1, length(m.charts)) : chart_idx
-    (idx < 1 || idx > length(m.charts)) && return CsvParseErr(:unreadable, "bad chart index")
+    if idx < 1 || idx > length(m.charts)
+        err = CsvParseErr(:bad_index, "bad chart index")
+        m.last_event = _import_err_event(err)
+        return err
+    end
     ch = m.charts[idx]
     snapshot_lens = [length(c.data.values) for c in m.charts]
     parsed = import_csv_into_chart!(

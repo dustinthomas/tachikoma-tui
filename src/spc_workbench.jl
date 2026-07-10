@@ -2434,7 +2434,7 @@ const run_spc_workbench = spc_workbench_demo
     spc_workbench(; paused=false, load=nothing, seed_demos=:triple, value_col="Value")
 
 Live/interactive workbench. `load=` imports a CSV series as a new chart
-(that chart live_enabled=false, model paused=true on success).
+(that chart live_enabled=false, activated as current, model paused=true on success).
 `seed_demos` default remains `:triple` — never flip.
 """
 function spc_workbench(;

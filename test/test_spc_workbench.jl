@@ -1522,7 +1522,7 @@ end
         @test _live_may_advance(m_empty) === false
     end
 
-    @testset "import_csv_new_chart! adds chart; help mentions g/G" begin
+    @testset "import_csv_new_chart! adds chart; activates it; help mentions g/G" begin
         d = generate_spc_workbench_data(10; seed = 1)
         m = SPCWorkbenchModel(data = d, paused = false, seed_demos = :single)
         _ensure_charts!(m)
@@ -1534,9 +1534,20 @@ end
         @test m.charts[end].name == "FromCSV"
         @test m.charts[end].live_enabled === false
         @test m.paused === true
+        # load=/new-chart import focuses the imported series (not Primary demo)
+        @test m.active == length(m.charts)
+        @test current_chart(m).name == "FromCSV"
+        @test length(current_chart(m).data.values) == 10
         for i in 1:n0
             @test m.charts[i].live_enabled === lives_before[i]
         end
+
+        # bad chart_idx sets last_event + distinct kind
+        r_bad = import_csv_into_model!(m, SAMPLE; chart_idx = 999)
+        @test r_bad isa CsvParseErr
+        @test r_bad.kind === :bad_index
+        @test startswith(m.last_event, "import err:")
+        @test occursin("bad chart index", m.last_event)
 
         # help/keymap list g/G
         m2 = SPCWorkbenchModel(data = d, paused = true)
@@ -1544,13 +1555,13 @@ end
         tb = T.TestBackend(90, 22); T.reset!(tb.buf)
         T.view(m2, T.Frame(tb.buf, T.Rect(1, 1, 90, 22), [], []))
         help_txt = join([string(T.row_text(tb, i)) for i in 1:22 if T.row_text(tb, i) !== nothing], "\n")
-        @test occursin("g/G", help_txt) || occursin("g/G", help_txt)
+        @test occursin("g/G", help_txt)
         T.update!(m2, T.KeyEvent(:escape))
         T.update!(m2, T.KeyEvent('k'))
         tb2 = T.TestBackend(90, 22); T.reset!(tb2.buf)
         T.view(m2, T.Frame(tb2.buf, T.Rect(1, 1, 90, 22), [], []))
         ktxt = join([string(T.row_text(tb2, i)) for i in 1:22 if T.row_text(tb2, i) !== nothing], "\n")
-        @test occursin("g/G", ktxt) || occursin("live_enabled", ktxt) || occursin("live", lowercase(ktxt))
+        @test occursin("g/G", ktxt)
     end
 
     @testset "seed_demos default remains :triple" begin
