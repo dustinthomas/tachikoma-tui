@@ -1580,11 +1580,13 @@ end
         @test m.view_mode == :library
         @test m.quit == false
 
-        # export / save / load stubs
+        # export empty path fail-closed (real export PR4b); save/load still stubs
         T.update!(m, T.KeyEvent('e'))
         @test m.prompt_kind === :export_csv
         T.update!(m, T.KeyEvent(:enter))
-        @test occursin("export stub", m.last_event)
+        @test occursin("export err", m.last_event)
+        @test m.view_mode == :library
+        @test m.quit == false
 
         T.update!(m, T.KeyEvent('w'))
         @test m.prompt_kind === :save_workbench
@@ -1925,3 +1927,146 @@ end
 end
 
 end # module TestSPCWorkbenchCSVImport
+
+# ═══════════════════════════════════════════════════════════════════════
+# PR4b CSV export (library_selected) — package-module path (KD22).
+# ═══════════════════════════════════════════════════════════════════════
+
+module TestSPCWorkbenchCSVExport
+using Test
+using TachikomaTUI
+using Tachikoma
+using Random
+
+const T = Tachikoma
+const WB = TachikomaTUI
+const _ensure_charts! = WB._ensure_charts!
+const current_chart = WB.current_chart
+const chart_for_export = WB.chart_for_export
+
+const FIX_DIR = joinpath(@__DIR__, "fixtures", "spc")
+const SAMPLE = joinpath(FIX_DIR, "sample_value.csv")
+
+@testset "PR4b CSV export (using TachikomaTUI)" begin
+    @testset "export_csv_series writes Value column; re-import numeric equality" begin
+        vals = [100.1, 99.8, 100.4, 101.2, 99.5, 100.0, 98.9, 101.5, 100.3, 99.7]
+        mktempdir() do dir
+            path = joinpath(dir, "out.csv")
+            err = export_csv_series(path, vals)
+            @test err === nothing
+            @test isfile(path)
+            text = read(path, String)
+            @test startswith(text, "Value\n") || startswith(text, "Value\r\n")
+            # Round-trip via import parser
+            r = parse_csv_table(path)
+            @test r isa CsvParseOk
+            @test r.value_col == "Value"
+            @test length(r.values) == length(vals)
+            for i in eachindex(vals)
+                @test r.values[i] ≈ vals[i]
+            end
+            # Custom column name
+            path2 = joinpath(dir, "reading.csv")
+            @test export_csv_series(path2, [1.5, 2.5]; col_name = "Reading") === nothing
+            r2 = parse_csv_table(path2; value_col = "Reading")
+            @test r2 isa CsvParseOk
+            @test r2.values == [1.5, 2.5]
+        end
+    end
+
+    @testset "export empty path / empty series" begin
+        @test export_csv_series("", [1.0, 2.0]) isa String
+        @test occursin("empty", lowercase(export_csv_series("  ", [1.0])))
+        mktempdir() do dir
+            path = joinpath(dir, "empty_series.csv")
+            @test export_csv_series(path, Float64[]) === nothing
+            @test isfile(path)
+            @test occursin("Value", read(path, String))
+        end
+    end
+
+    @testset "chart_for_export: library_selected vs active" begin
+        d = generate_spc_workbench_data(12; seed = 11)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        @test length(m.charts) >= 3
+        # Distinct series so selection is observable
+        m.charts[1].data.values = [1.0, 2.0, 3.0]
+        m.charts[2].data.values = [10.0, 20.0]
+        m.charts[3].data.values = [100.0]
+        m.active = 1
+        m.library_selected = 2
+        m.view_mode = :dashboard
+        @test chart_for_export(m).id == m.charts[1].id
+        @test chart_for_export(m).data.values == [1.0, 2.0, 3.0]
+
+        m.view_mode = :library
+        @test chart_for_export(m).id == m.charts[2].id
+        @test chart_for_export(m).data.values == [10.0, 20.0]
+
+        m.library_selected = 3
+        @test chart_for_export(m).data.values == [100.0]
+    end
+
+    @testset "library e prompt exports library_selected; re-import equals" begin
+        d = generate_spc_workbench_data(15; seed = 4)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        # Put known series on chart 2; keep active on 1
+        known = [11.1, 22.2, 33.3, 44.4]
+        m.charts[2].data.values = copy(known)
+        m.active = 1
+        m.library_selected = 2
+        orig_active_vals = copy(m.charts[1].data.values)
+
+        mktempdir() do dir
+            path = joinpath(dir, "lib_sel.csv")
+            T.update!(m, T.KeyEvent('m'))
+            @test m.view_mode == :library
+            m.library_selected = 2
+            T.update!(m, T.KeyEvent('e'))
+            @test m.prompt_kind === :export_csv
+            for ch in collect(path)
+                T.update!(m, T.KeyEvent(ch))
+            end
+            # Mouse ignored while prompt set
+            T.update!(m, T.MouseEvent(5, 5, T.mouse_left, T.mouse_press, false, false, false))
+            @test m.prompt_kind === :export_csv
+            @test occursin("modal", m.last_event) || m.prompt_kind === :export_csv
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === nothing
+            @test occursin("exported $(length(known)) values", m.last_event)
+            @test occursin(path, m.last_event)
+            @test m.last_export_path == path
+            @test m.view_mode == :library
+            @test m.quit == false
+            # Active chart untouched
+            @test m.charts[1].data.values == orig_active_vals
+            @test m.active == 1
+
+            r = parse_csv_table(path)
+            @test r isa CsvParseOk
+            @test length(r.values) == length(known)
+            for i in eachindex(known)
+                @test r.values[i] ≈ known[i]
+            end
+            # re-import into a fresh chart equals known
+            m2 = SPCWorkbenchModel(data = generate_spc_workbench_data(5; seed = 2),
+                                   paused = true, seed_demos = :single)
+            _ensure_charts!(m2)
+            r_imp = import_csv_into_model!(m2, path)
+            @test r_imp isa CsvParseOk
+            @test current_chart(m2).data.values == r.values
+            for i in eachindex(known)
+                @test current_chart(m2).data.values[i] ≈ known[i]
+            end
+        end
+    end
+
+    @testset "seed_demos default remains :triple" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 1), paused = true)
+        @test m.seed_demos === :triple
+    end
+end
+
+end # module TestSPCWorkbenchCSVExport

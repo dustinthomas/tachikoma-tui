@@ -1307,7 +1307,7 @@ export visible_charts, dashboard_pane_charts
 
 # ── Update (Key + Mouse, full fidelity) ─────────────────────────────────
 
-"""Apply prompt Enter (rename real; file I/O stubs until PR3/PR4)."""
+"""Apply prompt Enter (rename real; CSV export real; other file I/O stubs until PR3/PR4)."""
 function _apply_prompt!(m::SPCWorkbenchModel)
     kind = m.prompt_kind
     buf = m.prompt_buf
@@ -1329,8 +1329,21 @@ function _apply_prompt!(m::SPCWorkbenchModel)
         # keep buf so user can re-open and edit (fail-closed pattern for real I/O)
         return
     elseif kind === :export_csv
-        m.last_export_path = buf
-        m.last_event = isempty(buf) ? "export stub: (empty path)" : "export stub: $buf"
+        # PR4b: export library_selected (via chart_for_export) series to CSV
+        path = strip(buf)
+        if isempty(path)
+            m.last_event = "export err: empty path"
+            m.prompt_kind = nothing
+            return
+        end
+        ch = chart_for_export(m)
+        err = export_csv_series(path, ch.data.values)
+        if err === nothing
+            m.last_export_path = path
+            m.last_event = "exported $(length(ch.data.values)) values to $path"
+        else
+            m.last_event = "export err: $err"
+        end
         m.prompt_kind = nothing
         return
     elseif kind === :save_workbench
