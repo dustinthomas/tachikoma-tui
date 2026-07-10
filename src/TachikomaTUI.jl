@@ -23,9 +23,12 @@ export SPCWorkbenchModel, WorkbenchData, generate_spc_workbench_data
 export weco_detect, compute_limits_and_zones, compute_capability
 export detect_oos, cpk_band, cpk_color_for_band
 export compute_fit_y_range, y_extras_from_limits, fit_viewport_y!, auto_fit_viewport_y!
-export ChartRenderContext, resolve_chart_render_context, point_status
+export ChartRenderContext, resolve_chart_render_context, point_status, auto_limits
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS
+export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_type, chart_type_to_string
+export I_MR, Xbar_R, Xbar_S, p_chart, np_chart, c_chart, u_chart
+export ToolEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
 export spc_workbench_demo, run_spc_workbench, spc_workbench, advanced_spc, run_advanced_spc
 
 # Add your own includes here as the project grows:

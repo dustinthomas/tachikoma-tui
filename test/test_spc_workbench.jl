@@ -398,6 +398,152 @@ include("../src/spc_workbench.jl")
             @test 0 <= dy <= dh - 1
         end
     end
+
+    @testset "ChartType + wire parse + empty data + ChartSpec metadata defaults" begin
+        @test I_MR isa ChartType
+        @test Xbar_R isa ChartType
+        @test Xbar_S isa ChartType
+        @test p_chart isa ChartType
+        @test CHART_TYPE_WIRE[I_MR] == "I-MR"
+        @test CHART_TYPE_WIRE[Xbar_R] == "Xbar-R"
+        @test CHART_TYPE_WIRE[p_chart] == "p"
+        @test parse_chart_type("I-MR") === I_MR
+        @test parse_chart_type("Xbar-S") === Xbar_S
+        @test parse_chart_type("u") === u_chart
+        @test parse_chart_type("nope") === nothing
+
+        ed = empty_workbench_data()
+        @test ed.values == Float64[]
+        @test ed.cl == 0.0
+        @test ed.sigma == 0.0
+
+        ch = ChartSpec()  # valid empty chart via defaults
+        @test ch.chart_type === I_MR
+        @test isempty(ch.data.values)
+        @test ch.limits_mode === :auto
+        @test ch.live_enabled === true
+        @test ch.subgroup_size == 5
+        @test ch.param == ""
+        @test ch.units == ""
+        @test ch.owner == ""
+        @test ch.tools == String[]
+        @test ch.manual_cl === nothing
+        # backward-compat construction still works
+        ch2 = ChartSpec(name = "legacy", data = WorkbenchData(values=[1.0], cl=1.0, sigma=0.1))
+        @test ch2.name == "legacy"
+        @test ch2.chart_type === I_MR
+        @test ch2.live_enabled === true
+    end
+
+    @testset "empty chart resolve + auto_limits alias" begin
+        ch = ChartSpec()
+        ctx = resolve_chart_render_context(ch)
+        @test ctx.lz.cl == 0.0
+        @test ctx.lz.sigma == 0.0
+        @test isempty(ctx.viol_indices)
+        @test ctx.cpk === nothing
+        @test ctx.band === :none
+
+        # auto_limits is thin alias to existing I-MR path
+        vs = [1.0, 2.0, 3.0, 4.0, 5.0]
+        lz_a = auto_limits(vs; chart_type = I_MR, sigma_method = :mr)
+        lz_b = compute_limits_and_zones(vs; sigma_method = :mr)
+        @test lz_a.cl == lz_b.cl
+        @test lz_a.sigma == lz_b.sigma
+        @test lz_a.ucl == lz_b.ucl
+
+        # limits_mode :manual with all set still resolves (PR1 falls through to auto until PR5)
+        ch_m = ChartSpec(data = WorkbenchData(values = vs, cl = 3.0, sigma = 1.0),
+            limits_mode = :manual, manual_cl = 10.0, manual_ucl = 13.0, manual_lcl = 7.0)
+        ctx_m = resolve_chart_render_context(ch_m)
+        @test ctx_m.lz.cl == lz_b.cl  # auto path until PR5
+    end
+
+    @testset "pure chart library CRUD + seed_demos" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true)
+        @test m.seed_demos === :triple  # NEVER flip default
+        _ensure_charts!(m)
+        @test length(m.charts) == 3
+        @test m.charts[1].name == "Primary"
+        @test occursin("Secondary", m.charts[2].name)
+        @test m.charts[3].name == "Tertiary"
+        @test all(c -> c.live_enabled === true, m.charts)
+
+        # add
+        n0 = length(m.charts)
+        idx = add_chart!(m; name = "Added")
+        @test idx == n0 + 1
+        @test m.charts[idx].name == "Added"
+        @test isempty(m.charts[idx].data.values)
+        @test m.charts[idx].live_enabled === true
+
+        # rename
+        rename_chart!(m, idx, "Renamed")
+        @test m.charts[idx].name == "Renamed"
+
+        # set_active
+        set_active_chart!(m, idx)
+        @test m.active == idx
+        @test m.data === m.charts[idx].data || m.data.values == m.charts[idx].data.values
+
+        # clone deep-copy
+        src = m.charts[1]
+        src.data.values[1] = 999.0
+        src.usl = 42.0
+        src.enabled_rules["WECO-6"] = true
+        src.param = "thickness"
+        cidx = clone_chart!(m, 1)
+        cloned = m.charts[cidx]
+        @test occursin("(copy)", cloned.name)
+        @test cloned.id != src.id
+        @test cloned.data.values == src.data.values
+        @test cloned.data.values !== src.data.values  # deep copy
+        @test cloned.usl == 42.0
+        @test cloned.enabled_rules["WECO-6"] === true
+        @test cloned.enabled_rules !== src.enabled_rules
+        @test cloned.param == "thickness"
+        cloned.data.values[1] = -1.0
+        @test src.data.values[1] == 999.0  # independent
+
+        # delete refuses last
+        m_one = SPCWorkbenchModel(data = empty_workbench_data(), paused = true, seed_demos = :none)
+        _ensure_charts!(m_one)
+        @test length(m_one.charts) == 1
+        @test delete_chart!(m_one, 1) === false
+        @test length(m_one.charts) == 1
+
+        # delete clamps active + library_selected
+        m_del = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_del)
+        set_active_chart!(m_del, 3)
+        m_del.library_selected = 3
+        @test delete_chart!(m_del, 3) === true
+        @test length(m_del.charts) == 2
+        @test m_del.active == 2
+        @test m_del.library_selected == 2
+
+        # seed :single
+        m_s = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m_s)
+        @test length(m_s.charts) == 1
+        @test m_s.charts[1].name == "Primary"
+        @test !isempty(m_s.charts[1].data.values)
+        @test m_s.charts[1].live_enabled === true
+
+        # seed :none
+        m_n = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        _ensure_charts!(m_n)
+        @test length(m_n.charts) == 1
+        @test isempty(m_n.charts[1].data.values)
+        ctx_n = resolve_chart_render_context(m_n.charts[1])
+        @test ctx_n.cpk === nothing
+        @test m_n.charts[1].live_enabled === true
+
+        # ToolEntry exists on model
+        @test m.tools isa Vector{ToolEntry}
+        @test isempty(m.tools)
+    end
 end
 
 # ═══════════════════════════════════════════════════════════════════════
