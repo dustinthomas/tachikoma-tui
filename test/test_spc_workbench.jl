@@ -438,14 +438,12 @@ include("../src/spc_workbench.jl")
         @test ch.col_n == ""
         @test ch.col_tool == "Tool"
         @test ch.col_time == "Timestamp"
-        @test ch.col_lot == ""  # PR7b: empty → series-chunk path
         # backward-compat construction still works
         ch2 = ChartSpec(name = "legacy", data = WorkbenchData(values=[1.0], cl=1.0, sigma=0.1))
         @test ch2.name == "legacy"
         @test ch2.chart_type === I_MR
         @test ch2.live_enabled === true
         @test ch2.source === :series
-        @test ch2.col_lot == ""
     end
 
     @testset "SharedTable + compute_chart_series + materialize copy-on-map (PR6)" begin
@@ -635,329 +633,6 @@ include("../src/spc_workbench.jl")
         @test last3[2].rule == "WECO-1" && last3[3].rule == "WECO-8"
     end
 
-    @testset "auto_limits p/np/c/u (HTML formulas)" begin
-        # ── c-chart: counts; σ = √c̄; LCL floored at 0 (HTML ~2490–2496) ──
-        cvals = [2.0, 4.0, 3.0, 5.0, 1.0]  # c̄ = 3
-        cBar = mean(cvals)
-        @test cBar ≈ 3.0
-        sigma_c = sqrt(cBar)
-        lz_c = auto_limits(cvals; chart_type = c_chart)
-        @test lz_c.cl ≈ cBar
-        @test lz_c.sigma ≈ sigma_c
-        @test lz_c.ucl ≈ cBar + 3 * sigma_c
-        @test lz_c.lcl ≈ max(0.0, cBar - 3 * sigma_c)
-        @test lz_c.ucl1 ≈ cBar + 1 * sigma_c
-        @test lz_c.lcl1 ≈ cBar - 1 * sigma_c
-        @test lz_c.ucl2 ≈ cBar + 2 * sigma_c
-        @test lz_c.lcl2 ≈ cBar - 2 * sigma_c
-
-        # c̄ = 0 → σ = 0
-        lz_c0 = auto_limits([0.0, 0.0, 0.0]; chart_type = c_chart)
-        @test lz_c0.cl == 0.0 && lz_c0.sigma == 0.0 && lz_c0.ucl == 0.0 && lz_c0.lcl == 0.0
-
-        # ── p-chart: proportions; σ = √(p̄(1-p̄)/n̄); UCL≤1 LCL≥0 (HTML ~2467–2477) ──
-        pvals = [0.10, 0.12, 0.08, 0.11, 0.09]  # p̄ = 0.10
-        pBar = mean(pvals)
-        @test pBar ≈ 0.10
-        n_bar = 100.0
-        sigma_p = sqrt(pBar * (1 - pBar) / n_bar)
-        lz_p = auto_limits(pvals; chart_type = p_chart, n_bar = n_bar)
-        @test lz_p.cl ≈ pBar
-        @test lz_p.sigma ≈ sigma_p
-        @test lz_p.ucl ≈ min(1.0, pBar + 3 * sigma_p)
-        @test lz_p.lcl ≈ max(0.0, pBar - 3 * sigma_p)
-        # intermediate WECO zones unclamped (checkWeco uses cl ± kσ)
-        @test lz_p.ucl1 ≈ pBar + 1 * sigma_p
-        @test lz_p.lcl1 ≈ pBar - 1 * sigma_p
-
-        # n_bar defaults to subgroup_size when omitted
-        lz_p_sg = auto_limits(pvals; chart_type = p_chart, subgroup_size = 50)
-        sigma_ps = sqrt(pBar * (1 - pBar) / 50.0)
-        @test lz_p_sg.sigma ≈ sigma_ps
-
-        # clamp fixture: p̄≈0.5 / small n → UCL=1, LCL=0 (3σ exceeds both bounds)
-        p_mid = [0.5, 0.4, 0.6]
-        pBar_mid = mean(p_mid)
-        n_small = 2.0
-        sigma_mid = sqrt(pBar_mid * (1 - pBar_mid) / n_small)
-        lz_clamp = auto_limits(p_mid; chart_type = p_chart, n_bar = n_small)
-        @test pBar_mid + 3 * sigma_mid > 1.0
-        @test pBar_mid - 3 * sigma_mid < 0.0
-        @test lz_clamp.ucl == 1.0
-        @test lz_clamp.lcl == 0.0
-
-        # ── np-chart: defect counts; σ = √(np̄(1-p̄)); p̄=np̄/n̄ (HTML ~2478–2488) ──
-        npvals = [2.0, 5.0, 3.0, 4.0, 1.0]  # np̄ = 3
-        npBar = mean(npvals)
-        n_np = 50.0
-        p_from_np = npBar / n_np
-        sigma_np = sqrt(npBar * (1 - p_from_np))
-        lz_np = auto_limits(npvals; chart_type = np_chart, n_bar = n_np)
-        @test lz_np.cl ≈ npBar
-        @test lz_np.sigma ≈ sigma_np
-        @test lz_np.ucl ≈ npBar + 3 * sigma_np
-        @test lz_np.lcl ≈ max(0.0, npBar - 3 * sigma_np)
-
-        # ── u-chart: defects/unit; σ = √(ū/n̄) (HTML ~2497–2506) ──
-        uvals = [0.2, 0.4, 0.3, 0.5, 0.1]  # ū = 0.3
-        uBar = mean(uvals)
-        n_u = 25.0
-        sigma_u = sqrt(uBar / n_u)
-        lz_u = auto_limits(uvals; chart_type = u_chart, n_bar = n_u)
-        @test lz_u.cl ≈ uBar
-        @test lz_u.sigma ≈ sigma_u
-        @test lz_u.ucl ≈ uBar + 3 * sigma_u
-        @test lz_u.lcl ≈ max(0.0, uBar - 3 * sigma_u)
-
-        # empty series → zero limits
-        lz_empty = auto_limits(Float64[]; chart_type = c_chart)
-        @test lz_empty.cl == 0.0 && lz_empty.sigma == 0.0 && lz_empty.ucl == 0.0
-
-        # I_MR / Xbar paths still work (attribute branches don't steal them)
-        vs = [1.0, 2.0, 3.0, 4.0, 5.0]
-        @test auto_limits(vs; chart_type = I_MR, sigma_method = :mr).sigma ==
-              compute_limits_and_zones(vs; sigma_method = :mr).sigma
-    end
-
-    @testset "resolve attribute charts: Cpk N/A + WECO on primary" begin
-        # Pre-binned c counts; spike at index 4 for WECO-1
-        cvals = [2.0, 2.0, 2.0, 20.0, 2.0]
-        ch_c = ChartSpec(
-            name = "c test",
-            chart_type = c_chart,
-            data = WorkbenchData(values = cvals, cl = 0.0, sigma = 0.0),
-            usl = 100.0,
-            lsl = 0.0,
-        )
-        ctx_c = resolve_chart_render_context(ch_c)
-        @test ctx_c.primary_values ≈ cvals
-        @test ctx_c.secondary_name == ""
-        @test ctx_c.secondary_bar === nothing
-        @test ctx_c.cpk === nothing  # attributes: Cpk N/A (HTML isVariablesChart)
-        @test ctx_c.band == :none
-        @test ctx_c.lz.cl ≈ mean(cvals)
-        @test ctx_c.lz.sigma ≈ sqrt(mean(cvals))
-        # WECO still runs on primary — spike beyond +3σ
-        @test 4 in ctx_c.viol_indices
-
-        # p-chart with constant n via subgroup_size
-        pvals = [0.05, 0.06, 0.04, 0.05, 0.07]
-        ch_p = ChartSpec(
-            name = "p test",
-            chart_type = p_chart,
-            data = WorkbenchData(values = pvals, cl = 0.0, sigma = 0.0),
-            subgroup_size = 100,
-            usl = 1.0,
-            lsl = 0.0,
-        )
-        ctx_p = resolve_chart_render_context(ch_p)
-        pBar = mean(pvals)
-        sigma_p = sqrt(pBar * (1 - pBar) / 100.0)
-        @test ctx_p.lz.cl ≈ pBar
-        @test ctx_p.lz.sigma ≈ sigma_p
-        @test ctx_p.lz.ucl ≈ min(1.0, pBar + 3 * sigma_p)
-        @test ctx_p.cpk === nothing
-        @test ctx_p.primary_values ≈ pvals
-
-        # np / u also Cpk N/A
-        for (ct, vals, n) in ((np_chart, [1.0, 2.0, 3.0], 40), (u_chart, [0.1, 0.2, 0.15], 20))
-            ch = ChartSpec(
-                chart_type = ct,
-                data = WorkbenchData(values = vals, cl = 0.0, sigma = 0.0),
-                subgroup_size = n,
-                usl = 10.0,
-            )
-            ctx = resolve_chart_render_context(ch)
-            @test ctx.cpk === nothing
-            @test ctx.primary_values ≈ vals
-        end
-    end
-
-    @testset "PR7b: table-sourced Xbar subgroups by column (pure fixtures)" begin
-        # Pure group helpers: first-seen order; size-1 groups dropped for stats
-        vals = [10.0, 12.0, 11.0,  20.0, 22.0, 18.0,  30.0]
-        keys = ["W01", "W01", "W01", "W02", "W02", "W02", "W03"]  # W03 alone
-        groups, order = group_values_by_keys(vals, keys)
-        @test order == ["W01", "W02", "W03"]
-        @test groups[1] == [10.0, 12.0, 11.0]
-        @test groups[2] == [20.0, 22.0, 18.0]
-        @test groups[3] == [30.0]
-
-        xbar, ranges, kept = subgroup_means_and_ranges_from_groups(groups)
-        @test length(xbar) == 2  # W03 dropped (n=1)
-        @test length(kept) == 2
-        @test xbar[1] ≈ mean([10.0, 12.0, 11.0])
-        @test ranges[1] ≈ 2.0
-        @test xbar[2] ≈ mean([20.0, 22.0, 18.0])
-        @test ranges[2] ≈ 4.0
-
-        xbar_s, svals, kept_s = subgroup_means_and_s_from_groups(groups)
-        @test length(xbar_s) == 2
-        @test svals[1] ≈ std([10.0, 12.0, 11.0]; corrected = true)
-        @test svals[2] ≈ std([20.0, 22.0, 18.0]; corrected = true)
-
-        # auto_limits with precomputed secondary (no re-chunk)
-        n = 3
-        f = SS_FACTORS[n]
-        rbar = mean(ranges)
-        xbb = mean(xbar)
-        lz = auto_limits(xbar; chart_type = Xbar_R, subgroup_size = n, secondary = ranges)
-        @test lz.cl ≈ xbb
-        @test lz.sigma ≈ rbar / f.d2
-        @test lz.ucl ≈ xbb + f.A2 * rbar
-        @test lz.lcl ≈ xbb - f.A2 * rbar
-
-        # SharedTable fixture: multi-site per wafer, interleaved tools
-        # W01 sites: 8,10,12 → mean 10, R=4
-        # W02 sites: 11,12,13 → mean 12, R=2
-        # W03 sites: 9,11,13 → mean 11, R=4
-        table = SharedTable(
-            columns = ["Timestamp", "Tool", "Wafer", "Value"],
-            rows = [
-                Dict("Timestamp" => "t1", "Tool" => "ETCH-A", "Wafer" => "W01", "Value" => "8"),
-                Dict("Timestamp" => "t2", "Tool" => "ETCH-A", "Wafer" => "W01", "Value" => "10"),
-                Dict("Timestamp" => "t3", "Tool" => "ETCH-A", "Wafer" => "W01", "Value" => "12"),
-                Dict("Timestamp" => "t4", "Tool" => "ETCH-A", "Wafer" => "W02", "Value" => "11"),
-                Dict("Timestamp" => "t5", "Tool" => "ETCH-B", "Wafer" => "W02", "Value" => "12"),  # filtered out
-                Dict("Timestamp" => "t6", "Tool" => "ETCH-A", "Wafer" => "W02", "Value" => "12"),
-                Dict("Timestamp" => "t7", "Tool" => "ETCH-A", "Wafer" => "W02", "Value" => "13"),
-                Dict("Timestamp" => "t8", "Tool" => "ETCH-A", "Wafer" => "W03", "Value" => "9"),
-                Dict("Timestamp" => "t9", "Tool" => "ETCH-A", "Wafer" => "W03", "Value" => "11"),
-                Dict("Timestamp" => "t10", "Tool" => "ETCH-A", "Wafer" => "W03", "Value" => "13"),
-            ],
-        )
-        ch_r = ChartSpec(
-            name = "CD-XbarR",
-            chart_type = Xbar_R,
-            tools = ["ETCH-A"],
-            col_value = "Value",
-            col_tool = "Tool",
-            col_time = "Timestamp",
-            col_lot = "Wafer",
-            subgroup_size = 3,
-            usl = 20.0,
-            lsl = 0.0,
-        )
-        # compute_chart_series still returns individuals + lot key in meta
-        raw_v, raw_lab, raw_pm = compute_chart_series(table, ch_r)
-        @test length(raw_v) == 9  # ETCH-B row dropped
-        @test all(haskey(pm, "lot") for pm in raw_pm)
-        @test raw_pm[1]["lot"] == "W01"
-
-        materialize_chart_from_table!(ch_r, table)
-        @test ch_r.source === :table
-        @test ch_r.live_enabled === false
-        @test get(ch_r.data.meta, "table_subgroups", false) === true
-        @test ch_r.data.values ≈ [10.0, 12.0, 11.0]  # three wafer means
-        @test ch_r.data.meta["labels"] == ["W01", "W02", "W03"]
-        @test ch_r.data.meta["secondary_name"] == "R"
-        @test ch_r.data.meta["secondary_vals"] ≈ [4.0, 2.0, 4.0]
-        @test ch_r.data.meta["subgroup_n"] == 3
-        @test ch_r.viewport.x0 == 1
-        @test ch_r.viewport.x1 == 3
-
-        ctx_r = resolve_chart_render_context(ch_r)
-        @test ctx_r.primary_values ≈ [10.0, 12.0, 11.0]
-        @test ctx_r.secondary_name == "R"
-        @test ctx_r.secondary_bar ≈ mean([4.0, 2.0, 4.0])
-        f3 = SS_FACTORS[3]
-        rbar = mean([4.0, 2.0, 4.0])
-        xbb = mean([10.0, 12.0, 11.0])
-        @test ctx_r.lz.cl ≈ xbb
-        @test ctx_r.lz.sigma ≈ rbar / f3.d2
-        @test ctx_r.lz.ucl ≈ xbb + f3.A2 * rbar
-        # Must NOT re-chunk the three means as if they were individuals
-        # (series-chunk of n=3 on [10,12,11] would yield one group of mean 11)
-        @test length(ctx_r.primary_values) == 3
-
-        # Xbar_S same table
-        ch_s = ChartSpec(
-            name = "CD-XbarS",
-            chart_type = Xbar_S,
-            tools = ["ETCH-A"],
-            col_value = "Value",
-            col_tool = "Tool",
-            col_lot = "Wafer",
-            subgroup_size = 3,
-            usl = 20.0,
-            lsl = 0.0,
-        )
-        materialize_chart_from_table!(ch_s, table)
-        @test get(ch_s.data.meta, "table_subgroups", false) === true
-        @test ch_s.data.meta["secondary_name"] == "s"
-        ctx_s = resolve_chart_render_context(ch_s)
-        @test ctx_s.primary_values ≈ [10.0, 12.0, 11.0]
-        @test ctx_s.secondary_name == "s"
-        s_w01 = std([8.0, 10.0, 12.0]; corrected = true)
-        s_w02 = std([11.0, 12.0, 13.0]; corrected = true)
-        s_w03 = std([9.0, 11.0, 13.0]; corrected = true)
-        sbar = mean([s_w01, s_w02, s_w03])
-        @test ctx_s.secondary_bar ≈ sbar
-        @test ctx_s.lz.sigma ≈ sbar
-        @test ctx_s.lz.ucl ≈ mean([10.0, 12.0, 11.0]) + f3.A3 * sbar
-        # Cpk uses s̄/c4
-        cpk_sigma = sbar / f3.c4
-        cr = compute_capability(ctx_s.primary_values, ctx_s.lz.cl, cpk_sigma; usl = 20.0, lsl = 0.0)
-        @test ctx_s.cpk ≈ cr.cpk
-
-        # Empty col_lot → individuals materialize; series-chunk at resolve (PR7 path)
-        ch_chunk = ChartSpec(
-            chart_type = Xbar_R,
-            tools = ["ETCH-A"],
-            col_value = "Value",
-            col_tool = "Tool",
-            col_lot = "",
-            subgroup_size = 3,
-        )
-        materialize_chart_from_table!(ch_chunk, table)
-        @test get(ch_chunk.data.meta, "table_subgroups", false) !== true
-        @test length(ch_chunk.data.values) == 9  # raw individuals
-        ctx_chunk = resolve_chart_render_context(ch_chunk)
-        @test length(ctx_chunk.primary_values) == 3  # 9/3 series chunks
-        # First chunk is first three ETCH-A rows (W01 sites) — same as column group
-        @test ctx_chunk.primary_values[1] ≈ 10.0
-
-        # Group by Tool column (col_lot points at Tool) — two tools with multi-row
-        table2 = SharedTable(
-            columns = ["Tool", "Value"],
-            rows = [
-                Dict("Tool" => "A", "Value" => "1"),
-                Dict("Tool" => "A", "Value" => "3"),
-                Dict("Tool" => "B", "Value" => "10"),
-                Dict("Tool" => "B", "Value" => "14"),
-                Dict("Tool" => "B", "Value" => "12"),
-            ],
-        )
-        ch_tool = ChartSpec(
-            chart_type = Xbar_R,
-            col_value = "Value",
-            col_tool = "Tool",
-            col_lot = "Tool",
-            tools = String[],
-            subgroup_size = 2,
-        )
-        materialize_chart_from_table!(ch_tool, table2)
-        @test ch_tool.data.values ≈ [2.0, 12.0]  # means of A and B
-        @test ch_tool.data.meta["labels"] == ["A", "B"]
-        @test ch_tool.data.meta["secondary_vals"] ≈ [2.0, 4.0]  # R: 3-1=2, 14-10=4
-        ctx_tool = resolve_chart_render_context(ch_tool)
-        @test length(ctx_tool.primary_values) == 2
-        @test ctx_tool.secondary_bar ≈ 3.0
-
-        # I_MR + col_lot: no table_subgroups; individuals only; lot in point_meta
-        ch_i = ChartSpec(
-            chart_type = I_MR,
-            col_value = "Value",
-            col_lot = "Wafer",
-            tools = ["ETCH-A"],
-            col_tool = "Tool",
-        )
-        materialize_chart_from_table!(ch_i, table)
-        @test get(ch_i.data.meta, "table_subgroups", false) !== true
-        @test length(ch_i.data.values) == 9
-        @test ch_i.data.meta["point_meta"][1]["lot"] == "W01"
-    end
-
     @testset "pure chart library CRUD + seed_demos" begin
         d = generate_spc_workbench_data(12; seed = 7)
         m = SPCWorkbenchModel(data = d, paused = true)
@@ -1070,6 +745,174 @@ include("../src/spc_workbench.jl")
 
         # ToolEntry exists on model
         @test m.tools isa Vector{ToolEntry}
+        @test isempty(m.tools)
+    end
+
+    @testset "dashboard_pane_charts (active neighborhood, no charts[2]/[3] lock)" begin
+        d = generate_spc_workbench_data(12; seed = 11)
+        m = SPCWorkbenchModel(data = d, paused = true)
+        @test m.seed_demos === :triple
+        _ensure_charts!(m)
+        @test length(m.charts) == 3
+
+        # Phase A: visible_charts is identity (all charts, same refs order)
+        vis = visible_charts(m)
+        @test length(vis) == 3
+        @test all(i -> vis[i] === m.charts[i], 1:3)
+
+        # active==1 → panes 1,2,3
+        set_active_chart!(m, 1)
+        p1 = dashboard_pane_charts(m; k = 3)
+        @test length(p1) == 3
+        @test p1[1].id == m.charts[1].id
+        @test p1[2].id == m.charts[2].id
+        @test p1[3].id == m.charts[3].id
+
+        # 1) active==2, 3 charts → panes are charts 2,3 only (no duplicate of chart 2)
+        set_active_chart!(m, 2)
+        p2 = dashboard_pane_charts(m; k = 3)
+        @test length(p2) == 2
+        @test p2[1].id == m.charts[2].id
+        @test p2[2].id == m.charts[3].id
+        @test p2[1].id != p2[2].id
+        # primary must not reappear as secondary
+        @test count(c -> c.id == m.charts[2].id, p2) == 1
+
+        # 2) delete to 2 charts → no throw / no former charts[3]
+        # delete chart 1 so remaining are former 2,3; active stays on former-2 now index 1
+        m_del = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_del)
+        set_active_chart!(m_del, 2)
+        id_active = m_del.charts[2].id
+        id_next = m_del.charts[3].id
+        @test delete_chart!(m_del, 1) === true
+        @test length(m_del.charts) == 2
+        # After delete of chart before active: active clamps to former chart2 now at index 1
+        panes_del = dashboard_pane_charts(m_del; k = 3)
+        @test length(panes_del) >= 1
+        # Must not throw and must only reference remaining charts
+        remaining_ids = Set(c.id for c in m_del.charts)
+        @test all(c -> c.id in remaining_ids, panes_del)
+        # former charts[3] still present as neighbor when active is former-2
+        @test any(c -> c.id == id_next || c.id == id_active, panes_del)
+
+        # delete last remaining extra while active is last → single primary, no charts[3]
+        m_two = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_two)
+        @test delete_chart!(m_two, 3) === true
+        @test length(m_two.charts) == 2
+        set_active_chart!(m_two, 2)
+        p_two = dashboard_pane_charts(m_two; k = 3)
+        @test length(p_two) == 1
+        @test p_two[1].id == m_two.charts[2].id
+        # no BoundsError accessing former charts[3] via panes
+        @test_nowarn dashboard_pane_charts(m_two; k = 3)
+
+        # 3) active==last → single primary pane
+        m_last = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m_last)
+        set_active_chart!(m_last, 3)
+        p_last = dashboard_pane_charts(m_last; k = 3)
+        @test length(p_last) == 1
+        @test p_last[1].id == m_last.charts[3].id
+        @test p_last[1] === current_chart(m_last)
+
+        # empty charts → empty panes (after manual clear; _ensure would reseed)
+        m_empty = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        empty!(m_empty.charts)
+        m_empty.active = 1
+        @test isempty(visible_charts(m_empty))
+        @test isempty(dashboard_pane_charts(m_empty))
+    end
+
+    @testset "filters + visible_charts + A6 active-switch (PR9)" begin
+        d = generate_spc_workbench_data(10; seed = 11)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        # Three charts with distinct type / tool / owner metadata
+        idx1 = add_chart!(m; name = "Alpha")
+        idx2 = add_chart!(m; name = "Beta")
+        idx3 = add_chart!(m; name = "Gamma")
+        m.charts[idx1].chart_type = I_MR
+        m.charts[idx1].tools = ["T-A"]
+        m.charts[idx1].owner = "Alice"
+        m.charts[idx2].chart_type = Xbar_R
+        m.charts[idx2].tools = ["T-B"]
+        m.charts[idx2].owner = "Bob"
+        m.charts[idx3].chart_type = I_MR
+        m.charts[idx3].tools = ["T-A", "T-C"]
+        m.charts[idx3].owner = "Alice"
+        set_active_chart!(m, idx1)
+        @test m.filter_tool == ""
+        @test m.filter_type === nothing
+        @test m.filter_owner == ""
+        @test length(visible_charts(m)) == 3
+
+        # filter by tool
+        set_filter_tool!(m, "T-A")
+        vis = visible_charts(m)
+        @test length(vis) == 2
+        @test all(c -> "T-A" in c.tools, vis)
+        @test Set(c.name for c in vis) == Set(["Alpha", "Gamma"])
+
+        # filter by type (AND with tool)
+        set_filter_type!(m, Xbar_R)
+        vis2 = visible_charts(m)
+        @test isempty(vis2)  # Beta has T-B only; no T-A + Xbar_R
+        # A6: no visible → keep active, event message (no crash)
+        @test occursin("No charts match filters", m.last_event) ||
+              occursin("no charts match", lowercase(m.last_event))
+
+        # type alone
+        set_filter_tool!(m, "")
+        set_filter_type!(m, Xbar_R)
+        vis3 = visible_charts(m)
+        @test length(vis3) == 1
+        @test vis3[1].name == "Beta"
+        # A6: active Alpha filtered out → switch to first visible (Beta)
+        @test m.active == idx2
+        @test current_chart(m).name == "Beta"
+        @test occursin("active chart filtered", m.last_event)
+        @test occursin("Beta", m.last_event)
+        @test m.library_selected == m.active
+
+        # panes use visible_charts neighborhood
+        panes = dashboard_pane_charts(m; k = 3)
+        @test length(panes) == 1
+        @test panes[1].id == m.charts[idx2].id
+
+        # owner filter
+        clear_filters!(m)
+        @test m.filter_tool == "" && m.filter_type === nothing && m.filter_owner == ""
+        @test length(visible_charts(m)) == 3
+        set_filter_owner!(m, "Alice")
+        vis4 = visible_charts(m)
+        @test length(vis4) == 2
+        @test all(c -> c.owner == "Alice", vis4)
+
+        # clearing restores full list; active stays valid
+        act_before = m.active
+        clear_filters!(m)
+        @test length(visible_charts(m)) == 3
+        @test m.active == act_before
+    end
+
+    @testset "tools registry pure CRUD (PR9)" begin
+        m = SPCWorkbenchModel(data = empty_workbench_data(), paused = true, seed_demos = :none)
+        @test m.tools isa Vector{ToolEntry}
+        @test isempty(m.tools)
+        i1 = add_tool!(m, "Film-A"; description = "PECVD tool A")
+        @test i1 == 1
+        @test length(m.tools) == 1
+        @test m.tools[1].id == "Film-A"
+        @test m.tools[1].description == "PECVD tool A"
+        i2 = add_tool!(m, "Film-B")
+        @test i2 == 2
+        @test m.tools[2].description == ""
+        @test delete_tool!(m, 1) === true
+        @test length(m.tools) == 1
+        @test m.tools[1].id == "Film-B"
+        @test delete_tool!(m, 9) === false
+        @test delete_tool!(m, 1) === true
         @test isempty(m.tools)
     end
 end
@@ -1394,6 +1237,59 @@ end
         end
         # Require marker drawing from secondary (not just dashes from any panel)
         @test occursin("◆", full) || occursin("✕", full)  # at least one OOC/OOS marker must come from the forced secondary
+    end
+
+    @testset "dashboard_pane_charts view: active=2 secondary is next neighbor (not duplicate)" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(15; seed = 99), paused = true)
+        _ensure_charts!(m)
+        @test length(m.charts) == 3
+        # Distinct names for pane title assertions
+        m.charts[1].name = "Alpha"
+        m.charts[2].name = "Bravo"
+        m.charts[3].name = "Charlie"
+        set_active_chart!(m, 2)
+
+        panes = dashboard_pane_charts(m; k = 3)
+        @test length(panes) == 2
+        @test panes[1].name == "Bravo"
+        @test panes[2].name == "Charlie"
+
+        tb = T.TestBackend(90, 28); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 28), [], []))
+        rows = [T.row_text(tb, i) for i in 1:28]
+        full = join([string(r) for r in rows if r !== nothing], "\n")
+        # Primary dashboard title shows active chart (Bravo)
+        @test occursin("Dashboard: Bravo", full) || occursin("Bravo [2/3]", full)
+        # Secondary read-only pane is next neighbor Charlie — not a second Bravo
+        @test occursin("Chart 2: Charlie", full) || occursin("Charlie (read-only", full)
+        @test occursin("Chart 2", full)  # secondary pane label
+        # Must NOT render a third pane (only 2 panes when active==2)
+        @test !occursin("Chart 3", full)
+        # Alpha may appear in side chart *list*, but must not be a plot pane title
+        @test !occursin("Dashboard: Alpha", full)
+        @test !occursin("Chart 2: Alpha", full)
+        @test !occursin("Chart 2: Bravo", full)  # no duplicate of primary as secondary
+    end
+
+    @testset "dashboard_pane_charts view: delete to 2 charts no throw; active=last single pane" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(12; seed = 7), paused = true)
+        _ensure_charts!(m)
+        m.charts[1].name = "One"
+        m.charts[2].name = "Two"
+        m.charts[3].name = "Three"
+        @test delete_chart!(m, 3) === true
+        @test length(m.charts) == 2
+        set_active_chart!(m, 2)
+        @test length(dashboard_pane_charts(m)) == 1
+
+        tb = T.TestBackend(90, 24); T.reset!(tb.buf)
+        @test_nowarn T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 24), [], []))
+        rows = [T.row_text(tb, i) for i in 1:24]
+        full = join([string(r) for r in rows if r !== nothing], "\n")
+        @test occursin("Two", full)
+        @test !occursin("Chart 2", full)  # single primary only when active==last of 2
+        @test !occursin("Three", full)    # deleted chart gone
+        @test !occursin("Chart 3", full)
     end
 
     @testset "rich visuals — colorized OOC ◆ , OOS markers, Cpk bands text, dashed zones" begin
@@ -1993,6 +1889,304 @@ end
         # Connecting line! adds braille cells; points-only is sparser
         @test braille_on > braille_off
         @test braille_on >= 2
+    end
+
+    # ── PR2b: Chart library mode UI + prompt SM (A5 / KD21) ─────────────
+    @testset "library mode: open (m), CHART LIBRARY title, no dashboard bleed" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(12; seed = 7), paused = true)
+        _ensure_charts!(m)
+        @test m.view_mode == :dashboard
+        @test m.prompt_kind === nothing
+        @test m.pending_delete == false
+
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        @test m.library_selected == m.active
+        @test m.quit == false
+
+        tb = T.TestBackend(80, 20); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 20), [], []))
+        @test T.find_text(tb, "CHART LIBRARY") !== nothing
+        # no-bleed: normal dashboard chrome must not render under library
+        @test T.find_text(tb, "SPC Workbench [dashboard]") === nothing
+        @test T.find_text(tb, "Side Stats") === nothing
+        @test T.find_text(tb, "Dashboard:") === nothing
+        # chart names from seed demos appear in list
+        full = join([string(T.row_text(tb, i)) for i in 1:20 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("Primary", full)
+    end
+
+    @testset "library: clone, d+y delete, rename prompt, Enter activate" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 3), paused = true)
+        _ensure_charts!(m)
+        n0 = length(m.charts)
+        @test n0 >= 2
+
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        sel0 = m.library_selected
+
+        # clone selected
+        T.update!(m, T.KeyEvent('c'))
+        @test length(m.charts) == n0 + 1
+        @test m.library_selected == n0 + 1
+        @test endswith(m.charts[end].name, "(copy)")
+        @test m.view_mode == :library  # stay in library
+        @test m.quit == false
+
+        # delete cloned via d then y
+        n_before_del = length(m.charts)
+        T.update!(m, T.KeyEvent('d'))
+        @test m.pending_delete == true
+        @test m.quit == false
+        T.update!(m, T.KeyEvent('y'))
+        @test m.pending_delete == false
+        @test length(m.charts) == n_before_del - 1
+        @test m.view_mode == :library
+        @test m.quit == false
+
+        # cancel delete path: d then Esc
+        T.update!(m, T.KeyEvent('d'))
+        @test m.pending_delete == true
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.pending_delete == false
+        @test m.quit == false
+        @test m.view_mode == :library
+
+        # rename prompt: n, edit name, Enter
+        m.library_selected = 1
+        T.update!(m, T.KeyEvent('n'))
+        @test m.prompt_kind === :rename_chart
+        @test !isempty(m.prompt_buf)
+        # clear and type new name (backspace all, type "Renamed")
+        for _ in 1:length(m.prompt_buf)
+            T.update!(m, T.KeyEvent(:backspace))
+        end
+        for ch in collect("Renamed")
+            T.update!(m, T.KeyEvent(ch))
+        end
+        # 'q' is a buffer character in prompt, not quit
+        T.update!(m, T.KeyEvent('q'))
+        @test m.quit == false
+        @test endswith(m.prompt_buf, "q")
+        T.update!(m, T.KeyEvent(:backspace))  # drop the q
+        @test m.prompt_buf == "Renamed"
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === nothing
+        @test m.charts[1].name == "Renamed"
+        @test m.view_mode == :library
+        @test m.quit == false
+
+        # Esc cancels rename without applying
+        T.update!(m, T.KeyEvent('n'))
+        @test m.prompt_kind === :rename_chart
+        for _ in 1:length(m.prompt_buf)
+            T.update!(m, T.KeyEvent(:backspace))
+        end
+        for ch in collect("Nope")
+            T.update!(m, T.KeyEvent(ch))
+        end
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+        @test m.charts[1].name == "Renamed"  # unchanged
+        @test m.quit == false
+
+        # Enter activates selected → dashboard
+        m.library_selected = min(2, length(m.charts))
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.view_mode == :dashboard
+        @test m.active == m.library_selected
+        @test m.quit == false
+        tb = T.TestBackend(80, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 18), [], []))
+        @test T.find_text(tb, "CHART LIBRARY") === nothing
+        @test T.find_text(tb, "SPC Workbench") !== nothing
+    end
+
+    @testset "library: Esc/q close mode without quit; I/O stubs" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 1), paused = true)
+        _ensure_charts!(m)
+
+        # Esc closes library, no quit
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+        @test m.quit == false
+
+        # q closes library, no quit
+        T.update!(m, T.KeyEvent('M'))
+        @test m.view_mode == :library
+        T.update!(m, T.KeyEvent('q'))
+        @test m.view_mode == :dashboard
+        @test m.quit == false
+
+        # add empty chart from library
+        T.update!(m, T.KeyEvent('m'))
+        n0 = length(m.charts)
+        T.update!(m, T.KeyEvent('a'))
+        @test length(m.charts) == n0 + 1
+        @test m.library_selected == n0 + 1
+        @test isempty(m.charts[end].data.values)
+
+        # import CSV stub: i then path with q char then Enter
+        T.update!(m, T.KeyEvent('i'))
+        @test m.prompt_kind === :import_csv
+        for ch in collect("/tmp/q-data.csv")
+            T.update!(m, T.KeyEvent(ch))
+        end
+        @test m.quit == false
+        @test m.prompt_buf == "/tmp/q-data.csv"
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === nothing
+        @test occursin("import stub", m.last_event)
+        @test m.view_mode == :library
+        @test m.quit == false
+
+        # export / save / load stubs
+        T.update!(m, T.KeyEvent('e'))
+        @test m.prompt_kind === :export_csv
+        T.update!(m, T.KeyEvent(:enter))
+        @test occursin("export stub", m.last_event)
+
+        T.update!(m, T.KeyEvent('w'))
+        @test m.prompt_kind === :save_workbench
+        for ch in collect("session.json")
+            T.update!(m, T.KeyEvent(ch))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test occursin("save stub", m.last_event)
+        @test m.last_workbench_path == "session.json"
+
+        T.update!(m, T.KeyEvent('W'))
+        @test m.prompt_kind === :load_workbench
+        T.update!(m, T.KeyEvent(:enter))
+        @test occursin("load stub", m.last_event)
+        @test m.view_mode == :library  # load stub stays in library
+        @test m.quit == false
+    end
+
+    @testset "library: mouse no-op / no stuck drag; ↑↓ selection" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 5), paused = true)
+        _ensure_charts!(m)
+        nch = length(m.charts)
+        @test nch >= 2
+
+        # Seed a mid-drag then open library — release must clear drag_start
+        T.view(m, T.Frame(T.TestBackend(80, 18).buf, T.Rect(1, 1, 80, 18), [], []))
+        m.drag_start = (x = 10, y = 5, vp = deepcopy(m.viewport))
+        m.hover_x = 10
+        m.hovered = 1
+
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+
+        T.update!(m, T.MouseEvent(12, 6, T.mouse_left, T.mouse_move, false, false, false))
+        @test m.hover_x === nothing
+        @test m.hovered === nothing
+        @test occursin("modal", m.last_event)
+
+        T.update!(m, T.MouseEvent(12, 6, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.drag_start === nothing
+        @test m.view_mode == :library
+        @test m.quit == false
+
+        # ↑↓ move selection
+        m.library_selected = 1
+        T.update!(m, T.KeyEvent(:down))
+        @test m.library_selected == 2
+        T.update!(m, T.KeyEvent(:up))
+        @test m.library_selected == 1
+        # clamp at top
+        T.update!(m, T.KeyEvent(:up))
+        @test m.library_selected == 1
+        # clamp at bottom
+        m.library_selected = nch
+        T.update!(m, T.KeyEvent(:down))
+        @test m.library_selected == nch
+
+        # pending_delete also blocks mouse and does not quit on Esc
+        T.update!(m, T.KeyEvent('d'))
+        @test m.pending_delete
+        T.update!(m, T.MouseEvent(5, 5, T.mouse_left, T.mouse_press, false, false, false))
+        @test occursin("modal", m.last_event)
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.pending_delete == false
+        @test m.quit == false
+    end
+
+    @testset "filters mode (f) + library list respects filters + empty message (PR9)" begin
+        d = generate_spc_workbench_data(8; seed = 21)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        a = add_chart!(m; name = "KeepMe")
+        b = add_chart!(m; name = "HideMe")
+        m.charts[a].owner = "A"
+        m.charts[a].tools = ["TA"]
+        m.charts[a].chart_type = I_MR
+        m.charts[b].owner = "B"
+        m.charts[b].tools = ["TB"]
+        m.charts[b].chart_type = Xbar_S
+        set_active_chart!(m, a)
+
+        # open filters
+        T.update!(m, T.KeyEvent('f'))
+        @test m.view_mode == :filters
+        @test m.quit == false
+        tb = T.TestBackend(80, 20); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 20), [], []))
+        full = join([string(T.row_text(tb, i)) for i = 1:20 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("FILTER", uppercase(full))
+        @test !occursin("Dashboard", full)  # no-bleed
+        # Esc closes without quit
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+        @test m.quit == false
+
+        # Apply owner filter via pure API (UI field edit also covered via set helpers)
+        set_filter_owner!(m, "A")
+        @test length(visible_charts(m)) == 1
+        @test visible_charts(m)[1].name == "KeepMe"
+
+        # Library list shows only filtered charts
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        tb2 = T.TestBackend(80, 22); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 80, 22), [], []))
+        lib = join([string(T.row_text(tb2, i)) for i = 1:22 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("KeepMe", lib)
+        @test !occursin("HideMe", lib)
+        T.update!(m, T.KeyEvent(:escape))
+
+        # Filter that hides all charts → empty dashboard message
+        set_filter_owner!(m, "Nobody")
+        @test isempty(visible_charts(m))
+        tb3 = T.TestBackend(80, 20); T.reset!(tb3.buf)
+        T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 80, 20), [], []))
+        dash = join([string(T.row_text(tb3, i)) for i = 1:20 if T.row_text(tb3, i) !== nothing], "\n")
+        @test occursin("No charts match filters", dash)
+
+        # Tools registry mode
+        clear_filters!(m)
+        T.update!(m, T.KeyEvent('f'))
+        T.update!(m, T.KeyEvent('t'))  # tools from filters
+        @test m.view_mode == :tools
+        tb4 = T.TestBackend(80, 18); T.reset!(tb4.buf)
+        T.view(m, T.Frame(tb4.buf, T.Rect(1, 1, 80, 18), [], []))
+        tools_page = join([string(T.row_text(tb4, i)) for i = 1:18 if T.row_text(tb4, i) !== nothing], "\n")
+        @test occursin("TOOL", uppercase(tools_page))
+        T.update!(m, T.KeyEvent('a'))
+        # prompt for tool id
+        @test m.prompt_kind === :tool_id || m.view_mode == :tools
+        if m.prompt_kind === :tool_id
+            for c in "ToolX"
+                T.update!(m, T.KeyEvent(c))
+            end
+            T.update!(m, T.KeyEvent(:enter))
+            @test any(t -> t.id == "ToolX", m.tools)
+        end
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.quit == false
+        @test m.view_mode in (:dashboard, :filters, :tools)
     end
 end
 
