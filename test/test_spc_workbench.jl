@@ -627,6 +627,144 @@ include("../src/spc_workbench.jl")
         @test ctx_i.secondary_bar === nothing
     end
 
+    @testset "auto_limits p/np/c/u (HTML formulas)" begin
+        # ── c-chart: counts; σ = √c̄; LCL floored at 0 (HTML ~2490–2496) ──
+        cvals = [2.0, 4.0, 3.0, 5.0, 1.0]  # c̄ = 3
+        cBar = mean(cvals)
+        @test cBar ≈ 3.0
+        sigma_c = sqrt(cBar)
+        lz_c = auto_limits(cvals; chart_type = c_chart)
+        @test lz_c.cl ≈ cBar
+        @test lz_c.sigma ≈ sigma_c
+        @test lz_c.ucl ≈ cBar + 3 * sigma_c
+        @test lz_c.lcl ≈ max(0.0, cBar - 3 * sigma_c)
+        @test lz_c.ucl1 ≈ cBar + 1 * sigma_c
+        @test lz_c.lcl1 ≈ cBar - 1 * sigma_c
+        @test lz_c.ucl2 ≈ cBar + 2 * sigma_c
+        @test lz_c.lcl2 ≈ cBar - 2 * sigma_c
+
+        # c̄ = 0 → σ = 0
+        lz_c0 = auto_limits([0.0, 0.0, 0.0]; chart_type = c_chart)
+        @test lz_c0.cl == 0.0 && lz_c0.sigma == 0.0 && lz_c0.ucl == 0.0 && lz_c0.lcl == 0.0
+
+        # ── p-chart: proportions; σ = √(p̄(1-p̄)/n̄); UCL≤1 LCL≥0 (HTML ~2467–2477) ──
+        pvals = [0.10, 0.12, 0.08, 0.11, 0.09]  # p̄ = 0.10
+        pBar = mean(pvals)
+        @test pBar ≈ 0.10
+        n_bar = 100.0
+        sigma_p = sqrt(pBar * (1 - pBar) / n_bar)
+        lz_p = auto_limits(pvals; chart_type = p_chart, n_bar = n_bar)
+        @test lz_p.cl ≈ pBar
+        @test lz_p.sigma ≈ sigma_p
+        @test lz_p.ucl ≈ min(1.0, pBar + 3 * sigma_p)
+        @test lz_p.lcl ≈ max(0.0, pBar - 3 * sigma_p)
+        # intermediate WECO zones unclamped (checkWeco uses cl ± kσ)
+        @test lz_p.ucl1 ≈ pBar + 1 * sigma_p
+        @test lz_p.lcl1 ≈ pBar - 1 * sigma_p
+
+        # n_bar defaults to subgroup_size when omitted
+        lz_p_sg = auto_limits(pvals; chart_type = p_chart, subgroup_size = 50)
+        sigma_ps = sqrt(pBar * (1 - pBar) / 50.0)
+        @test lz_p_sg.sigma ≈ sigma_ps
+
+        # clamp fixture: p̄≈0.5 / small n → UCL=1, LCL=0 (3σ exceeds both bounds)
+        p_mid = [0.5, 0.4, 0.6]
+        pBar_mid = mean(p_mid)
+        n_small = 2.0
+        sigma_mid = sqrt(pBar_mid * (1 - pBar_mid) / n_small)
+        lz_clamp = auto_limits(p_mid; chart_type = p_chart, n_bar = n_small)
+        @test pBar_mid + 3 * sigma_mid > 1.0
+        @test pBar_mid - 3 * sigma_mid < 0.0
+        @test lz_clamp.ucl == 1.0
+        @test lz_clamp.lcl == 0.0
+
+        # ── np-chart: defect counts; σ = √(np̄(1-p̄)); p̄=np̄/n̄ (HTML ~2478–2488) ──
+        npvals = [2.0, 5.0, 3.0, 4.0, 1.0]  # np̄ = 3
+        npBar = mean(npvals)
+        n_np = 50.0
+        p_from_np = npBar / n_np
+        sigma_np = sqrt(npBar * (1 - p_from_np))
+        lz_np = auto_limits(npvals; chart_type = np_chart, n_bar = n_np)
+        @test lz_np.cl ≈ npBar
+        @test lz_np.sigma ≈ sigma_np
+        @test lz_np.ucl ≈ npBar + 3 * sigma_np
+        @test lz_np.lcl ≈ max(0.0, npBar - 3 * sigma_np)
+
+        # ── u-chart: defects/unit; σ = √(ū/n̄) (HTML ~2497–2506) ──
+        uvals = [0.2, 0.4, 0.3, 0.5, 0.1]  # ū = 0.3
+        uBar = mean(uvals)
+        n_u = 25.0
+        sigma_u = sqrt(uBar / n_u)
+        lz_u = auto_limits(uvals; chart_type = u_chart, n_bar = n_u)
+        @test lz_u.cl ≈ uBar
+        @test lz_u.sigma ≈ sigma_u
+        @test lz_u.ucl ≈ uBar + 3 * sigma_u
+        @test lz_u.lcl ≈ max(0.0, uBar - 3 * sigma_u)
+
+        # empty series → zero limits
+        lz_empty = auto_limits(Float64[]; chart_type = c_chart)
+        @test lz_empty.cl == 0.0 && lz_empty.sigma == 0.0 && lz_empty.ucl == 0.0
+
+        # I_MR / Xbar paths still work (attribute branches don't steal them)
+        vs = [1.0, 2.0, 3.0, 4.0, 5.0]
+        @test auto_limits(vs; chart_type = I_MR, sigma_method = :mr).sigma ==
+              compute_limits_and_zones(vs; sigma_method = :mr).sigma
+    end
+
+    @testset "resolve attribute charts: Cpk N/A + WECO on primary" begin
+        # Pre-binned c counts; spike at index 4 for WECO-1
+        cvals = [2.0, 2.0, 2.0, 20.0, 2.0]
+        ch_c = ChartSpec(
+            name = "c test",
+            chart_type = c_chart,
+            data = WorkbenchData(values = cvals, cl = 0.0, sigma = 0.0),
+            usl = 100.0,
+            lsl = 0.0,
+        )
+        ctx_c = resolve_chart_render_context(ch_c)
+        @test ctx_c.primary_values ≈ cvals
+        @test ctx_c.secondary_name == ""
+        @test ctx_c.secondary_bar === nothing
+        @test ctx_c.cpk === nothing  # attributes: Cpk N/A (HTML isVariablesChart)
+        @test ctx_c.band == :none
+        @test ctx_c.lz.cl ≈ mean(cvals)
+        @test ctx_c.lz.sigma ≈ sqrt(mean(cvals))
+        # WECO still runs on primary — spike beyond +3σ
+        @test 4 in ctx_c.viol_indices
+
+        # p-chart with constant n via subgroup_size
+        pvals = [0.05, 0.06, 0.04, 0.05, 0.07]
+        ch_p = ChartSpec(
+            name = "p test",
+            chart_type = p_chart,
+            data = WorkbenchData(values = pvals, cl = 0.0, sigma = 0.0),
+            subgroup_size = 100,
+            usl = 1.0,
+            lsl = 0.0,
+        )
+        ctx_p = resolve_chart_render_context(ch_p)
+        pBar = mean(pvals)
+        sigma_p = sqrt(pBar * (1 - pBar) / 100.0)
+        @test ctx_p.lz.cl ≈ pBar
+        @test ctx_p.lz.sigma ≈ sigma_p
+        @test ctx_p.lz.ucl ≈ min(1.0, pBar + 3 * sigma_p)
+        @test ctx_p.cpk === nothing
+        @test ctx_p.primary_values ≈ pvals
+
+        # np / u also Cpk N/A
+        for (ct, vals, n) in ((np_chart, [1.0, 2.0, 3.0], 40), (u_chart, [0.1, 0.2, 0.15], 20))
+            ch = ChartSpec(
+                chart_type = ct,
+                data = WorkbenchData(values = vals, cl = 0.0, sigma = 0.0),
+                subgroup_size = n,
+                usl = 10.0,
+            )
+            ctx = resolve_chart_render_context(ch)
+            @test ctx.cpk === nothing
+            @test ctx.primary_values ≈ vals
+        end
+    end
+
     @testset "pure chart library CRUD + seed_demos" begin
         d = generate_spc_workbench_data(12; seed = 7)
         m = SPCWorkbenchModel(data = d, paused = true)

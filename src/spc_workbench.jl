@@ -679,13 +679,34 @@ function _limits_xbar(cl::Float64, process_sigma::Float64, half_width::Float64):
 end
 
 """
+    _limits_attribute(cl, sigma, ucl, lcl) -> LimitsAndZones
+
+Attribute charts: chart UCL/LCL may be clamped (p ∈ [0,1], counts LCL≥0);
+WECO intermediate zones stay at cl ± kσ (HTML checkWeco).
+"""
+function _limits_attribute(cl::Float64, sigma::Float64, ucl::Float64, lcl::Float64)::LimitsAndZones
+    LimitsAndZones(
+        cl, sigma,
+        ucl, lcl,
+        cl + 2 * sigma, cl - 2 * sigma,
+        cl + 1 * sigma, cl - 1 * sigma,
+    )
+end
+
+"""True for p / np / c / u chart types (Cpk N/A; attribute limit formulas)."""
+is_attribute_chart(t::ChartType) = t == p_chart || t == np_chart || t == c_chart || t == u_chart
+
+"""
     auto_limits(values; chart_type=I_MR, subgroup_size=5, sigma_method=:mr,
-                limits_mode=:auto, manual_cl=nothing, manual_ucl=nothing, manual_lcl=nothing)
+                limits_mode=:auto, manual_cl=nothing, manual_ucl=nothing, manual_lcl=nothing,
+                n_bar=nothing)
         -> LimitsAndZones
 
 Type-aware control limits. I_MR uses existing :mr / :std paths.
 Xbar_R / Xbar_S use SS_FACTORS on consecutive series chunks (incomplete tail dropped).
-Attribute p/np/c/u deferred to PR8 (fall back to I_MR).
+Attribute p/np/c/u use HTML autoLimits (~2467–2506). Series path: pre-binned values;
+`n_bar` is mean sample size (defaults to `subgroup_size` when omitted — table col_n mean
+when SharedTable is available later).
 Manual kwargs reserved for PR5 (ignored here — do not rewrite manual branch).
 """
 function auto_limits(
@@ -697,6 +718,7 @@ function auto_limits(
     manual_cl = nothing,
     manual_ucl = nothing,
     manual_lcl = nothing,
+    n_bar::Union{Nothing,Real} = nothing,
 )::LimitsAndZones
     # manual kwargs intentionally unused (PR5 owns manual branch in resolver)
     if chart_type == Xbar_R
@@ -723,8 +745,55 @@ function auto_limits(
         # HTML: out.sigma = sBar; UCL = m + A3*sBar
         half = f.A3 * sbar
         return _limits_xbar(cl, sbar, half)
+    elseif chart_type == p_chart
+        # HTML: pBar, sigma=sqrt(pBar*(1-pBar)/nBar), UCL=min(1,...), LCL=max(0,...)
+        if isempty(values)
+            return _limits_from_cl_sigma(0.0, 0.0)
+        end
+        p_bar = mean(Float64.(values))
+        n_mean = Float64(something(n_bar, subgroup_size))
+        n_mean = n_mean > 0 ? n_mean : 1.0
+        sigma = sqrt(max(0.0, p_bar * (1 - p_bar) / n_mean))
+        ucl = min(1.0, p_bar + 3 * sigma)
+        lcl = max(0.0, p_bar - 3 * sigma)
+        return _limits_attribute(p_bar, sigma, ucl, lcl)
+    elseif chart_type == np_chart
+        # HTML: npBar, pBar=npBar/nBar, sigma=sqrt(npBar*(1-pBar)), LCL=max(0,...)
+        if isempty(values)
+            return _limits_from_cl_sigma(0.0, 0.0)
+        end
+        np_bar = mean(Float64.(values))
+        n_mean = Float64(something(n_bar, subgroup_size))
+        n_mean = n_mean > 0 ? n_mean : 1.0
+        p_bar = np_bar / n_mean
+        sigma = sqrt(max(0.0, np_bar * (1 - p_bar)))
+        ucl = np_bar + 3 * sigma
+        lcl = max(0.0, np_bar - 3 * sigma)
+        return _limits_attribute(np_bar, sigma, ucl, lcl)
+    elseif chart_type == c_chart
+        # HTML: cBar, sigma=sqrt(cBar), LCL=max(0,...)
+        if isempty(values)
+            return _limits_from_cl_sigma(0.0, 0.0)
+        end
+        c_bar = mean(Float64.(values))
+        sigma = sqrt(max(0.0, c_bar))
+        ucl = c_bar + 3 * sigma
+        lcl = max(0.0, c_bar - 3 * sigma)
+        return _limits_attribute(c_bar, sigma, ucl, lcl)
+    elseif chart_type == u_chart
+        # HTML: uBar, sigma=sqrt(uBar/nBar), LCL=max(0,...)
+        if isempty(values)
+            return _limits_from_cl_sigma(0.0, 0.0)
+        end
+        u_bar = mean(Float64.(values))
+        n_mean = Float64(something(n_bar, subgroup_size))
+        n_mean = n_mean > 0 ? n_mean : 1.0
+        sigma = sqrt(max(0.0, u_bar / n_mean))
+        ucl = u_bar + 3 * sigma
+        lcl = max(0.0, u_bar - 3 * sigma)
+        return _limits_attribute(u_bar, sigma, ucl, lcl)
     else
-        # I_MR and (for now) attribute types → existing path
+        # I_MR
         return compute_limits_and_zones(values; sigma_method = sigma_method)
     end
 end
@@ -759,6 +828,7 @@ and secondary (R̄/s̄) side-panel stats.
 
 PR5 fills manual limits (gateway left intact — fall through to auto until then).
 PR7 fills type-aware auto for Xbar_R / Xbar_S (series chunks).
+PR8 fills attribute p/np/c/u limits; Cpk N/A for attributes (WECO still on primary).
 """
 function resolve_chart_render_context(ch::ChartSpec; sigma_method::Symbol = :mr)::ChartRenderContext
     vs = ch.data.values
@@ -776,21 +846,26 @@ function resolve_chart_render_context(ch::ChartSpec; sigma_method::Symbol = :mr)
                          sigma_method = sigma_method)
     end
 
-    # WECO against primary (X̄ for subgroup charts, individuals for I-MR)
+    # WECO against primary (X̄ for subgroup charts; pre-binned series for attributes; individuals for I-MR)
     viols = weco_detect(primary, lz.cl, lz.sigma; enabled_rules = ch.enabled_rules)
     viol_set = Set(v.index for v in viols)
 
-    # Cpk: Xbar-S unbiases s̄ with c4 (HTML ~2388–2392); Xbar-R/I-MR already process σ̂
-    cpk_sigma = if ch.chart_type == Xbar_S && sec_bar !== nothing
-        n = _clamp_subgroup_n(ch.subgroup_size)
-        c4 = SS_FACTORS[n].c4
-        c4 > 0 ? sec_bar / c4 : lz.sigma
+    # Cpk only for variables charts (HTML isVariablesChart); attributes → N/A
+    if is_attribute_chart(ch.chart_type)
+        ChartRenderContext(lz, viol_set, nothing, :none, primary, sec_name, sec_bar)
     else
-        lz.sigma
+        # Cpk: Xbar-S unbiases s̄ with c4 (HTML ~2388–2392); Xbar-R/I-MR already process σ̂
+        cpk_sigma = if ch.chart_type == Xbar_S && sec_bar !== nothing
+            n = _clamp_subgroup_n(ch.subgroup_size)
+            c4 = SS_FACTORS[n].c4
+            c4 > 0 ? sec_bar / c4 : lz.sigma
+        else
+            lz.sigma
+        end
+        cr = compute_capability(primary, lz.cl, cpk_sigma; usl = ch.usl, lsl = ch.lsl)
+        b = cpk_band(cr.cpk)
+        ChartRenderContext(lz, viol_set, cr.cpk, b, primary, sec_name, sec_bar)
     end
-    cr = compute_capability(primary, lz.cl, cpk_sigma; usl = ch.usl, lsl = ch.lsl)
-    b = cpk_band(cr.cpk)
-    ChartRenderContext(lz, viol_set, cr.cpk, b, primary, sec_name, sec_bar)
 end
 
 """
@@ -876,7 +951,7 @@ export weco_detect, compute_limits_and_zones, compute_capability, generate_spc_w
 export detect_oos, cpk_band, cpk_color_for_band
 export compute_fit_y_range, y_extras_from_limits, fit_viewport_y!, auto_fit_viewport_y!
 export ChartRenderContext, resolve_chart_render_context, point_status, auto_limits
-export SS_FACTORS, subgroup_means_and_ranges, subgroup_means_and_s
+export SS_FACTORS, subgroup_means_and_ranges, subgroup_means_and_s, is_attribute_chart
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS
 export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_type, chart_type_to_string
