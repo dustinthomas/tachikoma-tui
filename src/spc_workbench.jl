@@ -1208,8 +1208,6 @@ end
     # Seed policy when charts empty — NEVER flip default from :triple
     seed_demos::Symbol = :triple     # :triple | :single | :none
     tools::Vector{ToolEntry} = ToolEntry[]
-    # Prefill only for save/load prompts — never silent write to default path
-    last_workbench_path::String = ""
     # Phase B (PR6 / KD25): in-memory SharedTable after CSV ingress
     table::SharedTable = SharedTable()
     # Builder form state (keyboard-only modal)
@@ -2235,6 +2233,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
         return
     elseif m.view_mode == :library
         _render_library_page!(buf, area, m)
+        return
     elseif m.view_mode == :builder
         _render_builder_page!(buf, area, m)
         return
@@ -2860,13 +2859,6 @@ function _fmt(x)
     end
     x < 1 ? string(round(x; digits=3)) : string(round(x; digits=2))
 end
-
-    elseif m.view_mode == :library
-        _render_library_page!(buf, area, m)
-    elseif m.view_mode == :builder
-        _render_builder_page!(buf, area, m)
-end
-
 # ── Dedicated Help page (adapted from HTML quickstart + WECO defs + workflow) ──
 function _render_help_page!(buf, area, m)
     # simple full area text page
@@ -2952,6 +2944,63 @@ function _render_keymap_page!(buf, area, m)
 end
 
 # ── Builder page (PR6) — keyboard form; no dashboard chrome ─────────────
+
+# ── Chart Library page (PR2b / A5) ─────────────────────────────────────
+function _render_library_page!(buf, area, m)
+    set_string!(buf, area.x + 1, area.y, "CHART LIBRARY  (Esc/q close → dashboard)", tstyle(:title, bold=true))
+    y = area.y + 2
+    nch = length(m.charts)
+    set_string!(buf, area.x + 2, y,
+        "Charts: $nch   active=$(m.active)   selected=$(m.library_selected)",
+        tstyle(:text_dim))
+    y += 2
+    # List charts
+    for (i, c) in enumerate(m.charts)
+        if y > bottom(area) - 4
+            break
+        end
+        marker = i == m.library_selected ? "▶" : " "
+        act = i == m.active ? "*" : " "
+        nvals = length(c.data.values)
+        live = c.live_enabled ? "live" : "off"
+        line = "$marker$act $i. $(c.name)  [$(c.chart_type)] n=$nvals live=$live"
+        sty = i == m.library_selected ? tstyle(:accent, bold=true) : tstyle(:text)
+        set_string!(buf, area.x + 2, y, line, sty)
+        y += 1
+    end
+    y = min(y + 1, bottom(area) - 3)
+    # Prompt / pending delete status
+    if m.pending_delete
+        nm = m.charts[clamp(m.library_selected, 1, max(1, nch))].name
+        set_string!(buf, area.x + 2, y,
+            "DELETE \"$nm\"?  press y to confirm, any other key cancel",
+            tstyle(:error, bold=true))
+        y += 1
+    elseif m.prompt_kind !== nothing
+        kind_lbl = string(m.prompt_kind)
+        set_string!(buf, area.x + 2, y,
+            "PROMPT [$kind_lbl]: $(m.prompt_buf)_",
+            tstyle(:accent, bold=true))
+        y += 1
+        set_string!(buf, area.x + 2, y,
+            "  Enter=apply  Esc=cancel  (q types into buffer)",
+            tstyle(:text_dim))
+        y += 1
+    end
+    # Footer keys
+    if y <= bottom(area) - 1
+        set_string!(buf, area.x + 2, bottom(area) - 1,
+            "↑↓ select  Enter activate  a add  c clone  d+y delete  n rename  i/e/w/W I/O  Esc/q close",
+            tstyle(:text_dim))
+    end
+    if y <= bottom(area)
+        set_string!(buf, area.x + 2, bottom(area),
+            " last=$(m.last_event)",
+            tstyle(:text_dim))
+    end
+end
+
+
 function _render_builder_page!(buf, area, m)
     _ensure_charts!(m)
     ch = current_chart(m)
