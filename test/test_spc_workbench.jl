@@ -2155,6 +2155,267 @@ end
         @test braille_on > braille_off
         @test braille_on >= 2
     end
+
+    # ── GC-PR2: Chart library mode UI + prompt SM (A5 / KD21) ─────────────
+    @testset "library mode: open (m), CHART LIBRARY title, no dashboard bleed" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(12; seed = 7), paused = true)
+        _ensure_charts!(m)
+        @test m.view_mode == :dashboard
+        @test m.prompt_kind === nothing
+        @test m.pending_delete == false
+
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        @test m.library_selected == m.active
+        @test m.quit == false
+        @test m.last_event == "library open"
+
+        tb = T.TestBackend(80, 20); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 20), [], []))
+        @test T.find_text(tb, "CHART LIBRARY") !== nothing
+        # no-bleed: normal dashboard chrome must not render under library
+        @test T.find_text(tb, "SPC Workbench [dashboard]") === nothing
+        @test T.find_text(tb, "Side Stats") === nothing
+        @test T.find_text(tb, "Dashboard:") === nothing
+        full = join([string(T.row_text(tb, i)) for i in 1:20 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("Primary", full)
+    end
+
+    @testset "library: clone, d+y delete, rename prompt, Enter activate" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 3), paused = true)
+        _ensure_charts!(m)
+        n0 = length(m.charts)
+        @test n0 >= 2
+
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+
+        # clone selected
+        T.update!(m, T.KeyEvent('c'))
+        @test length(m.charts) == n0 + 1
+        @test m.library_selected == n0 + 1
+        @test endswith(m.charts[end].name, "(copy)")
+        @test m.view_mode == :library
+        @test m.quit == false
+
+        # delete cloned via d then y
+        n_before_del = length(m.charts)
+        T.update!(m, T.KeyEvent('d'))
+        @test m.pending_delete == true
+        @test m.quit == false
+        T.update!(m, T.KeyEvent('y'))
+        @test m.pending_delete == false
+        @test length(m.charts) == n_before_del - 1
+        @test m.view_mode == :library
+        @test m.quit == false
+
+        # cancel delete path: d then Esc
+        T.update!(m, T.KeyEvent('d'))
+        @test m.pending_delete == true
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.pending_delete == false
+        @test m.quit == false
+        @test m.view_mode == :library
+
+        # rename prompt: n, edit name, Enter
+        m.library_selected = 1
+        T.update!(m, T.KeyEvent('n'))
+        @test m.prompt_kind === :rename_chart
+        @test !isempty(m.prompt_buf)
+        for _ in 1:length(m.prompt_buf)
+            T.update!(m, T.KeyEvent(:backspace))
+        end
+        for ch in collect("Renamed")
+            T.update!(m, T.KeyEvent(ch))
+        end
+        # 'q' is a buffer character in prompt, not quit
+        T.update!(m, T.KeyEvent('q'))
+        @test m.quit == false
+        @test endswith(m.prompt_buf, "q")
+        T.update!(m, T.KeyEvent(:backspace))
+        @test m.prompt_buf == "Renamed"
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === nothing
+        @test m.charts[1].name == "Renamed"
+        @test m.view_mode == :library
+        @test m.quit == false
+
+        # Esc cancels rename without applying
+        T.update!(m, T.KeyEvent('n'))
+        @test m.prompt_kind === :rename_chart
+        for _ in 1:length(m.prompt_buf)
+            T.update!(m, T.KeyEvent(:backspace))
+        end
+        for ch in collect("Nope")
+            T.update!(m, T.KeyEvent(ch))
+        end
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+        @test m.charts[1].name == "Renamed"
+        @test m.quit == false
+
+        # Enter activates selected → dashboard
+        m.library_selected = min(2, length(m.charts))
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.view_mode == :dashboard
+        @test m.active == m.library_selected
+        @test m.quit == false
+        tb = T.TestBackend(80, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 18), [], []))
+        @test T.find_text(tb, "CHART LIBRARY") === nothing
+        @test T.find_text(tb, "SPC Workbench") !== nothing
+    end
+
+    @testset "library: Esc/q close without quit; I/O keys message-only; add" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 1), paused = true)
+        _ensure_charts!(m)
+
+        # Esc closes library, no quit
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+        @test m.quit == false
+
+        # q closes library, no quit
+        T.update!(m, T.KeyEvent('M'))
+        @test m.view_mode == :library
+        T.update!(m, T.KeyEvent('q'))
+        @test m.view_mode == :dashboard
+        @test m.quit == false
+
+        # add empty chart from library
+        T.update!(m, T.KeyEvent('m'))
+        n0 = length(m.charts)
+        T.update!(m, T.KeyEvent('a'))
+        @test length(m.charts) == n0 + 1
+        @test m.library_selected == n0 + 1
+        @test isempty(m.charts[end].data.values)
+
+        # I/O keys message-only: do NOT set prompt_kind (GC-PR3 wires Enter)
+        for c in ('i', 'e', 'w', 'W')
+            T.update!(m, T.KeyEvent(c))
+            @test m.prompt_kind === nothing
+            @test m.last_event == "I/O keys land in GC-PR3"
+            @test m.view_mode == :library
+            @test m.quit == false
+        end
+    end
+
+    @testset "library: left/right no-op under library/prompt; no dashboard key bleed" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 5), paused = true)
+        _ensure_charts!(m)
+        n = length(m.data.values)
+        m.viewport.x0 = 3
+        m.viewport.x1 = min(n, 8)
+        x0, x1 = m.viewport.x0, m.viewport.x1
+        paused0 = m.paused
+
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+
+        T.update!(m, T.KeyEvent(:left))
+        @test m.viewport.x0 == x0
+        @test m.viewport.x1 == x1
+        @test m.view_mode == :library
+        T.update!(m, T.KeyEvent(:right))
+        @test m.viewport.x0 == x0
+        @test m.viewport.x1 == x1
+
+        # dashboard pause key must not fire in library
+        T.update!(m, T.KeyEvent('p'))
+        @test m.paused == paused0
+        @test m.view_mode == :library
+
+        # prompt swallows left/right and does not quit on q
+        T.update!(m, T.KeyEvent('n'))
+        @test m.prompt_kind === :rename_chart
+        T.update!(m, T.KeyEvent(:left))
+        @test m.viewport.x0 == x0
+        @test m.prompt_kind === :rename_chart
+        T.update!(m, T.KeyEvent(:right))
+        @test m.viewport.x1 == x1
+        @test m.prompt_kind === :rename_chart
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+        @test m.quit == false
+        @test m.view_mode == :library
+    end
+
+    @testset "library: mouse no-op / no stuck drag; ↑↓ selection" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 5), paused = true)
+        _ensure_charts!(m)
+        nch = length(m.charts)
+        @test nch >= 2
+
+        T.view(m, T.Frame(T.TestBackend(80, 18).buf, T.Rect(1, 1, 80, 18), [], []))
+        m.drag_start = (x = 10, y = 5, vp = deepcopy(m.viewport))
+        m.hover_x = 10
+        m.hovered = 1
+
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+
+        T.update!(m, T.MouseEvent(12, 6, T.mouse_left, T.mouse_move, false, false, false))
+        @test m.hover_x === nothing
+        @test m.hovered === nothing
+        @test occursin("modal", m.last_event)
+
+        T.update!(m, T.MouseEvent(12, 6, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.drag_start === nothing
+        @test m.view_mode == :library
+        @test m.quit == false
+
+        m.library_selected = 1
+        T.update!(m, T.KeyEvent(:down))
+        @test m.library_selected == 2
+        T.update!(m, T.KeyEvent(:up))
+        @test m.library_selected == 1
+        T.update!(m, T.KeyEvent(:up))
+        @test m.library_selected == 1
+        m.library_selected = nch
+        T.update!(m, T.KeyEvent(:down))
+        @test m.library_selected == nch
+
+        T.update!(m, T.KeyEvent('d'))
+        @test m.pending_delete
+        T.update!(m, T.MouseEvent(5, 5, T.mouse_left, T.mouse_press, false, false, false))
+        @test occursin("modal", m.last_event)
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.pending_delete == false
+        @test m.quit == false
+    end
+
+    @testset "library: help/keymap mention m/library; live blocked by prompt" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 2), paused = true)
+        _ensure_charts!(m)
+        T.update!(m, T.KeyEvent('h'))
+        tb = T.TestBackend(80, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 24), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("library", lowercase(full)) || occursin("m/M", full)
+        T.update!(m, T.KeyEvent(:escape))
+        T.update!(m, T.KeyEvent('k'))
+        tb2 = T.TestBackend(80, 24); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 80, 24), [], []))
+        full2 = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("library", lowercase(full2)) || occursin("m M", full2)
+        T.update!(m, T.KeyEvent(:escape))
+
+        m.paused = false
+        current_chart(m).live_enabled = true
+        @test _live_may_advance(m) === true
+        T.update!(m, T.KeyEvent('m'))
+        @test _live_may_advance(m) === false
+        T.update!(m, T.KeyEvent('n'))
+        @test m.prompt_kind === :rename_chart
+        @test _live_may_advance(m) === false
+        T.update!(m, T.KeyEvent(:escape))
+        @test _live_may_advance(m) === false  # still in library
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+        @test _live_may_advance(m) === true
+    end
 end
 
 # ═══════════════════════════════════════════════════════════════════════

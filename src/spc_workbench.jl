@@ -1647,6 +1647,13 @@ end
     library_area::Rect = Rect(0, 0, 0, 0)
     library_last_click::Union{Nothing, NamedTuple{(:idx, :tick), Tuple{Int, Int}}} = nothing
     view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder
+    # Library / prompt SM (GC-PR2 / KD21)
+    prompt_kind::Union{Nothing,Symbol} = nothing
+    # :import_csv | :export_csv | :save_workbench | :load_workbench | :rename_chart
+    prompt_buf::String = ""
+    pending_delete::Bool = false
+    # Prefill only for export prompts — never silent write to default path
+    last_export_path::String = ""
     # Seed policy when charts empty — NEVER flip default from :triple
     seed_demos::Symbol = :triple     # :triple | :single | :none
     tools::Vector{ToolEntry} = ToolEntry[]
@@ -2145,6 +2152,35 @@ end
 
 # ── Update (Key + Mouse, full fidelity) ─────────────────────────────────
 
+"""Apply prompt Enter. GC-PR2: rename fully wired; I/O kinds not opened until GC-PR3."""
+function _apply_prompt!(m::SPCWorkbenchModel)
+    kind = m.prompt_kind
+    buf = m.prompt_buf
+    if kind === :rename_chart
+        name = strip(buf)
+        if isempty(name)
+            m.last_event = "rename cancel: empty name"
+        else
+            rename_chart!(m, m.library_selected, name)
+            m.last_event = "renamed → $name"
+        end
+        m.prompt_kind = nothing
+        m.prompt_buf = ""
+        return
+    else
+        # GC-PR2: I/O prompts are not opened (message-only keys). Defensive clear.
+        m.prompt_kind = nothing
+        m.last_event = "prompt cancel"
+    end
+end
+
+function _open_prompt!(m::SPCWorkbenchModel, kind::Symbol; seed::AbstractString = "")
+    m.prompt_kind = kind
+    m.prompt_buf = String(seed)
+    m.pending_delete = false
+    m.last_event = "prompt $kind"
+end
+
 function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     _ensure_charts!(m)
     ch = current_chart(m)
@@ -2283,6 +2319,100 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return
     end
 
+    # Prompt SM (KD21): Esc cancels; q is a buffer character; never quit from prompt
+    if m.prompt_kind !== nothing
+        if evt.key == :escape
+            m.prompt_kind = nothing
+            # keep prompt_buf for re-edit
+            m.last_event = "prompt cancel"
+            return
+        elseif evt.key == :enter
+            _apply_prompt!(m)
+            return
+        elseif evt.key == :backspace
+            if !isempty(m.prompt_buf)
+                m.prompt_buf = m.prompt_buf[1:prevind(m.prompt_buf, end)]
+            end
+            m.last_event = "prompt $(m.prompt_kind): $(m.prompt_buf)"
+            return
+        elseif evt.key == :char
+            c = evt.char
+            if c >= ' ' && c != '\x7f'  # printable, not DEL (incl. 'q')
+                m.prompt_buf *= c
+                m.last_event = "prompt $(m.prompt_kind): $(m.prompt_buf)"
+            end
+            return
+        end
+        return  # left/right and other keys: no-op under prompt
+    end
+
+    # pending_delete: y confirms; any other key (incl Esc) clears — never quit
+    if m.pending_delete
+        if evt.key == :char && (evt.char == 'y' || evt.char == 'Y')
+            ok = delete_chart!(m, m.library_selected)
+            m.pending_delete = false
+            m.last_event = ok ? "deleted chart" : "delete refused (last chart)"
+            return
+        else
+            m.pending_delete = false
+            m.last_event = "delete cancelled"
+            return
+        end
+    end
+
+    # Library mode (before global quit — Esc/q close mode, never quit)
+    if m.view_mode == :library
+        nch = length(m.charts)
+        if evt.key == :escape || (evt.key == :char && evt.char == 'q')
+            m.view_mode = :dashboard
+            m.pending_delete = false
+            m.last_event = "library closed"
+            return
+        elseif evt.key == :up
+            m.library_selected = max(1, m.library_selected - 1)
+            m.last_event = "library sel $(m.library_selected)"
+            return
+        elseif evt.key == :down
+            m.library_selected = min(nch, m.library_selected + 1)
+            m.last_event = "library sel $(m.library_selected)"
+            return
+        elseif evt.key == :enter
+            set_active_chart!(m, m.library_selected)
+            m.view_mode = :dashboard
+            m.last_event = "active chart $(m.active)"
+            return
+        elseif evt.key == :char
+            c = evt.char
+            if c == 'a' || c == 'A'
+                idx = add_chart!(m)
+                m.last_event = "added chart $idx"
+                return
+            elseif c == 'c' || c == 'C'
+                idx = clone_chart!(m, m.library_selected)
+                m.last_event = "cloned → $idx"
+                return
+            elseif c == 'd' || c == 'D'
+                if nch <= 1
+                    m.last_event = "cannot delete last chart"
+                else
+                    m.pending_delete = true
+                    m.last_event = "confirm delete? y/N"
+                end
+                return
+            elseif c == 'n' || c == 'N'
+                seed = m.charts[clamp(m.library_selected, 1, max(1, nch))].name
+                _open_prompt!(m, :rename_chart; seed = seed)
+                return
+            elseif c == 'i' || c == 'I' || c == 'e' || c == 'E' || c == 'w' || c == 'W'
+                # GC-PR2: message-only — do NOT set prompt_kind (I/O Enter in GC-PR3)
+                m.last_event = "I/O keys land in GC-PR3"
+                return
+            end
+        end
+        return  # absorb other keys (left/right pan, digits, …) — no fall-through
+    end
+
+    # Global quit (dashboard only — modes already returned above)
     if evt.key == :escape || (evt.key == :char && evt.char == 'q')
         m.quit = true
         return
@@ -2290,7 +2420,15 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
 
     if evt.key == :char
         c = evt.char
-        if c == 'p' || c == 'P'
+        if c == 'm' || c == 'M'
+            # Open chart library (GC-PR2)
+            m.view_mode = :library
+            m.library_selected = clamp(m.active, 1, length(m.charts))
+            m.pending_delete = false
+            m.prompt_kind = nothing
+            m.last_event = "library open"
+            return
+        elseif c == 'p' || c == 'P'
             m.paused = !m.paused
             m.last_event = m.paused ? "paused" : "resumed"
         elseif c == 'r' || c == 'R' || c == 'z' || c == 'Z'
@@ -2411,14 +2549,16 @@ end
 
 function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     _ensure_charts!(m)
+    # Modal / library / prompt / pending_delete: keyboard-only (KD16)
     if m.config_open || m.editing !== nothing ||
        m.view_mode == :help || m.view_mode == :keymap ||
-       m.view_mode == :library || m.view_mode == :builder
+       m.view_mode == :library || m.view_mode == :builder ||
+       m.prompt_kind !== nothing || m.pending_delete
         m.last_event = string(evt.action, " ", evt.button, " (modal)")
         m.hover_x = nothing
         m.hovered = nothing
         if evt.action == mouse_release
-            m.drag_start = nothing
+            m.drag_start = nothing   # avoid stuck drag if mode opened mid-drag
         end
         return
     end
@@ -2509,12 +2649,15 @@ function view(m::SPCWorkbenchModel, f::Frame)
         return
     end
 
-    # Mode overlays: help / keymap / builder (dedicated pages; no dashboard bleed)
+    # Mode overlays: help / keymap / library / builder (dedicated pages; no dashboard bleed)
     if m.view_mode == :help
         _render_help_page!(buf, area, m)
         return
     elseif m.view_mode == :keymap
         _render_keymap_page!(buf, area, m)
+        return
+    elseif m.view_mode == :library
+        _render_library_page!(buf, area, m)
         return
     elseif m.view_mode == :builder
         _render_builder_page!(buf, area, m)
@@ -2561,7 +2704,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     end
 
     # header
-    hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
+    hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [m]library [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
 
     if m.config_open
@@ -3164,7 +3307,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     else
         " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
     end
-    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
 end
 
 # small helper for fmt
@@ -3208,6 +3351,61 @@ function _side_viol_msgs_by_index(
     return sorted[start:end]
 end
 
+# ── Chart Library page (GC-PR2 / A5) ────────────────────────────────────
+function _render_library_page!(buf, area, m)
+    set_string!(buf, area.x + 1, area.y, "CHART LIBRARY  (Esc/q close → dashboard)", tstyle(:title, bold=true))
+    y = area.y + 2
+    nch = length(m.charts)
+    set_string!(buf, area.x + 2, y,
+        "Charts: $nch   active=$(m.active)   selected=$(m.library_selected)",
+        tstyle(:text_dim))
+    y += 2
+    # List charts
+    for (i, c) in enumerate(m.charts)
+        if y > bottom(area) - 4
+            break
+        end
+        marker = i == m.library_selected ? "▶" : " "
+        act = i == m.active ? "*" : " "
+        nvals = length(c.data.values)
+        live = c.live_enabled ? "live" : "off"
+        line = "$marker$act $i. $(c.name)  [$(c.chart_type)] n=$nvals live=$live"
+        sty = i == m.library_selected ? tstyle(:accent, bold=true) : tstyle(:text)
+        set_string!(buf, area.x + 2, y, line, sty)
+        y += 1
+    end
+    y = min(y + 1, bottom(area) - 3)
+    # Prompt / pending delete status
+    if m.pending_delete
+        nm = m.charts[clamp(m.library_selected, 1, max(1, nch))].name
+        set_string!(buf, area.x + 2, y,
+            "DELETE \"$nm\"?  press y to confirm, any other key cancel",
+            tstyle(:error, bold=true))
+        y += 1
+    elseif m.prompt_kind !== nothing
+        kind_lbl = string(m.prompt_kind)
+        set_string!(buf, area.x + 2, y,
+            "PROMPT [$kind_lbl]: $(m.prompt_buf)_",
+            tstyle(:accent, bold=true))
+        y += 1
+        set_string!(buf, area.x + 2, y,
+            "  Enter=apply  Esc=cancel  (q types into buffer)",
+            tstyle(:text_dim))
+        y += 1
+    end
+    # Footer keys — do not claim I/O is wired (GC-PR3)
+    if y <= bottom(area) - 1
+        set_string!(buf, area.x + 2, bottom(area) - 1,
+            "↑↓ select  Enter activate  a add  c clone  d+y delete  n rename  i/e/w/W later  Esc/q close",
+            tstyle(:text_dim))
+    end
+    if y <= bottom(area)
+        set_string!(buf, area.x + 2, bottom(area),
+            " last=$(m.last_event)",
+            tstyle(:text_dim))
+    end
+end
+
 # ── Dedicated Help page (adapted from HTML quickstart + WECO defs + workflow) ──
 function _render_help_page!(buf, area, m)
     # simple full area text page
@@ -3221,6 +3419,7 @@ function _render_help_page!(buf, area, m)
         "  c/C     open/close WECO rule config (1-8 toggle; Tab→Lines→Visual)",
         "  v/V     open chart-line visibility config (CL/±σ/specs)",
         "  o/O     open Visual Preferences (solid series line, …)",
+        "  m/M     open chart library (list / add / clone / delete / rename)",
         "  b/B     open chart builder (name, cols, tools, manual limits, WECO)",
         "  u/U t/T l/L  edit USL / Target / LSL (enter to set, esc cancel)",
         "  s/S     clear all spec limits",
@@ -3232,7 +3431,10 @@ function _render_help_page!(buf, area, m)
         "  [ ]     switch active chart (multi-dashboard)",
         "  h/?     this help",
         "  k       keyboard map page",
-        "  q/esc   quit (close builder/help first)",
+        "  q/esc   quit (close library/builder/help first)",
+        "",
+        "LIBRARY (m): ↑↓ select · Enter activate · a add · c clone · d+y delete · n rename",
+        "  i/e/w/W CSV/JSON I/O keys land in a later slice (message-only for now)",
         "",
         "RICH VISUALS:",
         "  ◆ = OOC (WECO violation, accent)",
@@ -3258,6 +3460,7 @@ function _render_keymap_page!(buf, area, m)
     y = area.y + 2
     kbd = [
         "KEYS:",
+        "  m M         Open chart library (↑↓ Enter a c d+y n; Esc/q close)",
         "  p/P         Pause/Resume live mode",
         "  g/G         Toggle live_enabled on active chart",
         "  r R z Z     Reset view (full range + auto y)",
@@ -3268,7 +3471,7 @@ function _render_keymap_page!(buf, area, m)
         "  [ ] < >     Prev / Next chart (dashboard)",
         "  ← →         Pan left/right",
         "  h ? / k     Help / This keymap",
-        "  q Esc       Quit (in builder: close mode, not quit)",
+        "  q Esc       Quit (library/builder: close mode, not quit)",
         "",
         "MOUSE:",
         "  Move        Hover + vertical follow │ + tooltip",
@@ -3280,6 +3483,7 @@ function _render_keymap_page!(buf, area, m)
         "",
         "Config: Tab WECO↔Lines; ↑↓/digits/space; Esc/c/v close. Lines ●=draw on chart.",
         "Builder: ↑↓ fields; Enter edit/toggle; a apply/materialize; 1-8 WECO; y type.",
+        "Library i/e/w/W: I/O keys message-only until later slice (not wired yet).",
     ]
     for (i, ln) in enumerate(kbd)
         if y + i - 1 > bottom(area); break; end
@@ -3358,13 +3562,8 @@ function _live_may_advance(m::SPCWorkbenchModel)::Bool
     m.paused && return false
     m.editing !== nothing && return false
     m.config_open && return false
-    # Optional fields from library/prompt PR (PR2b+); skip if not present yet
-    if hasfield(typeof(m), :prompt_kind) && getfield(m, :prompt_kind) !== nothing
-        return false
-    end
-    if hasfield(typeof(m), :pending_delete) && getfield(m, :pending_delete) === true
-        return false
-    end
+    m.prompt_kind !== nothing && return false
+    m.pending_delete && return false
     m.view_mode in (:help, :keymap, :library, :builder) && return false
     ch = current_chart(m)
     (isempty(ch.data.values) || !ch.live_enabled) && return false
