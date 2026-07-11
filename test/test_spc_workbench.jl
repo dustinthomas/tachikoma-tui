@@ -802,6 +802,209 @@ include("../src/spc_workbench.jl")
         @test ctx_i.lz.sigma ≈ mr_expected / 1.128 atol = 1e-9
     end
 
+    @testset "P2-PR1: SecondarySeries truth table (pure values + limits)" begin
+        # --- I_MR n ≥ 2: length n-1 MRs; cl=MR̄, ucl=D4₂·MR̄, lcl=0 ---
+        raw_imr = Float64[10.0, 12.0, 11.0, 15.0, 14.0]
+        ch_imr = ChartSpec(data = WorkbenchData(values = raw_imr, cl = 0.0, sigma = 0.0))
+        primary_imr = Float64.(raw_imr)
+        sec_imr = secondary_series_for(ch_imr, primary_imr)
+        mrs = abs.(diff(raw_imr))
+        mrbar = mean(mrs)
+        @test sec_imr.name == "MR"
+        @test sec_imr.values ≈ mrs
+        @test length(sec_imr.values) == length(raw_imr) - 1
+        @test sec_imr.bar ≈ mrbar
+        @test sec_imr.cl ≈ mrbar
+        @test sec_imr.ucl ≈ SS_FACTORS[2].D4 * mrbar  # 3.267·MR̄ HTML parity
+        @test sec_imr.lcl == 0.0
+        ctx_imr = resolve_chart_render_context(ch_imr)
+        @test ctx_imr.secondary_name == "MR"
+        @test ctx_imr.secondary_bar ≈ mrbar
+        @test ctx_imr.secondary.values ≈ mrs
+        @test ctx_imr.secondary.ucl ≈ SS_FACTORS[2].D4 * mrbar
+        @test ctx_imr.secondary.lcl == 0.0
+
+        # --- I_MR n < 2: empty values; bar/cl/ucl/lcl all nothing (not 0/0/0) ---
+        for short in (Float64[], Float64[5.0])
+            ch_short = ChartSpec(data = WorkbenchData(values = short, cl = 0.0, sigma = 0.0))
+            sec_s = secondary_series_for(ch_short, Float64.(short))
+            @test sec_s.name == "MR"
+            @test isempty(sec_s.values)
+            @test sec_s.bar === nothing
+            @test sec_s.cl === nothing
+            @test sec_s.ucl === nothing
+            @test sec_s.lcl === nothing
+            ctx_s = resolve_chart_render_context(ch_short)
+            @test ctx_s.secondary_bar === nothing
+            @test isempty(ctx_s.secondary.values)
+            @test ctx_s.secondary.cl === nothing
+        end
+
+        # --- I_MR secondary bar == 0 (constant series): cl=ucl=lcl=0 ---
+        const_vals = Float64[7.0, 7.0, 7.0, 7.0]
+        ch_const = ChartSpec(data = WorkbenchData(values = const_vals, cl = 7.0, sigma = 0.0))
+        sec_z = secondary_series_for(ch_const, const_vals)
+        @test sec_z.values ≈ [0.0, 0.0, 0.0]
+        @test sec_z.bar == 0.0
+        @test sec_z.cl == 0.0
+        @test sec_z.ucl == 0.0
+        @test sec_z.lcl == 0.0
+
+        # --- Xbar_R series-chunk complete groups ---
+        raw_x = Float64[
+            8, 10, 12, 9, 11,   # mean 10, R=4
+            11, 12, 13, 12, 12, # mean 12, R=2
+            8, 14, 10, 11, 12,  # mean 11, R=6
+        ]
+        n = 5
+        f = SS_FACTORS[n]
+        ch_xr = ChartSpec(
+            chart_type = Xbar_R,
+            data = WorkbenchData(values = raw_x, cl = 0.0, sigma = 0.0),
+            subgroup_size = n,
+        )
+        xbar, ranges, _ = subgroup_means_and_ranges(raw_x, n)
+        sec_r = secondary_series_for(ch_xr, xbar)
+        rbar = mean(ranges)
+        @test sec_r.name == "R"
+        @test sec_r.values ≈ ranges
+        @test length(sec_r.values) == length(xbar) == 3
+        @test sec_r.bar ≈ rbar
+        @test sec_r.cl ≈ rbar
+        @test sec_r.ucl ≈ f.D4 * rbar
+        @test sec_r.lcl ≈ f.D3 * rbar  # D3(5)=0
+        ctx_r = resolve_chart_render_context(ch_xr)
+        @test ctx_r.secondary.values ≈ ranges
+        @test ctx_r.secondary.ucl ≈ f.D4 * rbar
+        @test ctx_r.secondary_name == "R"
+        @test ctx_r.secondary_bar ≈ rbar
+
+        # --- Xbar_S series-chunk ---
+        ch_xs = ChartSpec(
+            chart_type = Xbar_S,
+            data = WorkbenchData(values = raw_x, cl = 0.0, sigma = 0.0),
+            subgroup_size = n,
+        )
+        xbar_s, svals, _ = subgroup_means_and_s(raw_x, n)
+        sec_s2 = secondary_series_for(ch_xs, xbar_s)
+        sbar = mean(svals)
+        @test sec_s2.name == "s"
+        @test sec_s2.values ≈ svals
+        @test sec_s2.bar ≈ sbar
+        @test sec_s2.cl ≈ sbar
+        @test sec_s2.ucl ≈ f.B4 * sbar
+        @test sec_s2.lcl ≈ f.B3 * sbar
+        ctx_s2 = resolve_chart_render_context(ch_xs)
+        @test ctx_s2.secondary.values ≈ svals
+        @test ctx_s2.secondary.ucl ≈ f.B4 * sbar
+
+        # --- Xbar empty / incomplete groups (no full subgroup) ---
+        ch_empty = ChartSpec(
+            chart_type = Xbar_R,
+            data = WorkbenchData(values = Float64[1, 2, 3], cl = 0.0, sigma = 0.0),
+            subgroup_size = 5,
+        )
+        sec_e = secondary_series_for(ch_empty, Float64[])
+        @test sec_e.name == "R"
+        @test isempty(sec_e.values)
+        @test sec_e.bar === nothing
+        @test sec_e.cl === nothing && sec_e.ucl === nothing && sec_e.lcl === nothing
+        ctx_e = resolve_chart_render_context(ch_empty)
+        @test isempty(ctx_e.secondary.values)
+        @test ctx_e.secondary_bar === nothing
+
+        # --- Attribute types: empty secondary ---
+        for at in (p_chart, np_chart, c_chart, u_chart)
+            ch_a = ChartSpec(
+                chart_type = at,
+                data = WorkbenchData(values = Float64[0.1, 0.2, 0.15], cl = 0.0, sigma = 0.0),
+            )
+            sec_a = secondary_series_for(ch_a, Float64.(ch_a.data.values))
+            @test sec_a.name == ""
+            @test isempty(sec_a.values)
+            @test sec_a.bar === nothing
+            @test sec_a.cl === nothing && sec_a.ucl === nothing && sec_a.lcl === nothing
+            ctx_a = resolve_chart_render_context(ch_a)
+            @test ctx_a.secondary_name == ""
+            @test ctx_a.secondary_bar === nothing
+            @test isempty(ctx_a.secondary.values)
+        end
+
+        # --- Manual primary limits: secondary still auto from series (not invent 0/0/0) ---
+        ch_man = ChartSpec(
+            data = WorkbenchData(values = raw_imr, cl = 0.0, sigma = 0.0),
+            limits_mode = :manual,
+            manual_cl = 12.0,
+            manual_ucl = 18.0,
+            manual_lcl = 6.0,
+        )
+        @test _manual_limits_effective(ch_man)
+        ctx_man = resolve_chart_render_context(ch_man)
+        @test ctx_man.lz.cl == 12.0
+        @test ctx_man.lz.ucl == 18.0
+        @test ctx_man.lz.lcl == 6.0
+        # Secondary independent of manual primary
+        @test ctx_man.secondary.values ≈ mrs
+        @test ctx_man.secondary.cl ≈ mrbar
+        @test ctx_man.secondary.ucl ≈ SS_FACTORS[2].D4 * mrbar
+        @test ctx_man.secondary.lcl == 0.0
+        @test ctx_man.secondary_name == "MR"
+        @test ctx_man.secondary_bar ≈ mrbar
+
+        # Manual Xbar_R: primary manual, R limits still D3/D4·R̄
+        ch_man_r = ChartSpec(
+            chart_type = Xbar_R,
+            data = WorkbenchData(values = raw_x, cl = 0.0, sigma = 0.0),
+            subgroup_size = n,
+            limits_mode = :manual,
+            manual_cl = 11.0,
+            manual_ucl = 14.0,
+            manual_lcl = 8.0,
+        )
+        ctx_man_r = resolve_chart_render_context(ch_man_r)
+        @test ctx_man_r.lz.cl == 11.0
+        @test ctx_man_r.secondary.values ≈ ranges
+        @test ctx_man_r.secondary.ucl ≈ f.D4 * rbar
+        @test ctx_man_r.secondary.lcl ≈ f.D3 * rbar
+
+        # --- table_subgroups: use meta secondary_vals + subgroup_n (do not re-chunk means) ---
+        means_tbl = Float64[10.0, 12.0, 11.0]
+        ranges_tbl = Float64[4.0, 2.0, 4.0]
+        n_tbl = 3
+        f3 = SS_FACTORS[n_tbl]
+        ch_tbl = ChartSpec(
+            chart_type = Xbar_R,
+            data = WorkbenchData(
+                values = means_tbl,
+                cl = 0.0,
+                sigma = 0.0,
+                meta = Dict{String,Any}(
+                    "table_subgroups" => true,
+                    "secondary_vals" => ranges_tbl,
+                    "secondary_name" => "R",
+                    "subgroup_n" => n_tbl,
+                ),
+            ),
+            subgroup_size = 5,  # must be ignored for secondary factors when meta has subgroup_n
+        )
+        sec_tbl = secondary_series_for(ch_tbl, means_tbl)
+        rbar_tbl = mean(ranges_tbl)
+        @test sec_tbl.name == "R"
+        @test sec_tbl.values ≈ ranges_tbl
+        @test sec_tbl.bar ≈ rbar_tbl
+        @test sec_tbl.cl ≈ rbar_tbl
+        @test sec_tbl.ucl ≈ f3.D4 * rbar_tbl
+        @test sec_tbl.lcl ≈ f3.D3 * rbar_tbl
+        # Not SS_FACTORS[5] (would be wrong if re-chunk / wrong n)
+        @test sec_tbl.ucl ≉ SS_FACTORS[5].D4 * rbar_tbl
+        ctx_tbl = resolve_chart_render_context(ch_tbl)
+        @test ctx_tbl.primary_values ≈ means_tbl
+        @test length(ctx_tbl.primary_values) == 3
+        @test ctx_tbl.secondary.values ≈ ranges_tbl
+        @test ctx_tbl.secondary.ucl ≈ f3.D4 * rbar_tbl
+        @test ctx_tbl.secondary_bar ≈ rbar_tbl
+    end
+
     @testset "PR7b: table-sourced Xbar subgroups by column (pure fixtures)" begin
         # Pure group helpers: first-seen order; size-1 groups dropped for stats
         vals = [10.0, 12.0, 11.0,  20.0, 22.0, 18.0,  30.0]

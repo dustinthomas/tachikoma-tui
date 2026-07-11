@@ -911,6 +911,90 @@ end
 # Always default to :mr for I-MR fidelity matching HTML autoLimits.
 # Every display site (markers, hover, list, side Cpk) must use this instead of raw .data.sigma.
 
+"""
+Secondary series for dual-canvas / side stats (MR / R / s).
+
+Values are plot-ready (I-MR: length n-1 MRs, no leading null). Limits match HTML
+`autoLimits` secondary block: MR uses D4₂ (=3.267); R uses D3/D4; s uses B3/B4.
+Empty when type has no secondary (attributes) or insufficient data.
+"""
+struct SecondarySeries
+    name::String                 # "MR" | "R" | "s" | ""
+    values::Vector{Float64}
+    bar::Union{Float64,Nothing}  # mean of values (same as ChartRenderContext.secondary_bar)
+    cl::Union{Float64,Nothing}
+    ucl::Union{Float64,Nothing}
+    lcl::Union{Float64,Nothing}
+end
+
+"""Empty secondary (no values / no limits). Optional name for type label continuity."""
+empty_secondary_series(name::AbstractString = "") =
+    SecondarySeries(String(name), Float64[], nothing, nothing, nothing, nothing)
+
+"""
+    _secondary_with_limits(name, values, chart_type, n) -> SecondarySeries
+
+Build SecondarySeries with HTML-matching control limits from SS_FACTORS.
+Degenerate bar==0 still yields cl=ucl=lcl=0 (valid). Empty values → all nothing.
+"""
+function _secondary_with_limits(
+    name::AbstractString,
+    values::Vector{Float64},
+    chart_type::ChartType,
+    n::Int,
+)::SecondarySeries
+    isempty(values) && return empty_secondary_series(name)
+    bar = mean(values)
+    if chart_type == I_MR
+        # Moving range uses n=2 factors (HTML: UCL = 3.267·MR̄, LCL = 0)
+        f = SS_FACTORS[2]
+        return SecondarySeries(String(name), values, bar, bar, f.D4 * bar, 0.0)
+    elseif chart_type == Xbar_R
+        f = SS_FACTORS[_clamp_subgroup_n(n)]
+        return SecondarySeries(String(name), values, bar, bar, f.D4 * bar, f.D3 * bar)
+    elseif chart_type == Xbar_S
+        f = SS_FACTORS[_clamp_subgroup_n(n)]
+        return SecondarySeries(String(name), values, bar, bar, f.B4 * bar, f.B3 * bar)
+    else
+        return empty_secondary_series(name)
+    end
+end
+
+"""
+    secondary_series_for(ch, primary) -> SecondarySeries
+
+Pure secondary series + limits for chart `ch` given its resolved primary vector.
+Manual primary limits do **not** invent secondary limits — secondary is always
+auto from the secondary series (HTML autoLimits secondary block is independent).
+"""
+function secondary_series_for(ch::ChartSpec, primary::Vector{Float64})::SecondarySeries
+    if is_attribute_chart(ch.chart_type)
+        return empty_secondary_series("")
+    elseif _has_table_subgroups(ch) && (ch.chart_type == Xbar_R || ch.chart_type == Xbar_S)
+        sec = Float64.(get(ch.data.meta, "secondary_vals", Float64[]))
+        name = String(get(ch.data.meta, "secondary_name", ch.chart_type == Xbar_R ? "R" : "s"))
+        n_sg = _clamp_subgroup_n(Int(get(ch.data.meta, "subgroup_n", ch.subgroup_size)))
+        return _secondary_with_limits(name, sec, ch.chart_type, n_sg)
+    elseif ch.chart_type == Xbar_R
+        n = _clamp_subgroup_n(ch.subgroup_size)
+        # Ranges from raw series chunks (not from primary means) — incomplete tail dropped
+        _, ranges, _ = subgroup_means_and_ranges(ch.data.values, n)
+        return _secondary_with_limits("R", ranges, Xbar_R, n)
+    elseif ch.chart_type == Xbar_S
+        n = _clamp_subgroup_n(ch.subgroup_size)
+        _, svals, _ = subgroup_means_and_s(ch.data.values, n)
+        return _secondary_with_limits("s", svals, Xbar_S, n)
+    elseif ch.chart_type == I_MR
+        if length(primary) < 2
+            return empty_secondary_series("MR")
+        end
+        mrs = collect(abs.(diff(primary)))
+        return _secondary_with_limits("MR", mrs, I_MR, 2)
+    else
+        return empty_secondary_series("")
+    end
+end
+
 struct ChartRenderContext
     lz::LimitsAndZones
     viol_indices::Set{Int}
@@ -918,9 +1002,11 @@ struct ChartRenderContext
     band::Symbol
     # Plotted primary series (individuals for I-MR; X̄ for Xbar_R/S)
     primary_values::Vector{Float64}
-    # Side-panel secondary summary (R̄ / s̄ / MR̄); dual secondary Canvas deferred (P2)
+    # Side-panel secondary summary (R̄ / s̄ / MR̄) — kept for compat with view/side stats
     secondary_name::String
     secondary_bar::Union{Float64,Nothing}
+    # Full secondary series + control limits (P2 dual canvas; pure API in P2-PR1)
+    secondary::SecondarySeries
 end
 
 """
@@ -1078,41 +1164,31 @@ function auto_limits(
 end
 
 """
-    _primary_and_secondary(ch) -> (primary, secondary_name, secondary_bar)
+    _primary_and_secondary(ch) -> (primary, secondary::SecondarySeries)
 
-Series-chunk primary for plotting/WECO; secondary bar for side panel
-(R̄ / s̄ / MR̄). Dual secondary Canvas remains deferred (P2 optional polish).
+Series-chunk primary for plotting/WECO; secondary series + HTML limits via
+`secondary_series_for`. Side panel still uses `.name` / `.bar` (compat fields on
+ChartRenderContext). Dual secondary Canvas drawing is P2-PR2 (view only).
 PR7b: when `meta["table_subgroups"]`, `data.values` are already X̄ and secondary is in meta.
-I_MR: primary is individuals; secondary_bar is mean moving range (MR̄).
+I_MR: primary is individuals; secondary.values are MRs length n-1.
 """
 function _primary_and_secondary(ch::ChartSpec)
     vs = ch.data.values
-    if _has_table_subgroups(ch) && (ch.chart_type == Xbar_R || ch.chart_type == Xbar_S)
-        sec = get(ch.data.meta, "secondary_vals", Float64[])
-        name = String(get(ch.data.meta, "secondary_name", ch.chart_type == Xbar_R ? "R" : "s"))
-        bar = isempty(sec) ? nothing : mean(Float64.(sec))
-        return (Float64.(vs), name, bar)
+    primary = if _has_table_subgroups(ch) && (ch.chart_type == Xbar_R || ch.chart_type == Xbar_S)
+        Float64.(vs)
     elseif ch.chart_type == Xbar_R
         n = _clamp_subgroup_n(ch.subgroup_size)
-        xbar, ranges, _ = subgroup_means_and_ranges(vs, n)
-        bar = isempty(ranges) ? nothing : mean(ranges)
-        return (xbar, "R", bar)
+        xbar, _, _ = subgroup_means_and_ranges(vs, n)
+        xbar
     elseif ch.chart_type == Xbar_S
         n = _clamp_subgroup_n(ch.subgroup_size)
-        xbar, svals, _ = subgroup_means_and_s(vs, n)
-        bar = isempty(svals) ? nothing : mean(svals)
-        return (xbar, "s", bar)
-    elseif ch.chart_type == I_MR
-        primary = Float64.(vs)
-        if length(primary) < 2
-            return (primary, "MR", nothing)
-        end
-        mrs = abs.(diff(primary))
-        bar = isempty(mrs) ? nothing : mean(mrs)
-        return (primary, "MR", bar)
+        xbar, _, _ = subgroup_means_and_s(vs, n)
+        xbar
     else
-        return (Float64.(vs), "", nothing)
+        Float64.(vs)
     end
+    sec = secondary_series_for(ch, primary)
+    return (primary, sec)
 end
 
 """
@@ -1156,16 +1232,19 @@ end
     resolve_chart_render_context(ch; sigma_method=:mr)
 
 Pure resolver gateway. Returns canonical lz, WECO viol set, cpk, band, primary series,
-and secondary (R̄/s̄) side-panel stats.
+secondary name/bar (side-panel compat), and full `SecondarySeries` (values + limits).
 
 Manual branch (PR5): when `_manual_limits_effective` (mode + all three set + σ>0),
-sigma = (ucl - cl) / 3. Non-positive σ and incomplete manual fall through to auto.
+sigma = (ucl - cl) / 3 applies to **primary only**. Secondary limits stay auto from
+the secondary series (HTML autoLimits secondary block independent of manual primary).
 Auto path: PR7 type-aware auto for Xbar_R / Xbar_S (series chunks); PR7b table-column
 subgroups pass precomputed secondary so means are not re-chunked; else I_MR/:mr.
 """
 function resolve_chart_render_context(ch::ChartSpec; sigma_method::Symbol = :mr)::ChartRenderContext
     vs = ch.data.values
-    primary, sec_name, sec_bar = _primary_and_secondary(ch)
+    primary, sec = _primary_and_secondary(ch)
+    sec_name = sec.name
+    sec_bar = sec.bar
     table_sg = _has_table_subgroups(ch)
     n_sg = if table_sg
         _clamp_subgroup_n(Int(get(ch.data.meta, "subgroup_n", ch.subgroup_size)))
@@ -1176,13 +1255,13 @@ function resolve_chart_render_context(ch::ChartSpec; sigma_method::Symbol = :mr)
     if _manual_limits_effective(ch)
         lz = _limits_from_manual(ch)
     elseif table_sg && (ch.chart_type == Xbar_R || ch.chart_type == Xbar_S)
-        sec = get(ch.data.meta, "secondary_vals", Float64[])
+        sec_vals = get(ch.data.meta, "secondary_vals", Float64[])
         lz = auto_limits(
             primary;
             chart_type = ch.chart_type,
             subgroup_size = n_sg,
             sigma_method = sigma_method,
-            secondary = sec,
+            secondary = sec_vals,
         )
     else
         lz = auto_limits(vs; chart_type = ch.chart_type, subgroup_size = ch.subgroup_size,
@@ -1208,7 +1287,7 @@ function resolve_chart_render_context(ch::ChartSpec; sigma_method::Symbol = :mr)
         cpk_val = cr.cpk
         b = cpk_band(cr.cpk)
     end
-    ChartRenderContext(lz, viol_set, cpk_val, b, primary, sec_name, sec_bar)
+    ChartRenderContext(lz, viol_set, cpk_val, b, primary, sec_name, sec_bar, sec)
 end
 
 """
@@ -1294,6 +1373,7 @@ export weco_detect, compute_limits_and_zones, compute_capability, generate_spc_w
 export detect_oos, cpk_band, cpk_color_for_band
 export compute_fit_y_range, y_extras_from_limits, fit_viewport_y!, auto_fit_viewport_y!
 export ChartRenderContext, resolve_chart_render_context, point_status, auto_limits
+export SecondarySeries, secondary_series_for, empty_secondary_series
 export SS_FACTORS, subgroup_means_and_ranges, subgroup_means_and_s, is_attribute_chart
 export group_values_by_keys, subgroup_means_and_ranges_from_groups, subgroup_means_and_s_from_groups
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
