@@ -37,6 +37,10 @@ change that default. Use `:single` or `:none` only in explicit constructs.
 | `1`…`8` | Toggle WECO rule N |
 | `[` `]` | Switch active chart |
 | `←` `→` | Pan viewport |
+| `m` / `M` | Open chart library |
+| `x` / `X` | Open tools registry |
+| `f` / `F` | Cycle filter prompt / clear filters |
+| `b` / `B` | Open chart builder |
 | `?` / `h` | Help overlay |
 | `k` | Keymap page |
 
@@ -72,6 +76,32 @@ Canonical library keys:
 
 **Never** use `o` / `O` for open-file (those are Visual Preferences on the
 dashboard). File keys are library `i` / `e` / `w` / `W` only.
+
+### Tools registry (`view_mode=:tools`)
+
+Opened from the dashboard with **`x` / `X`**. This is the **master tool list**
+(`m.tools::Vector{ToolEntry}` with `id` + `description`), persisted in JSON as
+the session `tools` array.
+
+| Key | Action |
+|-----|--------|
+| `↑` `↓` | Move `tools_selected` |
+| `a` | Add tool (prompt id, then description) |
+| `n` | Edit description of selected |
+| `d` then `y` | Delete selected (confirm) |
+| Enter | Set session `filter_tool` to selected id → dashboard |
+| Esc / `q` | Close → dashboard (**do not quit**) |
+
+**Registry vs chart tools (important):**
+
+| Layer | Role |
+|-------|------|
+| `m.tools` (this page) | Master registry of canonical tool ids |
+| `ch.tools` | Per-chart filter assignment — what `visible_charts` matches |
+| Builder field `Tools (csv)` | **Primary assign path** for `ch.tools` |
+
+CRUD on the registry alone does **not** put ids onto demo charts. Assign tools
+to a chart via the builder (`b`), then dashboard `f` tool filter can match.
 
 ### Prompt behavior
 

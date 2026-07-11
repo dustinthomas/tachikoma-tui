@@ -1726,11 +1726,12 @@ end
     library_scroll::Int = 0
     library_area::Rect = Rect(0, 0, 0, 0)
     library_last_click::Union{Nothing, NamedTuple{(:idx, :tick), Tuple{Int, Int}}} = nothing
-    view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder
+    view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder, :tools
     # Library / prompt SM (GC-PR2 / KD21)
     prompt_kind::Union{Nothing,Symbol} = nothing
     # :import_csv | :export_csv | :save_workbench | :load_workbench | :rename_chart
     # :filter_tool | :filter_type | :filter_owner  (GC-PR4)
+    # :tool_add_id | :tool_add_desc | :tool_edit_desc  (P2-PR4 tools registry)
     prompt_buf::String = ""
     pending_delete::Bool = false
     # Prefill only for export prompts — never silent write to default path
@@ -1738,6 +1739,11 @@ end
     # Seed policy when charts empty — NEVER flip default from :triple
     seed_demos::Symbol = :triple     # :triple | :single | :none
     tools::Vector{ToolEntry} = ToolEntry[]
+    # Tools registry UI (P2-PR4) — master list of ToolEntry; chart assign stays builder ch.tools
+    tools_selected::Int = 1
+    tools_scroll::Int = 0
+    tools_area::Rect = Rect(0, 0, 0, 0)
+    tool_pending_id::String = ""   # staged id between :tool_add_id → :tool_add_desc
     # Prefill only for save/load prompts — never silent write to default path
     last_workbench_path::String = ""
     # Session-ephemeral dashboard/library filters (GC-PR4) — NOT in JSON schema
@@ -1978,6 +1984,77 @@ function set_active_chart!(m::SPCWorkbenchModel, idx::Int)
     m.active = idx
     m.library_selected = idx
     _ensure_charts!(m)  # sync legacy mirrors from new active
+    return nothing
+end
+
+# ── Tools registry pure CRUD (P2-PR4) ───────────────────────────────────
+# Master list `m.tools::Vector{ToolEntry}` is distinct from per-chart `ch.tools`
+# (filter assignment). Chart tool ids are assigned via builder field :tools.
+
+"""
+    add_tool!(m, id, desc="") -> Union{Int,Nothing}
+
+Append a ToolEntry. Refuses empty id (after strip) and duplicate id
+(case-sensitive). Returns new 1-based index or `nothing` on refuse.
+Sets `tools_selected` to the new entry on success.
+"""
+function add_tool!(m::SPCWorkbenchModel, id::AbstractString, desc::AbstractString = "")::Union{Int,Nothing}
+    tid = String(strip(id))
+    isempty(tid) && return nothing
+    any(t -> t.id == tid, m.tools) && return nothing
+    push!(m.tools, ToolEntry(id = tid, description = String(strip(desc))))
+    idx = length(m.tools)
+    m.tools_selected = idx
+    return idx
+end
+
+"""
+    delete_tool!(m, idx) -> Bool
+
+Remove tool at 1-based index. Clamps `tools_selected`. Returns true if deleted.
+"""
+function delete_tool!(m::SPCWorkbenchModel, idx::Int)::Bool
+    n = length(m.tools)
+    (idx < 1 || idx > n) && return false
+    deleteat!(m.tools, idx)
+    n2 = length(m.tools)
+    if n2 == 0
+        m.tools_selected = 1
+        m.tools_scroll = 0
+    else
+        if m.tools_selected > n2
+            m.tools_selected = n2
+        elseif m.tools_selected > idx
+            m.tools_selected = m.tools_selected - 1
+        elseif m.tools_selected == idx
+            m.tools_selected = min(idx, n2)
+        end
+        m.tools_selected = clamp(m.tools_selected, 1, n2)
+    end
+    return true
+end
+
+function _tools_visible_capacity(m::SPCWorkbenchModel)::Int
+    a = m.tools_area
+    (a.height < 4 || a.width < 4) && return 12
+    # title + status + footer ≈ 6 rows of chrome
+    return max(1, a.height - 6)
+end
+
+"""Keep `tools_selected` in range and `tools_scroll` so selection is visible."""
+function _sync_tools_scroll!(m::SPCWorkbenchModel, ntools::Int = length(m.tools),
+                             vis::Int = _tools_visible_capacity(m))
+    ntools <= 0 && (m.tools_selected = 1; m.tools_scroll = 0; return)
+    m.tools_selected = clamp(m.tools_selected, 1, ntools)
+    sel = m.tools_selected
+    max_scroll = max(0, ntools - vis)
+    scroll = clamp(m.tools_scroll, 0, max_scroll)
+    if sel <= scroll
+        scroll = sel - 1
+    elseif sel > scroll + vis
+        scroll = sel - vis
+    end
+    m.tools_scroll = clamp(scroll, 0, max_scroll)
     return nothing
 end
 
@@ -2556,6 +2633,59 @@ function _apply_prompt!(m::SPCWorkbenchModel)
         m.prompt_kind = nothing
         m.prompt_buf = ""
         return
+    elseif kind === :tool_add_id
+        tid = strip(buf)
+        if isempty(tid)
+            m.last_event = "tool add cancel: empty id"
+            m.prompt_kind = nothing
+            m.prompt_buf = ""
+            m.tool_pending_id = ""
+            return
+        end
+        if any(t -> t.id == tid, m.tools)
+            # keep prompt open for retry
+            m.last_event = "tool add err: duplicate id"
+            return
+        end
+        m.tool_pending_id = String(tid)
+        m.prompt_kind = :tool_add_desc
+        m.prompt_buf = ""
+        m.last_event = "prompt tool_add_desc"
+        return
+    elseif kind === :tool_add_desc
+        tid = m.tool_pending_id
+        m.tool_pending_id = ""
+        if isempty(strip(tid))
+            m.last_event = "tool add cancel: empty id"
+            m.prompt_kind = nothing
+            m.prompt_buf = ""
+            return
+        end
+        idx = add_tool!(m, tid, buf)
+        if idx === nothing
+            m.last_event = "tool add err: refused"
+        else
+            _sync_tools_scroll!(m)
+            m.last_event = "added tool $(m.tools[idx].id)"
+        end
+        m.prompt_kind = nothing
+        m.prompt_buf = ""
+        return
+    elseif kind === :tool_edit_desc
+        ntools = length(m.tools)
+        if ntools < 1
+            m.last_event = "tool edit cancel: no tools"
+            m.prompt_kind = nothing
+            m.prompt_buf = ""
+            return
+        end
+        m.tools_selected = clamp(m.tools_selected, 1, ntools)
+        old = m.tools[m.tools_selected]
+        m.tools[m.tools_selected] = ToolEntry(id = old.id, description = String(strip(buf)))
+        m.last_event = "edited tool $(old.id)"
+        m.prompt_kind = nothing
+        m.prompt_buf = ""
+        return
     else
         m.prompt_kind = nothing
         m.prompt_buf = ""
@@ -2713,11 +2843,17 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         is_filter_prompt = m.prompt_kind === :filter_tool ||
                            m.prompt_kind === :filter_type ||
                            m.prompt_kind === :filter_owner
+        is_tool_prompt = m.prompt_kind === :tool_add_id ||
+                         m.prompt_kind === :tool_add_desc ||
+                         m.prompt_kind === :tool_edit_desc
         if evt.key == :escape
             m.prompt_kind = nothing
             # Filters stay as last applied. Clear buf: next `f` reseeds from filter_*,
             # not from the cancelled edit (comment previously overpromised re-edit).
             m.prompt_buf = ""
+            if is_tool_prompt
+                m.tool_pending_id = ""
+            end
             m.last_event = is_filter_prompt ? "filter edit cancel" : "prompt cancel"
             return
         elseif evt.key == :enter
@@ -2746,17 +2882,30 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     end
 
     # pending_delete: y confirms; any other key (incl Esc) clears — never quit
+    # Mode-local: tools mode deletes tool; library (or other) deletes chart.
     if m.pending_delete
         if evt.key == :char && (evt.char == 'y' || evt.char == 'Y')
-            nch = length(m.charts)
-            if nch >= 1
-                m.library_selected = clamp(m.library_selected, 1, nch)
+            if m.view_mode == :tools
+                ntools = length(m.tools)
+                if ntools >= 1
+                    m.tools_selected = clamp(m.tools_selected, 1, ntools)
+                end
+                ok = ntools >= 1 && delete_tool!(m, m.tools_selected)
+                m.pending_delete = false
+                _sync_tools_scroll!(m)
+                m.last_event = ok ? "deleted tool" : "delete tool refused"
+                return
+            else
+                nch = length(m.charts)
+                if nch >= 1
+                    m.library_selected = clamp(m.library_selected, 1, nch)
+                end
+                ok = nch >= 1 && delete_chart!(m, m.library_selected)
+                m.pending_delete = false
+                _sync_library_scroll!(m)
+                m.last_event = ok ? "deleted chart" : "delete refused (last chart)"
+                return
             end
-            ok = nch >= 1 && delete_chart!(m, m.library_selected)
-            m.pending_delete = false
-            _sync_library_scroll!(m)
-            m.last_event = ok ? "deleted chart" : "delete refused (last chart)"
-            return
         else
             m.pending_delete = false
             m.last_event = "delete cancelled"
@@ -2860,6 +3009,70 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return  # absorb other keys (left/right pan, digits, …) — no fall-through
     end
 
+    # Tools registry mode (P2-PR4) — Esc/q close without quit (KD21 ordering)
+    if m.view_mode == :tools
+        ntools = length(m.tools)
+        if ntools >= 1
+            m.tools_selected = clamp(m.tools_selected, 1, ntools)
+        end
+        if evt.key == :escape || (evt.key == :char && evt.char == 'q')
+            m.view_mode = :dashboard
+            m.pending_delete = false
+            m.tool_pending_id = ""
+            m.last_event = "tools closed"
+            return
+        elseif evt.key == :up
+            if ntools >= 1
+                m.tools_selected = max(1, m.tools_selected - 1)
+            end
+            _sync_tools_scroll!(m)
+            m.last_event = "tools sel $(m.tools_selected)"
+            return
+        elseif evt.key == :down
+            if ntools >= 1
+                m.tools_selected = min(ntools, m.tools_selected + 1)
+            end
+            _sync_tools_scroll!(m)
+            m.last_event = "tools sel $(m.tools_selected)"
+            return
+        elseif evt.key == :enter
+            # Optional: apply selected id as filter_tool and return to dashboard
+            if ntools >= 1
+                m.tools_selected = clamp(m.tools_selected, 1, ntools)
+                set_filter_tool!(m, m.tools[m.tools_selected].id)
+                m.view_mode = :dashboard
+            else
+                m.last_event = "no tools in registry"
+            end
+            return
+        elseif evt.key == :char
+            c = evt.char
+            if c == 'a' || c == 'A'
+                m.tool_pending_id = ""
+                _open_prompt!(m, :tool_add_id; seed = "")
+                return
+            elseif c == 'n' || c == 'N'
+                if ntools < 1
+                    m.last_event = "no tools to edit"
+                else
+                    m.tools_selected = clamp(m.tools_selected, 1, ntools)
+                    seed = m.tools[m.tools_selected].description
+                    _open_prompt!(m, :tool_edit_desc; seed = seed)
+                end
+                return
+            elseif c == 'd' || c == 'D'
+                if ntools < 1
+                    m.last_event = "no tools to delete"
+                else
+                    m.pending_delete = true
+                    m.last_event = "confirm delete tool? y/N"
+                end
+                return
+            end
+        end
+        return  # absorb other keys — no fall-through
+    end
+
     # Global quit (dashboard only — modes already returned above)
     if evt.key == :escape || (evt.key == :char && evt.char == 'q')
         m.quit = true
@@ -2876,6 +3089,17 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.prompt_kind = nothing
             _sync_library_scroll!(m)
             m.last_event = "library open"
+            return
+        elseif c == 'x' || c == 'X'
+            # Open tools registry (P2-PR4 / KD-P2-6)
+            m.view_mode = :tools
+            ntools = length(m.tools)
+            m.tools_selected = ntools >= 1 ? clamp(m.tools_selected, 1, ntools) : 1
+            m.pending_delete = false
+            m.prompt_kind = nothing
+            m.tool_pending_id = ""
+            _sync_tools_scroll!(m)
+            m.last_event = "tools open"
             return
         elseif _handle_filter_char!(m, c)
             # GC-PR4: f cycles filter prompt; F clears all (dashboard)
@@ -2998,10 +3222,11 @@ end
 
 function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     _ensure_charts!(m)
-    # Modal / library / prompt / pending_delete: keyboard-only (KD16)
+    # Modal / library / tools / prompt / pending_delete: keyboard-only (KD16)
     if m.config_open || m.editing !== nothing ||
        m.view_mode == :help || m.view_mode == :keymap ||
        m.view_mode == :library || m.view_mode == :builder ||
+       m.view_mode == :tools ||
        m.prompt_kind !== nothing || m.pending_delete
         m.last_event = string(evt.action, " ", evt.button, " (modal)")
         m.hover_x = nothing
@@ -3098,7 +3323,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
         return
     end
 
-    # Mode overlays: help / keymap / library / builder (dedicated pages; no dashboard bleed)
+    # Mode overlays: help / keymap / library / builder / tools (dedicated pages; no dashboard bleed)
     if m.view_mode == :help
         _render_help_page!(buf, area, m)
         return
@@ -3110,6 +3335,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
         return
     elseif m.view_mode == :builder
         _render_builder_page!(buf, area, m)
+        return
+    elseif m.view_mode == :tools
+        _render_tools_page!(buf, area, m)
         return
     end
 
@@ -3153,7 +3381,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     end
 
     # header
-    hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [m]library [f]filter [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
+    hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [m]library [x]tools [f]filter [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
 
     # A6: empty filter match — plot message + side list (Charts: 0/N) + footer (no full early return)
@@ -3173,7 +3401,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
             set_string!(buf, side_inner.x, side_inner.y + 1, " (no match)", tstyle(:warning))
         end
         left = " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
-        render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+        render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m x f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
         return
     end
 
@@ -3790,7 +4018,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     else
         " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
     end
-    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m x f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
 end
 
 # small helper for fmt
@@ -3917,6 +4145,72 @@ function _render_library_page!(buf, area, m)
     end
 end
 
+# ── Tools registry page (P2-PR4) — master list m.tools; assign via builder ─
+function _render_tools_page!(buf, area, m)
+    m.tools_area = area
+    set_string!(buf, area.x + 1, area.y, "TOOLS REGISTRY  (Esc/q close → dashboard)", tstyle(:title, bold=true))
+    y = area.y + 2
+    ntools = length(m.tools)
+    if ntools >= 1
+        m.tools_selected = clamp(m.tools_selected, 1, ntools)
+    end
+    set_string!(buf, area.x + 2, y,
+        "Tools: $ntools   selected=$(m.tools_selected)   (registry ≠ chart tools filter list)",
+        tstyle(:text_dim))
+    y += 2
+    list_bottom = bottom(area) - 4
+    capacity = max(1, list_bottom - y + 1)
+    _sync_tools_scroll!(m, ntools, capacity)
+    if ntools == 0
+        set_string!(buf, area.x + 2, y, "No tools — press [a] to add", tstyle(:warning, bold=true))
+        y += 1
+        set_string!(buf, area.x + 2, y,
+            "  Master ids only; assign tools to charts via builder field Tools (csv).",
+            tstyle(:text_dim))
+        y += 1
+    else
+        first_i = m.tools_scroll + 1
+        last_i = min(ntools, m.tools_scroll + capacity)
+        for i in first_i:last_i
+            t = m.tools[i]
+            marker = i == m.tools_selected ? "▶" : " "
+            desc = isempty(t.description) ? "—" : t.description
+            line = "$marker $i. $(t.id)  $desc"
+            sty = i == m.tools_selected ? tstyle(:accent, bold=true) : tstyle(:text)
+            set_string!(buf, area.x + 2, y, line, sty)
+            y += 1
+        end
+    end
+    y = min(y + 1, bottom(area) - 3)
+    if m.pending_delete && ntools >= 1
+        tid = m.tools[m.tools_selected].id
+        set_string!(buf, area.x + 2, y,
+            "DELETE tool \"$tid\"?  press y to confirm, any other key cancel",
+            tstyle(:error, bold=true))
+        y += 1
+    elseif m.prompt_kind !== nothing
+        kind_lbl = string(m.prompt_kind)
+        set_string!(buf, area.x + 2, y,
+            "PROMPT [$kind_lbl]: $(m.prompt_buf)_",
+            tstyle(:accent, bold=true))
+        y += 1
+        set_string!(buf, area.x + 2, y,
+            "  Enter=apply  Esc=cancel  (q types into buffer)",
+            tstyle(:text_dim))
+        y += 1
+    end
+    if y <= bottom(area) - 1
+        set_string!(buf, area.x + 2, bottom(area) - 1,
+            "↑↓ select  Enter filter+close  a add  n edit desc  d+y delete  Esc/q close",
+            tstyle(:text_dim))
+    end
+    if y <= bottom(area)
+        set_string!(buf, area.x + 2, bottom(area),
+            " last=$(m.last_event)",
+            tstyle(:text_dim))
+    end
+end
+
 # ── Dedicated Help page (adapted from HTML quickstart + WECO defs + workflow) ──
 function _render_help_page!(buf, area, m)
     # simple full area text page
@@ -3931,6 +4225,7 @@ function _render_help_page!(buf, area, m)
         "  v/V     open chart-line visibility config (CL/±σ/specs)",
         "  o/O     open Visual Preferences (solid series line, …)",
         "  m/M     open chart library (list / add / clone / delete / rename)",
+        "  x/X     open tools registry (master tool ids; assign to charts via builder)",
         "  f       cycle filter prompt (tool → type → owner); Enter apply; Esc cancel",
         "  F       clear all filters (tool/type/owner); rehomes active if needed",
         "  b/B     open chart builder (name, cols, tools, manual limits, WECO)",
@@ -3944,12 +4239,16 @@ function _render_help_page!(buf, area, m)
         "  [ ]     switch active chart (multi-dashboard)",
         "  h/?     this help",
         "  k       keyboard map page",
-        "  q/esc   quit (close library/builder/help first)",
+        "  q/esc   quit (close library/tools/builder/help first)",
         "",
         "LIBRARY (m): ↑↓ select · Enter activate · a add · c clone · d+y delete · n rename",
         "  i import CSV · e export CSV · w save JSON · W load JSON (path prompts)",
         "  f/F filters same as dashboard (list shows visible_charts only)",
         "  Note: seed demos often have empty tools — tool filter may hide all until assigned.",
+        "",
+        "TOOLS REGISTRY (x): master m.tools ids + descriptions (JSON tools array).",
+        "  ↑↓ select · a add (id then desc) · n edit desc · d+y delete · Enter set filter_tool",
+        "  Registry ≠ chart filter lists (ch.tools); assign tools on charts via builder.",
         "",
         "RICH VISUALS:",
         "  ◆ = OOC (WECO violation, yellow/warning)",
@@ -3975,18 +4274,19 @@ function _render_keymap_page!(buf, area, m)
     y = area.y + 2
     kbd = [
         "KEYS:",
-        "  m M / f F   Library (↑↓ a c d n i/e/w/W) / filters (cycle tool→type→owner; F clear)",
+        "  m M / x X   Library (↑↓ a c d n i/e/w/W) / Tools registry (↑↓ a n d+y Enter)",
+        "  f F         Filters (cycle tool→type→owner; F clear)",
         "  p/P         Pause/Resume live mode",
         "  g/G         Toggle live_enabled on active chart",
         "  r R z Z     Reset view (full range + auto y)",
         "  c C / v V / o O  Config WECO / Lines / Visual prefs",
-        "  b B         Chart builder (manual limits, cols, tools)",
+        "  b B         Chart builder (manual limits, cols, tools assign)",
         "  u t l / s   Edit USL/Target/LSL / clear specs",
         "  1-8         Toggle WECO-N (or 1-5 in Lines tab)",
         "  [ ] < >     Prev / Next chart (dashboard)",
         "  ← →         Pan left/right",
         "  h ? / k     Help / This keymap",
-        "  q Esc       Quit (library/builder: close mode, not quit)",
+        "  q Esc       Quit (library/tools/builder: close mode, not quit)",
         "",
         "MOUSE:",
         "  Move        Hover + vertical follow │ + tooltip",
@@ -3999,6 +4299,7 @@ function _render_keymap_page!(buf, area, m)
         "Config: Tab WECO↔Lines; ↑↓/digits/space; Esc/c/v close. Lines ●=draw on chart.",
         "Builder: ↑↓ fields; Enter edit/toggle; a apply/materialize; 1-8 WECO; y type.",
         "Library i/e/w/W + f/F filters (session-only; demo tools may be empty).",
+        "Tools registry: master m.tools; chart ch.tools assigned via builder (not registry alone).",
     ]
     for (i, ln) in enumerate(kbd)
         if y + i - 1 > bottom(area); break; end
@@ -4079,7 +4380,7 @@ function _live_may_advance(m::SPCWorkbenchModel)::Bool
     m.config_open && return false
     m.prompt_kind !== nothing && return false
     m.pending_delete && return false
-    m.view_mode in (:help, :keymap, :library, :builder) && return false
+    m.view_mode in (:help, :keymap, :library, :builder, :tools) && return false
     ch = current_chart(m)
     (isempty(ch.data.values) || !ch.live_enabled) && return false
     return true

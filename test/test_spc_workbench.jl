@@ -1557,6 +1557,62 @@ include("../src/spc_workbench.jl")
             @test current_chart(m2).name != "Hide"
         end
     end
+
+    @testset "tools registry pure CRUD (add_tool!/delete_tool!)" begin
+        d = generate_spc_workbench_data(8; seed = 9)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        @test isempty(m.tools)
+        @test m.tools_selected == 1
+        @test m.tools_scroll == 0
+
+        # refuse empty id
+        @test add_tool!(m, "") === nothing
+        @test add_tool!(m, "   ") === nothing
+        @test isempty(m.tools)
+
+        # add
+        i1 = add_tool!(m, "ETCH-1", "Etch tool 1")
+        @test i1 == 1
+        @test length(m.tools) == 1
+        @test m.tools[1].id == "ETCH-1"
+        @test m.tools[1].description == "Etch tool 1"
+        @test m.tools_selected == 1
+
+        i2 = add_tool!(m, "  CVD-2  ", "  CVD  ")
+        @test i2 == 2
+        @test m.tools[2].id == "CVD-2"
+        @test m.tools[2].description == "CVD"
+        @test m.tools_selected == 2
+
+        # refuse duplicate (case-sensitive)
+        @test add_tool!(m, "ETCH-1") === nothing
+        @test length(m.tools) == 2
+        @test add_tool!(m, "etch-1", "lower") == 3  # different id
+        @test m.tools[3].id == "etch-1"
+
+        # delete clamps selection
+        m.tools_selected = 3
+        @test delete_tool!(m, 3) === true
+        @test length(m.tools) == 2
+        @test m.tools_selected == 2
+        m.tools_selected = 1
+        @test delete_tool!(m, 1) === true
+        @test length(m.tools) == 1
+        @test m.tools[1].id == "CVD-2"
+        @test m.tools_selected == 1
+        @test delete_tool!(m, 1) === true
+        @test isempty(m.tools)
+        @test m.tools_selected == 1
+        @test delete_tool!(m, 1) === false  # empty
+        @test delete_tool!(m, 0) === false
+
+        # registry is distinct from chart tools assignment
+        add_chart!(m; name = "C1")
+        @test isempty(m.charts[1].tools)  # add_tool! does not touch ch.tools
+        i = add_tool!(m, "REG-ONLY")
+        @test i == 1
+        @test isempty(m.charts[1].tools)
+    end
 end
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -3075,14 +3131,218 @@ end
         T.update!(m, T.KeyEvent(:escape))
         @test m.prompt_buf == ""  # cancel clears buf
 
-        # anti-port: never enter :filters or :tools view modes
-        @test m.view_mode in (:dashboard, :library, :help, :keymap, :builder, :focused)
+        # anti-port: never enter :filters mode (tools mode is P2-PR4 product UI)
+        @test m.view_mode in (:dashboard, :library, :help, :keymap, :builder, :focused, :tools)
         @test m.view_mode != :filters
-        @test m.view_mode != :tools
         # package-private setters exist on the included workbench surface
         @test isdefined(@__MODULE__, :set_filter_tool!)
         @test isdefined(@__MODULE__, :clear_filters!)
         clear_filters!(m)
+    end
+
+    # ── P2-PR4: Tools registry view_mode=:tools CRUD ─────────────────────
+    @testset "tools mode: open (x/X), TOOLS REGISTRY title, no dashboard bleed" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 4), paused = true)
+        _ensure_charts!(m)
+        @test m.view_mode == :dashboard
+        @test m.seed_demos === :triple
+
+        T.update!(m, T.KeyEvent('x'))
+        @test m.view_mode == :tools
+        @test m.quit == false
+        @test m.last_event == "tools open"
+        @test m.prompt_kind === nothing
+        @test m.pending_delete == false
+
+        tb = T.TestBackend(80, 20); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 20), [], []))
+        @test T.find_text(tb, "TOOLS REGISTRY") !== nothing
+        @test T.find_text(tb, "SPC Workbench [dashboard]") === nothing
+        @test T.find_text(tb, "Side Stats") === nothing
+        full = join([string(T.row_text(tb, i)) for i in 1:20 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("No tools", full) || occursin("press [a]", full)
+
+        # X also opens
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+        T.update!(m, T.KeyEvent('X'))
+        @test m.view_mode == :tools
+        @test m.quit == false
+    end
+
+    @testset "tools mode: add/edit/delete prompts; Esc closes without quit" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 6), paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        @test isempty(m.tools)
+
+        T.update!(m, T.KeyEvent('x'))
+        @test m.view_mode == :tools
+
+        # add: id then description
+        T.update!(m, T.KeyEvent('a'))
+        @test m.prompt_kind === :tool_add_id
+        @test _live_may_advance(m) === false
+        for ch in "ETCH-1"
+            T.update!(m, T.KeyEvent(ch))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === :tool_add_desc
+        @test m.tool_pending_id == "ETCH-1"
+        for ch in "Etch chamber"
+            T.update!(m, T.KeyEvent(ch))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === nothing
+        @test length(m.tools) == 1
+        @test m.tools[1].id == "ETCH-1"
+        @test m.tools[1].description == "Etch chamber"
+        @test m.tools_selected == 1
+        @test m.view_mode == :tools
+        @test m.quit == false
+
+        tb = T.TestBackend(80, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 18), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:18 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("ETCH-1", full)
+        @test occursin("Etch chamber", full)
+
+        # edit description
+        T.update!(m, T.KeyEvent('n'))
+        @test m.prompt_kind === :tool_edit_desc
+        while !isempty(m.prompt_buf)
+            T.update!(m, T.KeyEvent(:backspace))
+        end
+        for ch in "revised"
+            T.update!(m, T.KeyEvent(ch))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.tools[1].description == "revised"
+        @test m.tools[1].id == "ETCH-1"
+
+        # second tool
+        T.update!(m, T.KeyEvent('a'))
+        for ch in "CVD-A"
+            T.update!(m, T.KeyEvent(ch))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        T.update!(m, T.KeyEvent(:enter))  # empty desc ok
+        @test length(m.tools) == 2
+        @test m.tools[2].id == "CVD-A"
+        @test m.tools_selected == 2
+
+        # ↑↓ navigate
+        T.update!(m, T.KeyEvent(:up))
+        @test m.tools_selected == 1
+        T.update!(m, T.KeyEvent(:up))
+        @test m.tools_selected == 1
+        T.update!(m, T.KeyEvent(:down))
+        @test m.tools_selected == 2
+
+        # delete selected (CVD-A) with d+y
+        T.update!(m, T.KeyEvent('d'))
+        @test m.pending_delete
+        @test _live_may_advance(m) === false
+        T.update!(m, T.KeyEvent('y'))
+        @test m.pending_delete == false
+        @test length(m.tools) == 1
+        @test m.tools[1].id == "ETCH-1"
+        @test m.view_mode == :tools
+
+        # delete cancel
+        T.update!(m, T.KeyEvent('d'))
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.pending_delete == false
+        @test length(m.tools) == 1
+        @test m.quit == false
+
+        # Esc closes tools without quit
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+        @test m.quit == false
+        @test m.last_event == "tools closed"
+
+        # q closes without quit
+        T.update!(m, T.KeyEvent('x'))
+        T.update!(m, T.KeyEvent('q'))
+        @test m.view_mode == :dashboard
+        @test m.quit == false
+
+        # add refuses empty id
+        T.update!(m, T.KeyEvent('x'))
+        T.update!(m, T.KeyEvent('a'))
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === nothing
+        @test occursin("empty id", m.last_event)
+        # duplicate id keeps prompt
+        T.update!(m, T.KeyEvent('a'))
+        for ch in "ETCH-1"
+            T.update!(m, T.KeyEvent(ch))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === :tool_add_id
+        @test occursin("duplicate", m.last_event)
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.tool_pending_id == ""
+    end
+
+    @testset "tools mode: Enter sets filter_tool; mouse no-op; live blocked" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 8), paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        add_tool!(m, "TOOL-A", "alpha")
+        add_tool!(m, "TOOL-B", "beta")
+        m.charts[1].tools = ["TOOL-B"]  # chart assign is separate
+        m.tools_selected = 1
+
+        # live blocked in tools mode
+        m.paused = false
+        current_chart(m).live_enabled = true
+        @test _live_may_advance(m) === true  # still dashboard
+        T.update!(m, T.KeyEvent('x'))
+        @test m.view_mode == :tools
+        @test _live_may_advance(m) === false
+
+        # mouse early-return
+        m.hover_x = 5
+        m.hovered = 1
+        T.update!(m, T.MouseEvent(10, 5, T.mouse_left, T.mouse_move, false, false, false))
+        @test m.hover_x === nothing
+        @test m.hovered === nothing
+        @test occursin("modal", m.last_event)
+        @test m.view_mode == :tools
+
+        # Enter applies selected id as filter_tool and returns dashboard
+        m.tools_selected = 2
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.view_mode == :dashboard
+        @test m.filter_tool == "TOOL-B"
+        @test length(visible_charts(m)) == 1  # chart has TOOL-B assigned
+        # registry alone does not assign — TOOL-A not on any chart
+        set_filter_tool!(m, "TOOL-A")
+        @test isempty(visible_charts(m)) || all(c -> "TOOL-A" in c.tools, visible_charts(m))
+        clear_filters!(m)
+    end
+
+    @testset "tools mode: help/keymap mention x/tools registry" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 2), paused = true)
+        _ensure_charts!(m)
+        T.update!(m, T.KeyEvent('h'))
+        tb = T.TestBackend(90, 30); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 30), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:30 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("x/X", full) || occursin("tools registry", lowercase(full))
+        T.update!(m, T.KeyEvent(:escape))
+        T.update!(m, T.KeyEvent('k'))
+        tb2 = T.TestBackend(90, 28); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 90, 28), [], []))
+        full2 = join([string(T.row_text(tb2, i)) for i in 1:28 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("x X", full2) || occursin("Tools registry", full2) || occursin("tools registry", lowercase(full2))
+        T.update!(m, T.KeyEvent(:escape))
+
+        # dashboard header advertises [x]tools
+        tb3 = T.TestBackend(120, 18); T.reset!(tb3.buf)
+        T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 120, 18), [], []))
+        hdr = join([string(T.row_text(tb3, i)) for i in 1:3 if T.row_text(tb3, i) !== nothing], "\n")
+        @test occursin("[x]tools", hdr) || occursin("x]tools", hdr)
     end
 end
 
