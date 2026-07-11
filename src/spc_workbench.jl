@@ -3402,7 +3402,7 @@ end
 
 """True when visual pref is on and context has a non-empty secondary series."""
 function _dual_secondary_eligible(m::SPCWorkbenchModel, ctx::ChartRenderContext)::Bool
-    get(m.visual_prefs, "secondary_canvas", get(DEFAULT_VISUAL_PREFS, "secondary_canvas", true)) || return false
+    _pref_on(m, "secondary_canvas") || return false
     isempty(ctx.secondary.values) && return false
     return true
 end
@@ -3428,19 +3428,14 @@ end
 
 """
 Ephemeral secondary Viewport (KD-P2-16). Never store on the model; never mutate `m.viewport`.
-Y fit uses secondary values + secondary CL/UCL/LCL only. X domain is 1..n_sec (I-MR: values
-are length n−1 MRs; index i pairs with primary point i+1 for correlation).
+Owns X domain only (1..n_sec). Y fit is owned solely by `_render_series_canvas!` (cl/ucl/lcl
+extras when `draw_sigma_zones=false`) so fit policy lives in one place.
+I-MR: values are length n−1 MRs; index i pairs with primary point i+1 for correlation.
 """
 function _ephemeral_secondary_viewport(sec::SecondarySeries)::Viewport
     n = length(sec.values)
     vp = Viewport(x0 = 1, x1 = max(1, n), ylo = 0.0, yhi = 1.0)
-    n == 0 && return vp
-    extras = Float64[]
-    sec.cl !== nothing && isfinite(Float64(sec.cl)) && push!(extras, Float64(sec.cl))
-    sec.ucl !== nothing && isfinite(Float64(sec.ucl)) && push!(extras, Float64(sec.ucl))
-    sec.lcl !== nothing && isfinite(Float64(sec.lcl)) && push!(extras, Float64(sec.lcl))
-    clamp_viewport!(vp, n)
-    fit_viewport_y!(vp, sec.values; extras = extras)
+    n > 0 && clamp_viewport!(vp, n)
     return vp
 end
 

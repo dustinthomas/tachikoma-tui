@@ -2693,7 +2693,7 @@ end
         T.update!(m, T.KeyEvent(:escape))
     end
 
-    @testset "P2-PR2: dual on at 90×24 triple with compress (MR title; neighbors optional)" begin
+    @testset "P2-PR2: dual on at 90×24 triple with compress (MR title; neighbors hidden)" begin
         m = SPCWorkbenchModel(data = generate_spc_workbench_data(20; seed = 42), paused = true)
         _ensure_charts!(m)
         @test m.seed_demos === :triple
@@ -2708,8 +2708,21 @@ end
         # Secondary series title under active (I-MR → MR)
         @test occursin("MR (secondary)", full) || occursin("(secondary)", full)
         @test occursin("Dashboard", full)
-        # Temporary single-pane compress: neighbors need not appear this frame
-        # (no hard assert that Chart 2 is absent — side list may still name Secondary)
+        # KD-P2-15 compress: pane titles for neighbors must be absent (side list may still say Secondary)
+        @test !occursin("Chart 2:", full)
+        @test !occursin("Chart 3:", full)
+    end
+
+    @testset "P2-PR2: tall 90×40 triple keeps dual + neighbor panes (no compress)" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(20; seed = 42), paused = true)
+        _ensure_charts!(m)
+        m.visual_prefs["secondary_canvas"] = true
+        tb = T.TestBackend(90, 40); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 40), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:40 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("MR (secondary)", full) || occursin("(secondary)", full)
+        @test occursin("Chart 2:", full)
+        @test occursin("Chart 3:", full)
     end
 
     @testset "P2-PR2: pref off restores multi-pane neighbors at 90×24" begin
@@ -2721,8 +2734,8 @@ end
         rows = [T.row_text(tb, i) for i in 1:24]
         full = join([string(r) for r in rows if r !== nothing], "\n")
         @test !occursin("MR (secondary)", full)
-        @test !occursin("(secondary)", full) || !occursin("MR (", full)
-        @test occursin("Chart 2", full)  # multi-pane neighbor restored
+        @test !occursin("(secondary)", full)
+        @test occursin("Chart 2:", full)  # multi-pane neighbor restored (pane title)
     end
 
     @testset "P2-PR2: active=2 with pref off — no primary duplicate as Chart 2" begin
@@ -2737,7 +2750,7 @@ end
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 24), [], []))
         full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
         @test occursin("Bravo", full)
-        @test occursin("Chart 2", full)
+        @test occursin("Chart 2:", full)
         @test !occursin("Chart 2: Bravo", full)
         @test !occursin("Chart 2: Alpha", full)
     end
@@ -2766,10 +2779,17 @@ end
         @test m.viewport.yhi == yhi_base
         @test m.viewport.x0 == x0_base
         @test m.viewport.x1 == x1_base
-        # plot_area is primary-only (not the secondary block)
-        @test m.plot_area.y == pa_base.y || m.plot_area.height <= pa_base.height
+        # plot_area is primary-only: same top, strictly shorter than full single-canvas
+        # (a regression that bound mouse to the full dual stack would keep height == pa_base.height)
+        @test m.plot_area.y == pa_base.y
+        @test m.plot_area.height < pa_base.height
         full = join([string(T.row_text(tb1, i)) for i in 1:24 if T.row_text(tb1, i) !== nothing], "\n")
-        @test occursin("MR (secondary)", full) || occursin("(secondary)", full)
+        @test occursin("MR (secondary)", full)
+        # Secondary title must appear strictly below primary plot_area bottom (not inside primary bind rect)
+        sec_row = findfirst(i -> occursin("MR (secondary)", string(T.row_text(tb1, i))), 1:24)
+        @test sec_row !== nothing
+        pa_bottom = m.plot_area.y + m.plot_area.height - 1
+        @test sec_row > pa_bottom
     end
 
     # ── GC-PR2: Chart library mode UI + prompt SM (A5 / KD21) ─────────────
