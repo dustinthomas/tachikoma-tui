@@ -815,13 +815,16 @@ include("../src/spc_workbench.jl")
         @test length(sec_imr.values) == length(raw_imr) - 1
         @test sec_imr.bar ≈ mrbar
         @test sec_imr.cl ≈ mrbar
-        @test sec_imr.ucl ≈ SS_FACTORS[2].D4 * mrbar  # 3.267·MR̄ HTML parity
+        # Pin HTML autoLimits constant (not only relative to SS_FACTORS table)
+        @test SS_FACTORS[2].D4 == 3.267
+        @test sec_imr.ucl ≈ 3.267 * mrbar  # HTML: UCL = 3.267·MR̄
+        @test sec_imr.ucl ≈ SS_FACTORS[2].D4 * mrbar
         @test sec_imr.lcl == 0.0
         ctx_imr = resolve_chart_render_context(ch_imr)
         @test ctx_imr.secondary_name == "MR"
         @test ctx_imr.secondary_bar ≈ mrbar
         @test ctx_imr.secondary.values ≈ mrs
-        @test ctx_imr.secondary.ucl ≈ SS_FACTORS[2].D4 * mrbar
+        @test ctx_imr.secondary.ucl ≈ 3.267 * mrbar
         @test ctx_imr.secondary.lcl == 0.0
 
         # --- I_MR n < 2: empty values; bar/cl/ucl/lcl all nothing (not 0/0/0) ---
@@ -946,7 +949,7 @@ include("../src/spc_workbench.jl")
         # Secondary independent of manual primary
         @test ctx_man.secondary.values ≈ mrs
         @test ctx_man.secondary.cl ≈ mrbar
-        @test ctx_man.secondary.ucl ≈ SS_FACTORS[2].D4 * mrbar
+        @test ctx_man.secondary.ucl ≈ 3.267 * mrbar
         @test ctx_man.secondary.lcl == 0.0
         @test ctx_man.secondary_name == "MR"
         @test ctx_man.secondary_bar ≈ mrbar
@@ -1003,6 +1006,39 @@ include("../src/spc_workbench.jl")
         @test ctx_tbl.secondary.values ≈ ranges_tbl
         @test ctx_tbl.secondary.ucl ≈ f3.D4 * rbar_tbl
         @test ctx_tbl.secondary_bar ≈ rbar_tbl
+
+        # --- table_subgroups Xbar_S: B3/B4 × s̄ with meta subgroup_n (not ChartSpec.subgroup_size) ---
+        svals_tbl = Float64[1.0, 1.5, 0.5]
+        ch_tbl_s = ChartSpec(
+            chart_type = Xbar_S,
+            data = WorkbenchData(
+                values = means_tbl,
+                cl = 0.0,
+                sigma = 0.0,
+                meta = Dict{String,Any}(
+                    "table_subgroups" => true,
+                    "secondary_vals" => svals_tbl,
+                    "secondary_name" => "s",
+                    "subgroup_n" => n_tbl,
+                ),
+            ),
+            subgroup_size = 5,  # must not drive secondary B3/B4
+        )
+        sec_tbl_s = secondary_series_for(ch_tbl_s, means_tbl)
+        sbar_tbl = mean(svals_tbl)
+        @test sec_tbl_s.name == "s"
+        @test sec_tbl_s.values ≈ svals_tbl
+        @test sec_tbl_s.bar ≈ sbar_tbl
+        @test sec_tbl_s.cl ≈ sbar_tbl
+        @test sec_tbl_s.ucl ≈ f3.B4 * sbar_tbl
+        @test sec_tbl_s.lcl ≈ f3.B3 * sbar_tbl
+        @test sec_tbl_s.ucl ≉ SS_FACTORS[5].B4 * sbar_tbl
+        ctx_tbl_s = resolve_chart_render_context(ch_tbl_s)
+        @test ctx_tbl_s.secondary.values ≈ svals_tbl
+        @test ctx_tbl_s.secondary.ucl ≈ f3.B4 * sbar_tbl
+        @test ctx_tbl_s.secondary.lcl ≈ f3.B3 * sbar_tbl
+        @test ctx_tbl_s.secondary_name == "s"
+        @test ctx_tbl_s.secondary_bar ≈ sbar_tbl
     end
 
     @testset "PR7b: table-sourced Xbar subgroups by column (pure fixtures)" begin

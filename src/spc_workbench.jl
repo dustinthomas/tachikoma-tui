@@ -3613,7 +3613,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
         # Mode badge = effective gateway path (same predicate as resolve_chart_render_context)
         mode_lbl = _manual_limits_effective(act_ch) ? "limits:manual" : "limits:auto"
         set_string!(buf, x, y, "n=$n_primary $mode_lbl", tstyle(:text)); y += 1
-        # Secondary (Rbar/sbar/MRbar) on same line as cl/σ — dual canvas deferred (P2)
+        # Secondary stats (Rbar/sbar/MRbar); dual canvas draw is P2-PR2 (pure SecondarySeries is P2-PR1)
         cl_sigma = "cl=$(round(lz.cl;digits=2)) σ=$(round(lz.sigma;digits=2))"
         if act_ctx.secondary_bar !== nothing && !isempty(act_ctx.secondary_name)
             sec_lbl = if act_ctx.secondary_name == "R"
