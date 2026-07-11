@@ -137,6 +137,34 @@ Value
 100.4
 ```
 
+### Sample CSV templates (headers only)
+
+Branded **blank** CSV templates live under `test/fixtures/spc/templates/`.
+Header row only — no Excel / XLSX, no generator UI (KD-P2-13). Copy a
+template, fill rows, then import via library **`i`**.
+
+| File | Purpose | Header |
+|------|---------|--------|
+| `template_generic.csv` | Generic multi-column fab sheet | `Timestamp,Tool,Lot,Wafer,Chip,Value,Defects,n` |
+| `template_tool.csv` | Tool-aware columns (filter / `col_tool` map) | `Timestamp,Tool,Lot,Wafer,Value,Defects,n` |
+| `template_size_bin.csv` | Size-bin oriented (one row per particle/defect) | `Timestamp,Tool,Lot,Wafer,Value,Units,Defects,n` |
+
+Notes:
+
+- Phase A import still prefers a case-sensitive **`Value`** column (series-first).
+  Extra columns are kept on the in-memory SharedTable when multi-column CSV is
+  ingested; map `col_tool` / `col_time` / `col_lot` in the builder as needed.
+- **Size-bin template:** `Value` = numeric item size; `Wafer` = subgroup column
+  for per-wafer counts when size binning is enabled (optional late feature).
+  Leave `Defects` / `n` blank when binning supplies the count series.
+- Paths relative to package root:
+
+```text
+test/fixtures/spc/templates/template_generic.csv
+test/fixtures/spc/templates/template_tool.csv
+test/fixtures/spc/templates/template_size_bin.csv
+```
+
 ### After successful import into a chart
 
 1. Replace (default) or append `ch.data.values`.
