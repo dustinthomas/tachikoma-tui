@@ -44,6 +44,18 @@ change that default. Use `:single` or `:none` only in explicit constructs.
 | `?` / `h` | Help overlay |
 | `k` | Keymap page |
 
+### Dual secondary canvas (active plot)
+
+I-MR / X̄-R / X̄-S charts can show a **secondary series canvas** (MR / R / s) stacked
+under the **active** plot only (neighbors stay single-series when drawn).
+
+| Item | Behavior |
+|------|----------|
+| Pref | Visual Preferences (`o`) → **Secondary canvas (MR/R/s)** (default **on**) |
+| Limits | Secondary CL/UCL/LCL only (no WECO markers, no USL/LSL, no ±σ zones on secondary) |
+| Mouse | Primary only — secondary is display-only; `plot_area` / `viewport` stay primary |
+| Height | If multi-pane would starve dual (active outer &lt; 14), **temporary single-pane compress** for that frame so dual can fit; not permanent focused mode. Pref off restores neighbor panes. |
+
 ### Live toggle (`g` / `G`)
 
 Per-chart only (no model-level live flag):
@@ -215,7 +227,7 @@ load_workbench!(m, "session.json")       # in-session replace (library W)
 | `tools` | no | Array of `{id, description}` |
 | `default_rules` | no | Session WECO enable map for **new** charts (`add_chart!` seed). Distinct from per-chart `enabled_rules`. Omitted → module `DEFAULT_WECO_RULES`. |
 | `show_chart_lines` | no | CL / σ / specs visibility |
-| `visual_prefs` | no | Series connector prefs |
+| `visual_prefs` | no | Series connectors + `secondary_canvas` (dual MR/R/s under active) |
 | `paused` | no | Bool; default false if omitted |
 | `table` | no | SharedTable `{columns, rows}`; **omitted on save when empty**; missing/null → empty on load |
 

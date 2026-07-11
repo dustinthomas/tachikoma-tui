@@ -1951,6 +1951,8 @@ end
         # use default ctor that will populate multi in impl
         m = SPCWorkbenchModel(data=generate_spc_workbench_data(15;seed=99), paused=true)
         _ensure_charts!(m)  # ensure copies exist before we mutate ch2
+        # Pref off so multi-pane neighbors stay visible (dual compress would hide them at H=28)
+        m.visual_prefs["secondary_canvas"] = false
         # Force OOS on ch2 (secondary) so its render path draws an ✕ marker
         if length(m.charts) >= 2
             ch2 = m.charts[2]
@@ -1978,6 +1980,8 @@ end
         m = SPCWorkbenchModel(data = generate_spc_workbench_data(15; seed = 99), paused = true)
         _ensure_charts!(m)
         @test length(m.charts) == 3
+        # Pref off so dual compress does not hide the neighbor pane under test
+        m.visual_prefs["secondary_canvas"] = false
         # Distinct names for pane title assertions
         m.charts[1].name = "Alpha"
         m.charts[2].name = "Bravo"
@@ -2667,6 +2671,105 @@ end
         # Connecting line! adds braille cells; points-only is sparser
         @test braille_on > braille_off
         @test braille_on >= 2
+    end
+
+    # ── P2-PR2: dual secondary canvas under active plot (KD-P2-15/16/17) ──
+    @testset "P2-PR2: dual secondary canvas — pref defaults + Visual tab" begin
+        @test "secondary_canvas" in VISUAL_PREF_KEYS
+        @test get(DEFAULT_VISUAL_PREFS, "secondary_canvas", false) === true
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(12; seed = 3), paused = true)
+        @test haskey(m.visual_prefs, "secondary_canvas")
+        @test m.visual_prefs["secondary_canvas"] === true
+        T.update!(m, T.KeyEvent('o'))
+        tb = T.TestBackend(80, 16); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 16), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:16 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("Secondary canvas", full) || occursin("secondary", lowercase(full))
+        # key 4 toggles secondary_canvas (4th visual pref)
+        T.update!(m, T.KeyEvent('4'))
+        @test m.visual_prefs["secondary_canvas"] === false
+        T.update!(m, T.KeyEvent('4'))
+        @test m.visual_prefs["secondary_canvas"] === true
+        T.update!(m, T.KeyEvent(:escape))
+    end
+
+    @testset "P2-PR2: dual on at 90×24 triple with compress (MR title; neighbors optional)" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(20; seed = 42), paused = true)
+        _ensure_charts!(m)
+        @test m.seed_demos === :triple
+        @test length(m.charts) == 3
+        @test m.active == 1
+        @test current_chart(m).chart_type == I_MR
+        m.visual_prefs["secondary_canvas"] = true
+        tb = T.TestBackend(90, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 24), [], []))
+        rows = [T.row_text(tb, i) for i in 1:24]
+        full = join([string(r) for r in rows if r !== nothing], "\n")
+        # Secondary series title under active (I-MR → MR)
+        @test occursin("MR (secondary)", full) || occursin("(secondary)", full)
+        @test occursin("Dashboard", full)
+        # Temporary single-pane compress: neighbors need not appear this frame
+        # (no hard assert that Chart 2 is absent — side list may still name Secondary)
+    end
+
+    @testset "P2-PR2: pref off restores multi-pane neighbors at 90×24" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(20; seed = 42), paused = true)
+        _ensure_charts!(m)
+        m.visual_prefs["secondary_canvas"] = false
+        tb = T.TestBackend(90, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 24), [], []))
+        rows = [T.row_text(tb, i) for i in 1:24]
+        full = join([string(r) for r in rows if r !== nothing], "\n")
+        @test !occursin("MR (secondary)", full)
+        @test !occursin("(secondary)", full) || !occursin("MR (", full)
+        @test occursin("Chart 2", full)  # multi-pane neighbor restored
+    end
+
+    @testset "P2-PR2: active=2 with pref off — no primary duplicate as Chart 2" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(15; seed = 99), paused = true)
+        _ensure_charts!(m)
+        m.visual_prefs["secondary_canvas"] = false
+        m.charts[1].name = "Alpha"
+        m.charts[2].name = "Bravo"
+        m.charts[3].name = "Charlie"
+        set_active_chart!(m, 2)
+        tb = T.TestBackend(90, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 24), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("Bravo", full)
+        @test occursin("Chart 2", full)
+        @test !occursin("Chart 2: Bravo", full)
+        @test !occursin("Chart 2: Alpha", full)
+    end
+
+    @testset "P2-PR2: secondary Viewport isolation (m.viewport Y unchanged by dual)" begin
+        d = generate_spc_workbench_data(25; seed = 7, μ = 100.0, σ = 2.0)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        m.visual_prefs["secondary_canvas"] = false
+        n = length(m.data.values)
+        m.viewport.x0 = 1
+        m.viewport.x1 = n
+        tb0 = T.TestBackend(90, 24); T.reset!(tb0.buf)
+        T.view(m, T.Frame(tb0.buf, T.Rect(1, 1, 90, 24), [], []))
+        ylo_base = m.viewport.ylo
+        yhi_base = m.viewport.yhi
+        x0_base = m.viewport.x0
+        x1_base = m.viewport.x1
+        pa_base = m.plot_area
+
+        m.visual_prefs["secondary_canvas"] = true
+        tb1 = T.TestBackend(90, 24); T.reset!(tb1.buf)
+        T.view(m, T.Frame(tb1.buf, T.Rect(1, 1, 90, 24), [], []))
+        # Primary viewport X/Y must match single-canvas baseline for same data (KD-P2-16)
+        @test m.viewport.ylo == ylo_base
+        @test m.viewport.yhi == yhi_base
+        @test m.viewport.x0 == x0_base
+        @test m.viewport.x1 == x1_base
+        # plot_area is primary-only (not the secondary block)
+        @test m.plot_area.y == pa_base.y || m.plot_area.height <= pa_base.height
+        full = join([string(T.row_text(tb1, i)) for i in 1:24 if T.row_text(tb1, i) !== nothing], "\n")
+        @test occursin("MR (secondary)", full) || occursin("(secondary)", full)
     end
 
     # ── GC-PR2: Chart library mode UI + prompt SM (A5 / KD21) ─────────────

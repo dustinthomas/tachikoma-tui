@@ -500,17 +500,24 @@ const DEFAULT_CHART_LINES = Dict{String,Bool}(
 _line_on(m, key::AbstractString) = get(m.show_chart_lines, key, true)
 
 # Extensible graph visual preferences (add keys over time; panel lists VISUAL_PREF_KEYS)
-const VISUAL_PREF_KEYS = ["solid_series", "solid_stroke", "braille_series"]
+const VISUAL_PREF_KEYS = ["solid_series", "solid_stroke", "braille_series", "secondary_canvas"]
 const VISUAL_PREF_LABELS = Dict{String,String}(
     "solid_series" => "Dotted series (• connect)",
     "solid_stroke" => "Solid stroke (box-drawing)",
     "braille_series" => "Braille canvas line (between dots)",
+    "secondary_canvas" => "Secondary canvas (MR/R/s)",
 )
 const DEFAULT_VISUAL_PREFS = Dict{String,Bool}(
     "solid_series" => true,
     "solid_stroke" => true,
     "braille_series" => true,
+    "secondary_canvas" => true,
 )
+
+# Dual secondary canvas layout (KD-P2-15): min outer height for two stacked Blocks;
+# primary/secondary height fraction when splitting the active plot rect.
+const DUAL_MIN_OUTER_H = 14
+const DUAL_PRIMARY_FRAC = 0.62
 
 _pref_on(m, key::AbstractString) = get(m.visual_prefs, key, get(DEFAULT_VISUAL_PREFS, key, false))
 
@@ -3391,6 +3398,273 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     _sync_active_back!(m)
 end
 
+# ── Dual secondary canvas helpers (KD-P2-15 / 16 / 17) ─────────────────
+
+"""True when visual pref is on and context has a non-empty secondary series."""
+function _dual_secondary_eligible(m::SPCWorkbenchModel, ctx::ChartRenderContext)::Bool
+    get(m.visual_prefs, "secondary_canvas", get(DEFAULT_VISUAL_PREFS, "secondary_canvas", true)) || return false
+    isempty(ctx.secondary.values) && return false
+    return true
+end
+
+"""
+Split `active` into stacked primary (~62%) + secondary (~35%) outer rects.
+Returns `nothing` when outer height cannot host both min sizes (primary ≥8, secondary ≥6).
+"""
+function _split_dual_plot_rects(active::Rect)
+    H = active.height
+    H < DUAL_MIN_OUTER_H && return nothing
+    h_pri = max(8, round(Int, H * DUAL_PRIMARY_FRAC))
+    h_sec = H - h_pri
+    if h_sec < 6
+        h_pri = H - 6
+        h_sec = 6
+    end
+    (h_pri < 8 || h_sec < 6) && return nothing
+    pri = Rect(active.x, active.y, active.width, h_pri)
+    sec = Rect(active.x, active.y + h_pri, active.width, h_sec)
+    return (pri, sec)
+end
+
+"""
+Ephemeral secondary Viewport (KD-P2-16). Never store on the model; never mutate `m.viewport`.
+Y fit uses secondary values + secondary CL/UCL/LCL only. X domain is 1..n_sec (I-MR: values
+are length n−1 MRs; index i pairs with primary point i+1 for correlation).
+"""
+function _ephemeral_secondary_viewport(sec::SecondarySeries)::Viewport
+    n = length(sec.values)
+    vp = Viewport(x0 = 1, x1 = max(1, n), ylo = 0.0, yhi = 1.0)
+    n == 0 && return vp
+    extras = Float64[]
+    sec.cl !== nothing && isfinite(Float64(sec.cl)) && push!(extras, Float64(sec.cl))
+    sec.ucl !== nothing && isfinite(Float64(sec.ucl)) && push!(extras, Float64(sec.ucl))
+    sec.lcl !== nothing && isfinite(Float64(sec.lcl)) && push!(extras, Float64(sec.lcl))
+    clamp_viewport!(vp, n)
+    fit_viewport_y!(vp, sec.values; extras = extras)
+    return vp
+end
+
+"""
+    _render_series_canvas!(buf, outer, m, f; title, values, viewport, …) -> plot_inner
+
+Draw one series into `outer` Rect: Block(title) + Canvas + connectors + limit lines (KD-P2-17).
+Does **not** set `m.plot_area` / `m.viewport` unless `bind_mouse=true` (primary only).
+Secondary path: CL/UCL/LCL only (`draw_sigma_zones`/`draw_weco_markers`/`draw_specs`/`draw_hover` false).
+"""
+function _render_series_canvas!(
+    buf, outer::Rect, m::SPCWorkbenchModel, f::Frame;
+    title::AbstractString,
+    values::AbstractVector{<:Real},
+    viewport::Viewport,
+    cl::Union{Real,Nothing} = nothing,
+    ucl::Union{Real,Nothing} = nothing,
+    lcl::Union{Real,Nothing} = nothing,
+    lz::Union{LimitsAndZones,Nothing} = nothing,
+    ctx::Union{ChartRenderContext,Nothing} = nothing,
+    chart::Union{ChartSpec,Nothing} = nothing,
+    bind_mouse::Bool = false,
+    draw_weco_markers::Bool = false,
+    draw_specs::Bool = false,
+    draw_sigma_zones::Bool = false,
+    draw_hover::Bool = false,
+    title_style = tstyle(:title),
+    border_style = tstyle(:border),
+    usl = nothing,
+    lsl = nothing,
+)::Rect
+    plot_block = Block(title = String(title), border_style = border_style, title_style = title_style)
+    plot_inner = render(plot_block, outer, buf)
+    if bind_mouse
+        m.plot_area = plot_inner
+    end
+
+    cw = plot_inner.width
+    chh = plot_inner.height
+    n_plot = length(values)
+    if cw <= 0 || chh <= 0 || n_plot <= 0
+        return plot_inner
+    end
+
+    clamp_viewport!(viewport, n_plot)
+
+    # Y fit: primary uses full lz + specs prefs; secondary uses cl/ucl/lcl extras only
+    if draw_sigma_zones && lz !== nothing
+        auto_fit_viewport_y!(viewport, values, lz;
+            usl = usl, lsl = lsl, show_lines = m.show_chart_lines)
+    else
+        extras = Float64[]
+        cl !== nothing && isfinite(Float64(cl)) && push!(extras, Float64(cl))
+        ucl !== nothing && isfinite(Float64(ucl)) && push!(extras, Float64(ucl))
+        lcl !== nothing && isfinite(Float64(lcl)) && push!(extras, Float64(lcl))
+        fit_viewport_y!(viewport, values; extras = extras)
+    end
+
+    viol_set = ctx === nothing ? Set{Int}() : ctx.viol_indices
+    c = create_canvas(cw, chh; style = !isempty(viol_set) ? tstyle(:accent) : tstyle(:primary))
+    dw, dh = canvas_dot_size(c)
+
+    prev = nothing
+    for i in viewport.x0:viewport.x1
+        if i < 1 || i > n_plot
+            continue
+        end
+        v = Float64(values[i])
+        dx = map_to_dot_x(i, viewport, dw)
+        dy = map_to_dot_y(v, viewport, dh)
+        set_point!(c, dx, dy)
+        if prev !== nothing && _pref_on(m, "braille_series")
+            line!(c, prev[1], prev[2], dx, dy)
+        end
+        prev = (dx, dy)
+    end
+
+    # Limit / zone lines on canvas
+    if draw_sigma_zones && lz !== nothing
+        if _line_on(m, "sigma1")
+            for (z, dash) in [(lz.ucl1, 2), (lz.lcl1, 2)]
+                zy = map_to_dot_y(z, viewport, dh)
+                dashed_line!(c, 0, zy, dw - 1, zy; dash = dash)
+            end
+        end
+        if _line_on(m, "sigma2")
+            for (z, dash) in [(lz.ucl2, 3), (lz.lcl2, 3)]
+                zy = map_to_dot_y(z, viewport, dh)
+                dashed_line!(c, 0, zy, dw - 1, zy; dash = dash)
+            end
+        end
+        if _line_on(m, "sigma3")
+            dashed_line!(c, 0, map_to_dot_y(lz.ucl, viewport, dh), dw - 1, map_to_dot_y(lz.ucl, viewport, dh); dash = 4)
+            dashed_line!(c, 0, map_to_dot_y(lz.lcl, viewport, dh), dw - 1, map_to_dot_y(lz.lcl, viewport, dh); dash = 4)
+        end
+        if _line_on(m, "cl")
+            line!(c, 0, map_to_dot_y(lz.cl, viewport, dh), dw - 1, map_to_dot_y(lz.cl, viewport, dh))
+        end
+        if draw_specs && _line_on(m, "specs")
+            if usl !== nothing
+                sy = map_to_dot_y(Float64(usl), viewport, dh)
+                dashed_line!(c, 0, sy, dw - 1, sy; dash = 2)
+            end
+            if lsl !== nothing
+                sy = map_to_dot_y(Float64(lsl), viewport, dh)
+                dashed_line!(c, 0, sy, dw - 1, sy; dash = 2)
+            end
+        end
+    else
+        # Secondary (or simplified): CL / UCL / LCL only when provided
+        if ucl !== nothing
+            dashed_line!(c, 0, map_to_dot_y(Float64(ucl), viewport, dh), dw - 1, map_to_dot_y(Float64(ucl), viewport, dh); dash = 4)
+        end
+        if lcl !== nothing
+            dashed_line!(c, 0, map_to_dot_y(Float64(lcl), viewport, dh), dw - 1, map_to_dot_y(Float64(lcl), viewport, dh); dash = 4)
+        end
+        if cl !== nothing
+            line!(c, 0, map_to_dot_y(Float64(cl), viewport, dh), dw - 1, map_to_dot_y(Float64(cl), viewport, dh))
+        end
+    end
+
+    render_canvas(c, plot_inner, f)
+
+    # Colorized limit overlays on buffer cells
+    function _draw_lim_line!(rect, val, sty, step = 3)
+        yy = data_val_to_cell_row(Float64(val), rect, viewport)
+        for xx in rect.x:right(rect)
+            if (xx % step) == 0
+                set_char!(buf, xx, yy, '-', sty)
+            end
+        end
+    end
+    if draw_sigma_zones && lz !== nothing
+        if draw_specs && _line_on(m, "specs")
+            if usl !== nothing; _draw_lim_line!(plot_inner, usl, tstyle(:error, bold = true), 2); end
+            if lsl !== nothing; _draw_lim_line!(plot_inner, lsl, tstyle(:error, bold = true), 2); end
+        end
+        if _line_on(m, "sigma3")
+            _draw_lim_line!(plot_inner, lz.ucl, tstyle(:warning, bold = true), 4)
+            _draw_lim_line!(plot_inner, lz.lcl, tstyle(:warning, bold = true), 4)
+        end
+        if _line_on(m, "sigma2")
+            _draw_lim_line!(plot_inner, lz.ucl2, tstyle(:secondary), 3)
+            _draw_lim_line!(plot_inner, lz.lcl2, tstyle(:secondary), 3)
+        end
+        if _line_on(m, "sigma1")
+            _draw_lim_line!(plot_inner, lz.ucl1, tstyle(:text_dim), 2)
+            _draw_lim_line!(plot_inner, lz.lcl1, tstyle(:text_dim), 2)
+        end
+        if _line_on(m, "cl")
+            cly = data_val_to_cell_row(lz.cl, plot_inner, viewport)
+            for xx in plot_inner.x:right(plot_inner); set_char!(buf, xx, cly, '─', tstyle(:accent)); end
+        end
+    else
+        if ucl !== nothing
+            _draw_lim_line!(plot_inner, ucl, tstyle(:warning, bold = true), 4)
+        end
+        if lcl !== nothing
+            _draw_lim_line!(plot_inner, lcl, tstyle(:warning, bold = true), 4)
+        end
+        if cl !== nothing
+            cly = data_val_to_cell_row(Float64(cl), plot_inner, viewport)
+            for xx in plot_inner.x:right(plot_inner); set_char!(buf, xx, cly, '─', tstyle(:accent)); end
+        end
+    end
+
+    # Hover / select overlays (primary only)
+    if draw_hover
+        if m.hover_x !== nothing
+            hx = clamp(m.hover_x, plot_inner.x, right(plot_inner))
+            for y in (plot_inner.y + 1):(bottom(plot_inner) - 1)
+                set_char!(buf, hx, y, '│', tstyle(:accent))
+            end
+        end
+        if (si = m.selected) !== nothing && 1 <= si <= n_plot && si >= viewport.x0 && si <= viewport.x1
+            hx = data_index_to_cell(si, plot_inner, viewport)
+            for y in (plot_inner.y + 1):(bottom(plot_inner) - 1)
+                set_char!(buf, hx, y, '┃', tstyle(:secondary, bold = true))
+            end
+        end
+        if (hi = m.hovered) !== nothing && 1 <= hi <= n_plot && hi >= viewport.x0 && hi <= viewport.x1
+            hy = data_val_to_cell_row(Float64(values[hi]), plot_inner, viewport)
+            set_char!(buf, plot_inner.x + 1, hy, '─', tstyle(:accent))
+        end
+    end
+
+    draw_series_connectors!(buf, plot_inner, values, viewport, m)
+
+    # Point markers
+    for i in viewport.x0:viewport.x1
+        if i < 1 || i > n_plot
+            continue
+        end
+        dx = data_index_to_cell(i, plot_inner, viewport)
+        dy = data_val_to_cell_row(Float64(values[i]), plot_inner, viewport)
+        if draw_weco_markers && ctx !== nothing && chart !== nothing
+            st = point_status(i, ctx, chart)
+            if st == :oos
+                sym = '✕'; sty = tstyle(:error, bold = true)
+            elseif st == :ooc
+                sym = '◆'; sty = tstyle(:warning, bold = true)
+            else
+                sym = '●'; sty = tstyle(:primary, bold = true)
+            end
+        else
+            sym = '●'; sty = tstyle(:primary, bold = true)
+        end
+        set_char!(buf, dx, dy, sym, sty)
+    end
+
+    if draw_hover && ctx !== nothing
+        if (hi = m.hovered) !== nothing && 1 <= hi <= n_plot && hi >= viewport.x0 && hi <= viewport.x1 && m.drag_start === nothing
+            draw_hover_tooltip!(buf, plot_inner, hi, Float64(values[hi]), hi in viol_set, viewport;
+                usl = usl, target = m.target, lsl = lsl)
+        end
+    end
+
+    # X-range labels
+    set_string!(buf, plot_inner.x, plot_inner.y + chh - 1, string(viewport.x0), tstyle(:text_dim))
+    set_string!(buf, right(plot_inner) - 3, plot_inner.y + chh - 1, string(viewport.x1), tstyle(:text_dim))
+
+    return plot_inner
+end
+
 # ── View (full, with slices) ────────────────────────────────────────────
 
 function view(m::SPCWorkbenchModel, f::Frame)
@@ -3477,6 +3751,24 @@ function view(m::SPCWorkbenchModel, f::Frame)
         end
     end
 
+    # Dual secondary eligibility + temporary single-pane compress (KD-P2-15)
+    # Resolve active context once for dual decision (reuse for primary draw below).
+    ch_for_dual = current_chart(m)
+    dual_ctx = (n > 0 && length(ch_for_dual.data.values) > 0) ?
+        resolve_chart_render_context(ch_for_dual; sigma_method = :mr) : nothing
+    dual_eligible = dual_ctx !== nothing && _dual_secondary_eligible(m, dual_ctx)
+    if dual_eligible && is_dashboard_multi && active_plot_rect.height < DUAL_MIN_OUTER_H
+        # Temporary compress only when full plot can actually host dual (else keep multi + primary-only)
+        if plot_rect.height >= DUAL_MIN_OUTER_H
+            is_dashboard_multi = false
+            active_plot_rect = plot_rect
+            second_plot_rect = nothing
+            third_plot_rect = nothing
+        end
+    end
+    dual_split = dual_eligible ? _split_dual_plot_rects(active_plot_rect) : nothing
+    show_dual = dual_split !== nothing
+
     # header
     hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [m]library [x]tools [f]filter [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
@@ -3558,168 +3850,73 @@ function view(m::SPCWorkbenchModel, f::Frame)
         return
     end
 
-    # normal (or dashboard multi) render for active
+    # Active primary (+ optional dual secondary canvas under it — KD-P2-15/16/17)
     chname = isempty(m.charts) ? "Data" : current_chart(m).name
     empty_hint = (n == 0) ? " — No data — import CSV or clone a demo" : ""
-    plot_block = Block(title = "Dashboard: $(chname) [$(m.active)/$(length(m.charts))] (│ hover  ┃ select  drag pan  wheel zoom)  [ ] switch$(empty_hint)", border_style = tstyle(:border), title_style = tstyle(:title))
-    plot_inner = render(plot_block, active_plot_rect, buf)
-    m.plot_area = plot_inner
+    pri_title = "Dashboard: $(chname) [$(m.active)/$(length(m.charts))] (│ hover  ┃ select  drag pan  wheel zoom)  [ ] switch$(empty_hint)"
+    primary_outer = show_dual ? dual_split[1] : active_plot_rect
+    secondary_outer = show_dual ? dual_split[2] : nothing
 
-    cw = plot_inner.width
-    ch = plot_inner.height
+    ch_act = current_chart(m)
+    ctx = dual_ctx === nothing ?
+        (n > 0 ? resolve_chart_render_context(ch_act; sigma_method = :mr) : nothing) :
+        dual_ctx
 
-    if cw > 0 && ch > 0 && n > 0
-        ch_act = current_chart(m)
-        ctx = resolve_chart_render_context(ch_act; sigma_method = :mr)
-        viol_set = ctx.viol_indices
-        lz_disp = ctx.lz   # type-aware limits (I-MR :mr or Xbar A2/A3)
-        # Plot primary series: individuals (I-MR) or subgroup means (Xbar_R/S)
+    if n > 0 && ctx !== nothing && !isempty(ctx.primary_values)
         plot_vals = ctx.primary_values
         n_plot = length(plot_vals)
-        if n_plot > 0
-            # Keep viewport within primary length (Xbar has fewer points than raw series)
-            clamp_viewport!(m.viewport, n_plot)
-            # Auto-scale Y so visible points + enabled limit/spec lines stay inside the plot
-            auto_fit_viewport_y!(m.viewport, plot_vals, lz_disp;
-                usl = m.usl, lsl = m.lsl, show_lines = m.show_chart_lines)
-            ch_act.viewport = m.viewport
+        lz_disp = ctx.lz
+        # Keep viewport within primary length (Xbar has fewer points than raw series)
+        clamp_viewport!(m.viewport, n_plot)
+        ch_act.viewport = m.viewport
 
-            c = create_canvas(cw, ch; style = !isempty(viol_set) ? tstyle(:accent) : tstyle(:primary))
-            dw, dh = canvas_dot_size(c)
+        _render_series_canvas!(
+            buf, primary_outer, m, f;
+            title = pri_title,
+            values = plot_vals,
+            viewport = m.viewport,
+            cl = lz_disp.cl, ucl = lz_disp.ucl, lcl = lz_disp.lcl,
+            lz = lz_disp,
+            ctx = ctx,
+            chart = ch_act,
+            bind_mouse = true,
+            draw_weco_markers = true,
+            draw_specs = true,
+            draw_sigma_zones = true,
+            draw_hover = true,
+            usl = m.usl,
+            lsl = m.lsl,
+        )
+        # Primary-only ownership: plot_area set by helper; viewport Y from primary fit only
+        ch_act.viewport = m.viewport
 
-            prev = nothing
-            for i in m.viewport.x0:m.viewport.x1
-                if i < 1 || i > n_plot
-                    continue
-                end
-                v = plot_vals[i]
-                dx = map_to_dot_x(i, m.viewport, dw)
-                dy = map_to_dot_y(v, m.viewport, dh)
-                set_point!(c, dx, dy)
-                if prev !== nothing && _pref_on(m, "braille_series")
-                    line!(c, prev[1], prev[2], dx, dy)
-                end
-                prev = (dx, dy)
+        # Dual secondary: ephemeral Viewport; never mutates m.viewport / m.plot_area (KD-P2-16)
+        if show_dual && secondary_outer !== nothing
+            sec = ctx.secondary
+            if !isempty(sec.values)
+                sec_vp = _ephemeral_secondary_viewport(sec)
+                sec_title = "$(sec.name) (secondary)"
+                _render_series_canvas!(
+                    buf, secondary_outer, m, f;
+                    title = sec_title,
+                    values = sec.values,
+                    viewport = sec_vp,
+                    cl = sec.cl, ucl = sec.ucl, lcl = sec.lcl,
+                    bind_mouse = false,
+                    draw_weco_markers = false,
+                    draw_specs = false,
+                    draw_sigma_zones = false,
+                    draw_hover = false,
+                    title_style = tstyle(:text_dim),
+                    border_style = tstyle(:border),
+                )
             end
-
-            # limits + zones (slice 5) -- gated by show_chart_lines
-            lz = lz_disp
-            if _line_on(m, "sigma1")
-                for (z, dash) in [(lz.ucl1, 2), (lz.lcl1, 2)]
-                    zy = map_to_dot_y(z, m.viewport, dh)
-                    dashed_line!(c, 0, zy, dw-1, zy; dash = dash)
-                end
-            end
-            if _line_on(m, "sigma2")
-                for (z, dash) in [(lz.ucl2, 3), (lz.lcl2, 3)]
-                    zy = map_to_dot_y(z, m.viewport, dh)
-                    dashed_line!(c, 0, zy, dw-1, zy; dash = dash)
-                end
-            end
-            if _line_on(m, "sigma3")
-                dashed_line!(c, 0, map_to_dot_y(lz.ucl, m.viewport, dh), dw-1, map_to_dot_y(lz.ucl, m.viewport, dh); dash=4)
-                dashed_line!(c, 0, map_to_dot_y(lz.lcl, m.viewport, dh), dw-1, map_to_dot_y(lz.lcl, m.viewport, dh); dash=4)
-            end
-            if _line_on(m, "cl")
-                line!(c, 0, map_to_dot_y(lz.cl, m.viewport, dh), dw-1, map_to_dot_y(lz.cl, m.viewport, dh))
-            end
-
-            # spec lines if set (slice 5)
-            if _line_on(m, "specs")
-                if m.usl !== nothing
-                    sy = map_to_dot_y(m.usl, m.viewport, dh)
-                    dashed_line!(c, 0, sy, dw-1, sy; dash=2)
-                end
-                if m.lsl !== nothing
-                    sy = map_to_dot_y(m.lsl, m.viewport, dh)
-                    dashed_line!(c, 0, sy, dw-1, sy; dash=2)
-                end
-            end
-
-            render_canvas(c, plot_inner, f)
-
-            # Colorized limit/zone/spec lines (distinct styles; gated by show_chart_lines)
-            lz_c = lz_disp
-            function _draw_lim_line!(rect, val, sty, step=3)
-                yy = data_val_to_cell_row(val, rect, m.viewport)
-                for xx in rect.x:right(rect)
-                    if (xx % step) == 0
-                        set_char!(buf, xx, yy, '-', sty)
-                    end
-                end
-            end
-            if _line_on(m, "specs")
-                if m.usl !== nothing; _draw_lim_line!(plot_inner, m.usl, tstyle(:error, bold=true), 2); end
-                if m.lsl !== nothing; _draw_lim_line!(plot_inner, m.lsl, tstyle(:error, bold=true), 2); end
-            end
-            if _line_on(m, "sigma3")
-                _draw_lim_line!(plot_inner, lz_c.ucl, tstyle(:warning, bold=true), 4)
-                _draw_lim_line!(plot_inner, lz_c.lcl, tstyle(:warning, bold=true), 4)
-            end
-            if _line_on(m, "sigma2")
-                _draw_lim_line!(plot_inner, lz_c.ucl2, tstyle(:secondary), 3)
-                _draw_lim_line!(plot_inner, lz_c.lcl2, tstyle(:secondary), 3)
-            end
-            if _line_on(m, "sigma1")
-                _draw_lim_line!(plot_inner, lz_c.ucl1, tstyle(:text_dim), 2)
-                _draw_lim_line!(plot_inner, lz_c.lcl1, tstyle(:text_dim), 2)
-            end
-            if _line_on(m, "cl")
-                cly = data_val_to_cell_row(lz_c.cl, plot_inner, m.viewport)
-                for xx in plot_inner.x:right(plot_inner); set_char!(buf, xx, cly, '─', tstyle(:accent)); end
-            end
-
-            # overlays (fidelity)
-            if m.hover_x !== nothing
-                hx = clamp(m.hover_x, plot_inner.x, right(plot_inner))
-                for y in (plot_inner.y+1):(bottom(plot_inner)-1)
-                    set_char!(buf, hx, y, '│', tstyle(:accent))
-                end
-            end
-            if (si = m.selected) !== nothing && 1 <= si <= n_plot && si >= m.viewport.x0 && si <= m.viewport.x1
-                hx = data_index_to_cell(si, plot_inner, m.viewport)
-                for y in (plot_inner.y+1):(bottom(plot_inner)-1)
-                    set_char!(buf, hx, y, '┃', tstyle(:secondary, bold=true))
-                end
-            end
-            if (hi = m.hovered) !== nothing && 1 <= hi <= n_plot && hi >= m.viewport.x0 && hi <= m.viewport.x1
-                hy = data_val_to_cell_row(plot_vals[hi], plot_inner, m.viewport)
-                set_char!(buf, plot_inner.x + 1, hy, '─', tstyle(:accent))
-            end
-
-            # Series connectors (visual prefs): dotted • and/or solid box-drawing stroke
-            draw_series_connectors!(buf, plot_inner, plot_vals, m.viewport, m)
-
-            # markers on primary (X̄ for Xbar charts)
-            for i in m.viewport.x0:m.viewport.x1
-                if i < 1 || i > n_plot
-                    continue
-                end
-                dx = data_index_to_cell(i, plot_inner, m.viewport)
-                dy = data_val_to_cell_row(plot_vals[i], plot_inner, m.viewport)
-                st = point_status(i, ctx, ch_act)
-                if st == :oos
-                    sym = '✕'
-                    sty = tstyle(:error, bold=true)
-                elseif st == :ooc
-                    sym = '◆'
-                    sty = tstyle(:warning, bold=true)  # yellow WECO / OOC diamond
-                else
-                    sym = '●'
-                    sty = tstyle(:primary, bold=true)
-                end
-                set_char!(buf, dx, dy, sym, sty)
-            end
-
-            # tooltip
-            if (hi = m.hovered) !== nothing && 1 <= hi <= n_plot && hi >= m.viewport.x0 && hi <= m.viewport.x1 && m.drag_start === nothing
-                draw_hover_tooltip!(buf, plot_inner, hi, plot_vals[hi], hi in viol_set, m.viewport; usl=m.usl, target=m.target, lsl=m.lsl)
-            end
-
-            # labels
-            set_string!(buf, plot_inner.x, plot_inner.y + ch - 1, string(m.viewport.x0), tstyle(:text_dim))
-            set_string!(buf, right(plot_inner)-3, plot_inner.y + ch - 1, string(m.viewport.x1), tstyle(:text_dim))
         end
+    else
+        # Empty / no primary: still draw a Block shell and bind mouse area to primary outer
+        plot_block = Block(title = pri_title, border_style = tstyle(:border), title_style = tstyle(:title))
+        plot_inner = render(plot_block, primary_outer, buf)
+        m.plot_area = plot_inner
     end
 
     # Read-only extra panes from dashboard_pane_charts (panes[2], panes[3]) — not m.charts[2]/[3]
@@ -3938,7 +4135,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
         # Mode badge = effective gateway path (same predicate as resolve_chart_render_context)
         mode_lbl = _manual_limits_effective(act_ch) ? "limits:manual" : "limits:auto"
         set_string!(buf, x, y, "n=$n_primary $mode_lbl", tstyle(:text)); y += 1
-        # Secondary stats (Rbar/sbar/MRbar); dual canvas draw is P2-PR2 (pure SecondarySeries is P2-PR1)
+        # Secondary stats (Rbar/sbar/MRbar); dual secondary canvas under active plot when pref on
         cl_sigma = "cl=$(round(lz.cl;digits=2)) σ=$(round(lz.sigma;digits=2))"
         if act_ctx.secondary_bar !== nothing && !isempty(act_ctx.secondary_name)
             sec_lbl = if act_ctx.secondary_name == "R"
@@ -4354,7 +4551,9 @@ function _render_help_page!(buf, area, m)
         "  Dashed: zone lines (±1/2/3σ), specs (USL/LSL red)",
         "",
         "DASHBOARD: multiple charts visible (switch with []); each has own viewport/specs/rules.",
-        "SIDE STATS: Rbar/sbar (Xbar) and MRbar (I-MR); dual secondary plot canvas deferred (P2).",
+        "DUAL CANVAS: I-MR/Xbar show MR/R/s under active plot when Visual pref Secondary canvas is ON.",
+        "  Multi-pane may temporarily hide neighbors so dual fits (not permanent focused mode).",
+        "SIDE STATS: Rbar/sbar (Xbar) and MRbar (I-MR) always; secondary canvas toggle in Visual (o).",
         "HTML archive: load_html_archive / load_html_archive! (#spc-state); strips admins/passcodes.",
         "WECO RULES (defaults 1-5 ON): 1=beyond3σ, 2=2of3@2σ, 3=4of5@1σ, 4=8sameCL, 5=6trend, 6=14alt, 7=15in1σ, 8=8out1σ",
         "See original HTML for full defs + workflow. This TUI ports core I-MR + WECO + Cpk fidelity.",
@@ -4394,7 +4593,8 @@ function _render_keymap_page!(buf, area, m)
         "  Wheel down  Zoom out",
         "  Library     Click select; double-click activate (≤8 ticks)",
         "",
-        "Config: Tab WECO↔Lines; ↑↓/digits/space; Esc/c/v close. Lines ●=draw on chart.",
+        "Config: Tab WECO↔Lines↔Visual; ↑↓/digits/space; Esc/c/v/o close. Lines ●=draw on chart.",
+        "Visual: solid/stroke/braille + Secondary canvas (MR/R/s under active; may hide neighbors).",
         "Builder: ↑↓ fields; Enter edit/toggle; a apply/materialize; 1-8 WECO; y type.",
         "Library i/e/w/W + f/F filters (session-only; demo tools may be empty).",
         "Tools registry: master m.tools; chart ch.tools assigned via builder (not registry alone).",
