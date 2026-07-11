@@ -1735,7 +1735,7 @@ end
     library_scroll::Int = 0
     library_area::Rect = Rect(0, 0, 0, 0)
     library_last_click::Union{Nothing, NamedTuple{(:idx, :tick), Tuple{Int, Int}}} = nothing
-    view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder, :tools
+    view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder, :tools, :table
     # Library / prompt SM (GC-PR2 / KD21)
     prompt_kind::Union{Nothing,Symbol} = nothing
     # :import_csv | :export_csv | :save_workbench | :load_workbench | :rename_chart
@@ -1762,10 +1762,243 @@ end
     filter_prompt_field::Symbol = :tool  # cycle :tool → :type → :owner on each f open
     # Phase B (PR6 / KD25): in-memory SharedTable after CSV ingress
     table::SharedTable = SharedTable()
+    # SharedTable grid (P2-PR7 / KD-P2-20) — keyboard-only modal
+    table_row::Int = 1                 # 1-based cursor row into m.table.rows
+    table_col::Int = 1                 # 1-based cursor col into m.table.columns
+    table_scroll_row::Int = 0          # 0-based row window start
+    table_scroll_col::Int = 0          # 0-based col window start
+    table_area::Rect = Rect(0, 0, 0, 0)
+    table_editing::Bool = false
+    table_buf::String = ""
     # Builder form state (keyboard-only modal)
     builder_selected::Int = 1
     builder_editing::Bool = false
     builder_buf::String = ""
+end
+
+# ── SharedTable grid helpers (P2-PR7 / KD-P2-20) ─────────────────────────
+
+const TABLE_MAX_RENDER_COLS = 50
+const TABLE_DEFAULT_CELL_W = 12
+
+function _table_n_rows(m::SPCWorkbenchModel)::Int
+    return length(m.table.rows)
+end
+
+function _table_n_cols(m::SPCWorkbenchModel)::Int
+    return min(length(m.table.columns), TABLE_MAX_RENDER_COLS)
+end
+
+"""Truncate/pad cell text to fixed display width (ASCII-oriented)."""
+function _table_cell_display(s::AbstractString, w::Int)::String
+    w <= 0 && return ""
+    t = String(s)
+    n = length(t)
+    if n > w
+        return w == 1 ? string(first(t)) : (first(t, w - 1) * "…")
+    end
+    return rpad(t, w)
+end
+
+function _table_cell_value(m::SPCWorkbenchModel, r::Int, c::Int)::String
+    nr = length(m.table.rows)
+    nc = length(m.table.columns)
+    (r < 1 || r > nr || c < 1 || c > nc) && return ""
+    col = m.table.columns[c]
+    return String(get(m.table.rows[r], col, ""))
+end
+
+function _table_set_cell!(m::SPCWorkbenchModel, r::Int, c::Int, val::AbstractString)
+    nr = length(m.table.rows)
+    nc = length(m.table.columns)
+    (r < 1 || r > nr || c < 1 || c > nc) && return
+    col = m.table.columns[c]
+    m.table.rows[r][col] = String(val)
+    return nothing
+end
+
+"""Rows visible in grid body (title/summary/header/footer chrome ≈ 8 lines)."""
+function _table_visible_row_capacity(m::SPCWorkbenchModel)::Int
+    a = m.table_area
+    (a.height <= 0 || a.width <= 0) && return 8
+    return max(1, a.height - 8)
+end
+
+"""Columns visible given cell width (row index gutter 5 + separators)."""
+function _table_visible_col_capacity(m::SPCWorkbenchModel; cell_w::Int = TABLE_DEFAULT_CELL_W)::Int
+    a = m.table_area
+    nc = _table_n_cols(m)
+    nc <= 0 && return 1
+    (a.width <= 0) && return min(nc, 4)
+    avail = max(1, a.width - 8)  # left pad + "# " gutter
+    cw = max(4, cell_w)
+    return max(1, min(nc, avail ÷ (cw + 1)))
+end
+
+"""Clamp cursor and keep selection inside the scroll window."""
+function _sync_table_scroll!(m::SPCWorkbenchModel;
+                             row_cap::Int = _table_visible_row_capacity(m),
+                             col_cap::Int = _table_visible_col_capacity(m))
+    nr = length(m.table.rows)
+    nc = _table_n_cols(m)
+    if nr <= 0 || nc <= 0
+        m.table_row = 1
+        m.table_col = 1
+        m.table_scroll_row = 0
+        m.table_scroll_col = 0
+        return
+    end
+    m.table_row = clamp(m.table_row, 1, nr)
+    m.table_col = clamp(m.table_col, 1, nc)
+    rc = max(1, row_cap)
+    if m.table_row <= m.table_scroll_row
+        m.table_scroll_row = m.table_row - 1
+    elseif m.table_row > m.table_scroll_row + rc
+        m.table_scroll_row = m.table_row - rc
+    end
+    m.table_scroll_row = clamp(m.table_scroll_row, 0, max(0, nr - rc))
+    cc = max(1, col_cap)
+    if m.table_col <= m.table_scroll_col
+        m.table_scroll_col = m.table_col - 1
+    elseif m.table_col > m.table_scroll_col + cc
+        m.table_scroll_col = m.table_col - cc
+    end
+    m.table_scroll_col = clamp(m.table_scroll_col, 0, max(0, nc - cc))
+    return nothing
+end
+
+"""Explicit rematerialize of active chart from SharedTable (never implicit on load)."""
+function _table_rematerialize_active!(m::SPCWorkbenchModel)
+    _ensure_charts!(m)
+    ch = current_chart(m)
+    nrows = length(m.table.rows)
+    if nrows == 0
+        m.last_event = "empty table — nothing to rematerialize"
+        return
+    end
+    materialize_chart_from_table!(ch, m.table; show_lines = m.show_chart_lines)
+    # Push chart → legacy mirrors (materialize owns ch.data; do NOT _sync_active_back!)
+    m.data = ch.data
+    m.viewport = ch.viewport
+    m.usl = ch.usl
+    m.target = ch.target
+    m.lsl = ch.lsl
+    m.enabled_rules = ch.enabled_rules
+    m.last_event = "rematerialized $(length(ch.data.values)) pts from table"
+    return nothing
+end
+
+function _handle_table_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
+    _ensure_charts!(m)
+    nr = length(m.table.rows)
+    nc = _table_n_cols(m)
+
+    # Mid-edit: Esc cancel; Enter commit; printable into buf; q is literal
+    if m.table_editing
+        if evt.key == :escape
+            m.table_editing = false
+            m.table_buf = ""
+            m.last_event = "cell edit cancel"
+            return
+        elseif evt.key == :enter
+            if nr >= 1 && nc >= 1
+                m.table_row = clamp(m.table_row, 1, nr)
+                m.table_col = clamp(m.table_col, 1, nc)
+                _table_set_cell!(m, m.table_row, m.table_col, m.table_buf)
+                m.last_event = "cell set r=$(m.table_row) c=$(m.table_col)"
+            else
+                m.last_event = "empty table — no cell"
+            end
+            m.table_editing = false
+            m.table_buf = ""
+            return
+        elseif evt.key == :backspace
+            m.table_buf = isempty(m.table_buf) ? "" : chop(m.table_buf)
+            m.last_event = "edit: $(m.table_buf)"
+            return
+        elseif evt.key == :char
+            c = evt.char
+            if c >= ' ' && c != '\x7f'
+                m.table_buf *= string(c)
+                m.last_event = "edit: $(m.table_buf)"
+            end
+            return
+        end
+        return
+    end
+
+    if evt.key == :escape || (evt.key == :char && (evt.char == 'q' || evt.char == 'Q'))
+        m.view_mode = :dashboard
+        m.table_editing = false
+        m.table_buf = ""
+        m.last_event = "table closed"
+        return
+    end
+
+    if evt.key == :up
+        if nr >= 1
+            m.table_row = max(1, m.table_row - 1)
+        end
+        _sync_table_scroll!(m)
+        m.last_event = "table r=$(m.table_row) c=$(m.table_col)"
+        return
+    elseif evt.key == :down
+        if nr >= 1
+            m.table_row = min(nr, m.table_row + 1)
+        end
+        _sync_table_scroll!(m)
+        m.last_event = "table r=$(m.table_row) c=$(m.table_col)"
+        return
+    elseif evt.key == :left
+        if nc >= 1
+            m.table_col = max(1, m.table_col - 1)
+        end
+        _sync_table_scroll!(m)
+        m.last_event = "table r=$(m.table_row) c=$(m.table_col)"
+        return
+    elseif evt.key == :right
+        if nc >= 1
+            m.table_col = min(nc, m.table_col + 1)
+        end
+        _sync_table_scroll!(m)
+        m.last_event = "table r=$(m.table_row) c=$(m.table_col)"
+        return
+    elseif evt.key == :pageup
+        if nr >= 1
+            step = max(1, _table_visible_row_capacity(m))
+            m.table_row = max(1, m.table_row - step)
+        end
+        _sync_table_scroll!(m)
+        m.last_event = "table page up r=$(m.table_row)"
+        return
+    elseif evt.key == :pagedown
+        if nr >= 1
+            step = max(1, _table_visible_row_capacity(m))
+            m.table_row = min(nr, m.table_row + step)
+        end
+        _sync_table_scroll!(m)
+        m.last_event = "table page down r=$(m.table_row)"
+        return
+    elseif evt.key == :enter
+        if nr < 1 || nc < 1
+            m.last_event = "empty table — no cell to edit"
+            return
+        end
+        m.table_row = clamp(m.table_row, 1, nr)
+        m.table_col = clamp(m.table_col, 1, nc)
+        m.table_editing = true
+        m.table_buf = _table_cell_value(m, m.table_row, m.table_col)
+        m.last_event = "edit cell r=$(m.table_row) c=$(m.table_col)"
+        return
+    elseif evt.key == :char
+        c = evt.char
+        if c == 'r' || c == 'R'
+            # Explicit rematerialize active chart (KD-P2-18 / design: never auto on load)
+            _table_rematerialize_active!(m)
+            return
+        end
+    end
+    return  # absorb other keys — no fall-through to dashboard
 end
 
 should_quit(m::SPCWorkbenchModel) = m.quit
@@ -2843,6 +3076,12 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return
     end
 
+    # SharedTable grid modal (P2-PR7 / KD-P2-20)
+    if m.view_mode == :table
+        _handle_table_keys!(m, evt)
+        return
+    end
+
     # view mode overlays (help/keymap) close on esc/q or re-toggle
     if m.view_mode == :help || m.view_mode == :keymap
         c = (evt.key == :char ? evt.char : '\0')
@@ -3237,6 +3476,16 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             _sync_tools_scroll!(m)
             m.last_event = "tools open"
             return
+        elseif c == 'd' || c == 'D'
+            # SharedTable grid (P2-PR7 / KD-P2-20) — dashboard only; library/tools keep d=delete
+            m.view_mode = :table
+            m.table_editing = false
+            m.table_buf = ""
+            m.prompt_kind = nothing
+            m.pending_delete = false
+            _sync_table_scroll!(m)
+            m.last_event = "table open"
+            return
         elseif _handle_filter_char!(m, c)
             # GC-PR4: f cycles filter prompt; F clears all (dashboard)
             return
@@ -3363,11 +3612,13 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         _update_library_mouse!(m, evt)
         return
     end
-    # Modal / tools / prompt / pending_delete / builder / help: keyboard-only (KD16)
+    # Modal / tools / table / prompt / pending_delete: keyboard-only (KD16)
     if m.config_open || m.editing !== nothing ||
        m.view_mode == :help || m.view_mode == :keymap ||
        m.view_mode == :builder ||
        m.view_mode == :tools ||
+       m.view_mode == :table ||
+       m.prompt_kind !== nothing || m.pending_delete
        m.prompt_kind !== nothing || m.pending_delete
         m.last_event = string(evt.action, " ", evt.button, " (modal)")
         m.hover_x = nothing
@@ -3726,7 +3977,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
         return
     end
 
-    # Mode overlays: help / keymap / library / builder / tools (dedicated pages; no dashboard bleed)
+    # Mode overlays: help / keymap / library / builder / tools / table (dedicated pages; no dashboard bleed)
     if m.view_mode == :help
         _render_help_page!(buf, area, m)
         return
@@ -3741,6 +3992,10 @@ function view(m::SPCWorkbenchModel, f::Frame)
         return
     elseif m.view_mode == :tools
         _render_tools_page!(buf, area, m)
+        return
+    elseif m.view_mode == :table
+        _render_table_page!(buf, area, m)
+        return
         return
     end
 
@@ -3802,7 +4057,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     show_dual = dual_split !== nothing
 
     # header
-    hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [m]library [x]tools [f]filter [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
+    hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [m]library [x]tools [d]table [f]filter [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
 
     # A6: empty filter match — plot message + side list (Charts: 0/N) + footer (no full early return)
@@ -3822,7 +4077,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
             set_string!(buf, side_inner.x, side_inner.y + 1, " (no match)", tstyle(:warning))
         end
         left = " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
-        render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m x f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+        render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m x d f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
         return
     end
 
@@ -4344,7 +4599,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     else
         " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
     end
-    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m x f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m x d f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
 end
 
 # small helper for fmt
@@ -4552,6 +4807,7 @@ function _render_help_page!(buf, area, m)
         "  o/O     open Visual Preferences (solid series line, …)",
         "  m/M     open chart library (list / add / clone / delete / rename)",
         "  x/X     open tools registry (master tool ids; assign to charts via builder)",
+        "  d/D     open SharedTable grid (inspect / light cell edit; not Excel)",
         "  f       cycle filter prompt (tool → type → owner); Enter apply; Esc cancel",
         "  F       clear all filters (tool/type/owner); rehomes active if needed",
         "  b/B     open chart builder (name, cols, tools, manual limits, WECO)",
@@ -4565,12 +4821,17 @@ function _render_help_page!(buf, area, m)
         "  [ ]     switch active chart (multi-dashboard)",
         "  h/?     this help",
         "  k       keyboard map page",
-        "  q/esc   quit (close library/tools/builder/help first)",
+        "  q/esc   quit (close library/tools/builder/table/help first)",
         "",
         "LIBRARY (m): ↑↓/click select · Enter/dblclick activate · a add · c clone · d+y delete · n rename",
         "  i import CSV · e export CSV · w save JSON · W load JSON (path prompts)",
         "  f/F filters same as dashboard (list shows visible_charts only)",
         "  Note: seed demos often have empty tools — tool filter may hide all until assigned.",
+        "  Mode-gate: library d = delete chart; dashboard d = table grid (KD-P2-20).",
+        "",
+        "TABLE (d): arrows move cell · PgUp/PgDn page · Enter edit cell · r rematerialize active",
+        "  Esc/q close → dashboard (never quit). Empty table shows a warn message.",
+        "  Edits write strings into SharedTable only; r rebuilds active chart series explicitly.",
         "",
         "TOOLS REGISTRY (x): master m.tools ids + descriptions (JSON tools array).",
         "  ↑↓ select · a add (id then desc) · n edit desc · d+y delete · Enter set filter_tool",
@@ -4604,17 +4865,18 @@ function _render_keymap_page!(buf, area, m)
         "KEYS:",
         "  m M / x X   Library (↑↓ a c d n i/e/w/W) / Tools registry (↑↓ a n d+y Enter)",
         "  f F         Filters (cycle tool→type→owner; F clear)",
+        "  d D         SharedTable grid (arrows · Enter edit · r rematerialize · Esc close)",
         "  p/P         Pause/Resume live mode",
         "  g/G         Toggle live_enabled on active chart",
-        "  r R z Z     Reset view (full range + auto y)",
+        "  r R z Z     Reset view (full range + auto y)  [table mode: r rematerialize]",
         "  c C / v V / o O  Config WECO / Lines / Visual prefs",
         "  b B         Chart builder (manual limits, cols, tools assign)",
         "  u t l / s   Edit USL/Target/LSL / clear specs",
         "  1-8         Toggle WECO-N (or 1-5 in Lines tab)",
         "  [ ] < >     Prev / Next chart (dashboard)",
-        "  ← →         Pan left/right",
+        "  ← →         Pan left/right (table: move cell)",
         "  h ? / k     Help / This keymap",
-        "  q Esc       Quit (library/tools/builder: close mode, not quit)",
+        "  q Esc       Quit (library/tools/builder/table: close mode, not quit)",
         "",
         "MOUSE:",
         "  Move        Hover + vertical follow │ + tooltip",
@@ -4630,10 +4892,98 @@ function _render_keymap_page!(buf, area, m)
         "Builder: ↑↓ fields; Enter edit/toggle; a apply/materialize; 1-8 WECO; y type.",
         "Library i/e/w/W + f/F filters (session-only; demo tools may be empty).",
         "Tools registry: master m.tools; chart ch.tools assigned via builder (not registry alone).",
+        "Table (d): full-page SharedTable; no auto-rematerialize on load; r explicit.",
     ]
     for (i, ln) in enumerate(kbd)
         if y + i - 1 > bottom(area); break; end
         set_string!(buf, area.x + 2, y + i - 1, ln, tstyle(i==1 || startswith(ln,"MOUSE") ? :accent : :text))
+    end
+end
+
+# ── SharedTable grid page (P2-PR7 / KD-P2-20) — full page; no dashboard chrome ─
+function _render_table_page!(buf, area, m)
+    m.table_area = area
+    set_string!(buf, area.x + 1, area.y,
+        "SHARED TABLE  (Esc/q close · arrows · Enter edit · r rematerialize active)",
+        tstyle(:title, bold = true))
+    y = area.y + 2
+    nr = length(m.table.rows)
+    nc_all = length(m.table.columns)
+    nc = _table_n_cols(m)
+    cell_w = TABLE_DEFAULT_CELL_W
+    row_cap = _table_visible_row_capacity(m)
+    col_cap = _table_visible_col_capacity(m; cell_w = cell_w)
+    _sync_table_scroll!(m; row_cap = row_cap, col_cap = col_cap)
+
+    set_string!(buf, area.x + 2, y,
+        "rows=$nr cols=$nc_all  cursor=($(_table_n_rows(m) > 0 ? m.table_row : 0),$(nc > 0 ? m.table_col : 0))  scroll=($(m.table_scroll_row),$(m.table_scroll_col))" *
+        (nc_all > TABLE_MAX_RENDER_COLS ? "  (showing first $TABLE_MAX_RENDER_COLS cols)" : ""),
+        tstyle(:text_dim))
+    y += 1
+
+    if nr == 0 || nc_all == 0
+        set_string!(buf, area.x + 2, y + 1,
+            "Empty table — import CSV (library i) or load session (library W)",
+            tstyle(:warning, bold = true))
+        y += 3
+        set_string!(buf, area.x + 2, y,
+            "  SharedTable is session data; chart series rematerialize only via [r] or builder apply.",
+            tstyle(:text_dim))
+        y += 2
+    else
+        # Header row of column names (windowed)
+        c0 = m.table_scroll_col + 1
+        c1 = min(nc, m.table_scroll_col + col_cap)
+        hdr_parts = String["#"]
+        for c in c0:c1
+            name = m.table.columns[c]
+            mark = c == m.table_col ? "▶" : " "
+            push!(hdr_parts, mark * _table_cell_display(name, cell_w - 1))
+        end
+        set_string!(buf, area.x + 2, y, join(hdr_parts, " "), tstyle(:accent, bold = true))
+        y += 1
+
+        r0 = m.table_scroll_row + 1
+        r1 = min(nr, m.table_scroll_row + row_cap)
+        for r in r0:r1
+            y > bottom(area) - 3 && break
+            row_mark = r == m.table_row ? "▶" : " "
+            parts = String[row_mark * lpad(string(r), 3)]
+            for c in c0:c1
+                val = _table_cell_value(m, r, c)
+                if m.table_editing && r == m.table_row && c == m.table_col
+                    val = m.table_buf * "▌"
+                end
+                cell = _table_cell_display(val, cell_w)
+                if r == m.table_row && c == m.table_col && !m.table_editing
+                    # highlight selected cell with brackets when not editing
+                    cell = _table_cell_display("[" * _table_cell_value(m, r, c) * "]", cell_w)
+                end
+                push!(parts, cell)
+            end
+            sty = r == m.table_row ? tstyle(:accent, bold = true) : tstyle(:text)
+            set_string!(buf, area.x + 2, y, join(parts, " "), sty)
+            y += 1
+        end
+    end
+
+    # Edit / status strip near bottom
+    y = min(max(y + 1, bottom(area) - 2), bottom(area) - 1)
+    if m.table_editing
+        colname = (nc >= 1 && m.table_col <= length(m.table.columns)) ?
+            m.table.columns[clamp(m.table_col, 1, length(m.table.columns))] : "?"
+        set_string!(buf, area.x + 2, y,
+            "EDIT [$colname r=$(m.table_row)]: $(m.table_buf)_  Enter=commit  Esc=cancel",
+            tstyle(:accent, bold = true))
+    else
+        set_string!(buf, area.x + 2, y,
+            "↑↓←→ move  PgUp/PgDn page  Enter edit  r rematerialize active  Esc/q close",
+            tstyle(:text_dim))
+    end
+    if y + 1 <= bottom(area)
+        set_string!(buf, area.x + 2, bottom(area),
+            " last=$(m.last_event)",
+            tstyle(:text_dim))
     end
 end
 
@@ -4710,7 +5060,7 @@ function _live_may_advance(m::SPCWorkbenchModel)::Bool
     m.config_open && return false
     m.prompt_kind !== nothing && return false
     m.pending_delete && return false
-    m.view_mode in (:help, :keymap, :library, :builder, :tools) && return false
+    m.view_mode in (:help, :keymap, :library, :builder, :tools, :table) && return false
     ch = current_chart(m)
     (isempty(ch.data.values) || !ch.live_enabled) && return false
     return true

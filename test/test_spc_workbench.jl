@@ -1785,18 +1785,18 @@ end
     @testset "keyboard map page (k) shows bindings table + mouse actions; esc closes" begin
         m = SPCWorkbenchModel(data=generate_spc_workbench_data(8;seed=1), paused=true)
         T.update!(m, T.KeyEvent('k'))
-        tb = T.TestBackend(80, 18); T.reset!(tb.buf)
-        T.view(m, T.Frame(tb.buf, T.Rect(1,1,80,18),[],[]))
-        krows = [T.row_text(tb, i) for i in 1:18]
+        tb = T.TestBackend(90, 36); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1,1,90,36),[],[]))
+        krows = [T.row_text(tb, i) for i in 1:36]
         kfull = join([string(r) for r in krows if r!==nothing], "\n")
         @test occursin("KEYBOARD MAP", kfull)
         @test occursin("p/P", kfull)
         @test occursin("Pause/Resume", kfull)
-        @test occursin("MOUSE:", kfull)  # mouse section header always rendered early
+        @test occursin("MOUSE:", kfull)  # mouse section header (needs tall enough backend)
         @test occursin("b B", kfull) || occursin("builder", lowercase(kfull))
         T.update!(m, T.KeyEvent(:escape))
-        tb2 = T.TestBackend(80, 18); T.reset!(tb2.buf)
-        T.view(m, T.Frame(tb2.buf, T.Rect(1,1,80,18),[],[]))
+        tb2 = T.TestBackend(90, 36); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1,1,90,36),[],[]))
         @test T.find_text(tb2, "KEYBOARD MAP") === nothing
     end
 
@@ -2104,7 +2104,7 @@ end
             end
         end
         # Tall enough for 3 stacked plots + Side Stats (Lines + WECO + chart list)
-        tb = T.TestBackend(90, 28); T.reset!(tb.buf)
+        tb = T.TestBackend(90, 40); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1,1,90,28),[],[]))
         rows = visual_rows_wb(m; w=90, h=28)
         full = join([string(r) for r in rows if r!==nothing], "\n")
@@ -3663,17 +3663,21 @@ end
         @test m.view_mode == :dashboard
         @test m.seed_demos === :triple
 
-        # KD-P2-20: dashboard d/D must not arm delete or open tools (reserved for table later)
+        # KD-P2-20: dashboard d/D opens SharedTable grid (not delete/tools)
         ntools0 = length(m.tools)
         T.update!(m, T.KeyEvent('d'))
-        @test m.view_mode == :dashboard
+        @test m.view_mode == :table
         @test m.pending_delete == false
         @test m.quit == false
         @test length(m.tools) == ntools0
-        T.update!(m, T.KeyEvent('D'))
+        T.update!(m, T.KeyEvent(:escape))
         @test m.view_mode == :dashboard
+        T.update!(m, T.KeyEvent('D'))
+        @test m.view_mode == :table
         @test m.pending_delete == false
         @test m.quit == false
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
 
         T.update!(m, T.KeyEvent('x'))
         @test m.view_mode == :tools
@@ -3871,6 +3875,217 @@ end
         T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 120, 18), [], []))
         hdr = join([string(T.row_text(tb3, i)) for i in 1:3 if T.row_text(tb3, i) !== nothing], "\n")
         @test occursin("[x]tools", hdr) || occursin("x]tools", hdr)
+    end
+
+    # ── P2-PR7: SharedTable grid view_mode=:table (KD-P2-20) ─────────────
+    @testset "table mode: open (d/D), SHARED TABLE title, empty message, no bleed" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 7), paused = true)
+        _ensure_charts!(m)
+        @test m.view_mode == :dashboard
+        @test m.seed_demos === :triple
+        @test isempty(m.table.rows)
+
+        T.update!(m, T.KeyEvent('d'))
+        @test m.view_mode == :table
+        @test m.quit == false
+        @test m.last_event == "table open"
+        @test m.table_editing == false
+        @test m.prompt_kind === nothing
+
+        tb = T.TestBackend(90, 22); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 22), [], []))
+        @test T.find_text(tb, "SHARED TABLE") !== nothing
+        full = join([string(T.row_text(tb, i)) for i in 1:22 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("Empty table", full)
+        # strict no-bleed
+        @test T.find_text(tb, "SPC Workbench [dashboard]") === nothing
+        @test T.find_text(tb, "Side Stats") === nothing
+        @test T.find_text(tb, "Dashboard:") === nothing
+
+        # D also opens; Esc closes without quit
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+        @test m.quit == false
+        @test m.last_event == "table closed"
+        T.update!(m, T.KeyEvent('D'))
+        @test m.view_mode == :table
+        @test m.quit == false
+        T.update!(m, T.KeyEvent('q'))
+        @test m.view_mode == :dashboard
+        @test m.quit == false
+    end
+
+    @testset "table mode: mode-gate library d=delete; dashboard d=grid" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 9), paused = true)
+        _ensure_charts!(m)
+        n0 = length(m.charts)
+        @test n0 >= 2
+
+        # library d arms delete, does not open table
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        T.update!(m, T.KeyEvent('d'))
+        @test m.view_mode == :library
+        @test m.pending_delete == true
+        @test occursin("confirm delete", m.last_event)
+        T.update!(m, T.KeyEvent(:escape))  # cancel delete
+        @test m.pending_delete == false
+        T.update!(m, T.KeyEvent(:escape))  # close library
+        @test m.view_mode == :dashboard
+
+        # dashboard d opens table (does not delete)
+        T.update!(m, T.KeyEvent('d'))
+        @test m.view_mode == :table
+        @test m.pending_delete == false
+        @test length(m.charts) == n0
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+    end
+
+    @testset "table mode: scroll, cell edit, rematerialize, live/mouse gates" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(12; seed = 11),
+            paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        m.table = SharedTable(
+            columns = ["Tool", "Value", "Lot"],
+            rows = [
+                Dict("Tool" => "A", "Value" => "10.0", "Lot" => "L1"),
+                Dict("Tool" => "B", "Value" => "20.0", "Lot" => "L1"),
+                Dict("Tool" => "A", "Value" => "30.0", "Lot" => "L2"),
+                Dict("Tool" => "B", "Value" => "40.0", "Lot" => "L2"),
+                Dict("Tool" => "A", "Value" => "50.0", "Lot" => "L3"),
+            ],
+        )
+        ch = current_chart(m)
+        ch.col_value = "Value"
+        ch.col_tool = "Tool"
+        ch.tools = String[]  # all rows
+        vals_before = copy(ch.data.values)
+
+        T.update!(m, T.KeyEvent('d'))
+        @test m.view_mode == :table
+        @test _live_may_advance(m) === false
+
+        # render grid with columns + values
+        tb = T.TestBackend(100, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("SHARED TABLE", full)
+        @test occursin("Tool", full)
+        @test occursin("Value", full)
+        @test occursin("10.0", full) || occursin("10", full)
+
+        # navigation: down/right
+        @test m.table_row == 1
+        @test m.table_col == 1
+        T.update!(m, T.KeyEvent(:down))
+        @test m.table_row == 2
+        T.update!(m, T.KeyEvent(:right))
+        @test m.table_col == 2
+        T.update!(m, T.KeyEvent(:up))
+        @test m.table_row == 1
+        T.update!(m, T.KeyEvent(:left))
+        @test m.table_col == 1
+
+        # PgDn / PgUp move by page
+        T.update!(m, T.KeyEvent(:pagedown))
+        @test m.table_row >= 1
+        T.update!(m, T.KeyEvent(:pageup))
+        @test m.table_row == 1
+
+        # Enter edits cell (Value at r1 c2 after we move)
+        T.update!(m, T.KeyEvent(:right))  # col Value
+        @test m.table_col == 2
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.table_editing == true
+        @test m.table_buf == "10.0"
+        # q while editing is literal
+        while !isempty(m.table_buf)
+            T.update!(m, T.KeyEvent(:backspace))
+        end
+        for c in "99.5"
+            T.update!(m, T.KeyEvent(c))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.table_editing == false
+        @test m.table.rows[1]["Value"] == "99.5"
+        # series NOT auto-updated until rematerialize
+        @test current_chart(m).data.values == vals_before
+
+        # re-render shows edited value
+        tb2 = T.TestBackend(100, 24); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 24), [], []))
+        full2 = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("99.5", full2)
+
+        # Esc mid-edit cancels
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.table_editing == true
+        m.table_buf = "bad"
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.table_editing == false
+        @test m.table.rows[1]["Value"] == "99.5"
+        @test m.view_mode == :table  # still in table
+
+        # explicit rematerialize (r) rebuilds active series
+        T.update!(m, T.KeyEvent('r'))
+        @test m.view_mode == :table  # stay in grid
+        @test current_chart(m).source === :table
+        @test current_chart(m).live_enabled === false
+        @test current_chart(m).data.values[1] ≈ 99.5
+        @test length(current_chart(m).data.values) == 5
+        @test occursin("rematerialized", m.last_event)
+
+        # mouse early-return
+        m.hover_x = 5
+        m.hovered = 1
+        T.update!(m, T.MouseEvent(10, 5, T.mouse_left, T.mouse_move, false, false, false))
+        @test m.hover_x === nothing
+        @test m.hovered === nothing
+        @test occursin("modal", m.last_event)
+        @test m.view_mode == :table
+
+        # live blocked while in table even if unpaused + live_enabled
+        m.paused = false
+        current_chart(m).live_enabled = true
+        @test _live_may_advance(m) === false
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+        @test m.quit == false
+    end
+
+    @testset "table mode: help/keymap/header mention d/table; empty rematerialize msg" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 3), paused = true)
+        _ensure_charts!(m)
+
+        T.update!(m, T.KeyEvent('h'))
+        tb = T.TestBackend(100, 36); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 36), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:36 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("d/D", full) || occursin("SharedTable", full) || occursin("table", lowercase(full))
+        T.update!(m, T.KeyEvent(:escape))
+
+        T.update!(m, T.KeyEvent('k'))
+        tb2 = T.TestBackend(100, 30); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 30), [], []))
+        full2 = join([string(T.row_text(tb2, i)) for i in 1:30 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("d D", full2) || occursin("SharedTable", full2) || occursin("table", lowercase(full2))
+        T.update!(m, T.KeyEvent(:escape))
+
+        # dashboard header advertises [d]table
+        tb3 = T.TestBackend(140, 18); T.reset!(tb3.buf)
+        T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 140, 18), [], []))
+        hdr = join([string(T.row_text(tb3, i)) for i in 1:3 if T.row_text(tb3, i) !== nothing], "\n")
+        @test occursin("[d]table", hdr) || occursin("d]table", hdr)
+
+        # empty rematerialize message
+        @test isempty(m.table.rows)
+        T.update!(m, T.KeyEvent('d'))
+        T.update!(m, T.KeyEvent('r'))
+        @test m.view_mode == :table
+        @test occursin("empty table", lowercase(m.last_event))
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.quit == false
     end
 end
 

@@ -43,6 +43,7 @@ change that default. Use `:single` or `:none` only in explicit constructs.
 | `b` / `B` | Open chart builder |
 | `?` / `h` | Help overlay |
 | `k` | Keymap page |
+| **`d` / `D`** | Open SharedTable grid (`view_mode=:table`) |
 
 ### Dual secondary canvas (active plot)
 
@@ -111,6 +112,10 @@ Canonical library keys:
 | **`w` / `W`** | Save / load JSON session |
 | Esc / `q` | Close library → dashboard (**do not quit**) |
 
+**Mode-gate (KD-P2-20):** library `d` = delete chart; **dashboard** `d`/`D` =
+SharedTable grid. Tools registry (when present) keeps mode-local `d` for tool
+delete. Never open the grid from library/tools with `d`.
+
 **Never** use `o` / `O` for open-file (those are Visual Preferences on the
 dashboard). File keys are library `i` / `e` / `w` / `W` only.
 
@@ -139,6 +144,28 @@ the session `tools` array.
 
 CRUD on the registry alone does **not** put ids onto demo charts. Assign tools
 to a chart via the builder (`b`), then dashboard `f` tool filter can match.
+
+### SharedTable grid (`view_mode=:table`)
+
+Inspect and lightly edit the in-memory SharedTable (not Excel). Open from the
+**dashboard** with **`d` / `D`**.
+
+| Key | Action |
+|-----|--------|
+| `↑` `↓` `←` `→` | Move cell cursor |
+| PgUp / PgDn | Page rows |
+| Enter | Edit selected cell (string buffer) |
+| Enter (while editing) | Commit cell to `m.table.rows[r][col]` as `String` |
+| Esc (while editing) | Cancel edit |
+| **`r` / `R`** | **Explicit** rematerialize active chart from table |
+| Esc / `q` | Close → dashboard (**do not quit**) |
+
+- Empty table shows a warn message (import CSV via library `i`, or load session).
+- Cell edits update SharedTable only; chart series change **only** after
+  explicit rematerialize (`r` here, or builder apply). **No** auto-rematerialize
+  on JSON/HTML load.
+- Live tick and mouse are gated off while `view_mode=:table` (keyboard-first).
+- Render caps at 50 columns with horizontal scroll; rows are windowed.
 
 ### Prompt behavior
 
