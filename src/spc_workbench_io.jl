@@ -345,6 +345,8 @@ end
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 const _WB_SCHEMA_VERSION = 1
+# SharedTable JSON size cap (mirror CSV max_rows default; fail closed)
+const TABLE_JSON_MAX_ROWS = 50_000
 
 function _json_null_or_float(v)::Union{Float64,Nothing,String}
     v === nothing && return nothing
@@ -472,6 +474,7 @@ function _chart_to_dict(ch::ChartSpec)::Dict{String,Any}
         "col_n" => ch.col_n,
         "col_tool" => ch.col_tool,
         "col_time" => ch.col_time,
+        "col_lot" => ch.col_lot,  # always write (P2-PR3 / KD-P2-18)
         "viewport" => Dict{String,Any}(
             "x0" => ch.viewport.x0,
             "x1" => ch.viewport.x1,
@@ -559,6 +562,8 @@ function _chart_from_dict(cd)::Union{ChartSpec,String}
     col_n = String(get(cd, "col_n", "") === nothing ? "" : get(cd, "col_n", ""))
     col_tool = String(get(cd, "col_tool", "Tool") === nothing ? "Tool" : get(cd, "col_tool", "Tool"))
     col_time = String(get(cd, "col_time", "Timestamp") === nothing ? "Timestamp" : get(cd, "col_time", "Timestamp"))
+    # Optional col_lot (P2-PR3); omitted / null → ""
+    col_lot = String(get(cd, "col_lot", "") === nothing ? "" : get(cd, "col_lot", ""))
 
     vp = _viewport_from_json(get(cd, "viewport", nothing), data; usl = usl, lsl = lsl)
     vp isa String && return vp
@@ -588,6 +593,82 @@ function _chart_from_dict(cd)::Union{ChartSpec,String}
         col_n = col_n isa AbstractString ? String(col_n) : "",
         col_tool = col_tool isa AbstractString ? String(col_tool) : "Tool",
         col_time = col_time isa AbstractString ? String(col_time) : "Timestamp",
+        col_lot = col_lot isa AbstractString ? String(col_lot) : "",
+    )
+end
+
+# ── SharedTable JSON (P2-PR3 / KD-P2-4 / KD-P2-18) ─────────────────────
+
+"""True when JSON cell is scalar (null / string / number / bool)."""
+_is_table_cell_scalar(x) = x === nothing || x isa AbstractString || x isa Real
+
+"""
+Fail-closed cell coerce for schema-v1 table cells.
+nothing → ""; AbstractString → String; Bool/Real → string form.
+Caller must gate with `_is_table_cell_scalar` (array/object rejected).
+"""
+function _cell_to_string(x)::String
+    x === nothing && return ""
+    x isa AbstractString && return String(x)
+    x isa Bool && return x ? "true" : "false"
+    x isa Real && return string(x)
+    return ""  # unreachable when scalar-gated
+end
+
+"""
+    _table_from_json(v) -> SharedTable | error String
+
+Fail-closed SharedTable deserialize for schema v1 optional `table` key.
+`nothing` / null → empty table. Wrong root type, bad columns/rows, non-scalar
+cells, or rows > TABLE_JSON_MAX_ROWS → error string (atomic reject).
+"""
+function _table_from_json(v)::Union{SharedTable,String}
+    v === nothing && return SharedTable()
+    v isa AbstractDict || return "table must be an object"
+
+    cols = String[]
+    columns_raw = get(v, "columns", nothing)
+    if columns_raw !== nothing
+        columns_raw isa AbstractVector || return "table columns must be an array"
+        for (i, c) in enumerate(columns_raw)
+            c isa AbstractString || return "table columns[$i] must be string"
+            push!(cols, String(c))
+        end
+    end
+
+    rows_raw = get(v, "rows", nothing)
+    rows_raw === nothing && return SharedTable(columns = cols, rows = Dict{String,String}[])
+    rows_raw isa AbstractVector || return "table rows must be an array"
+    length(rows_raw) > TABLE_JSON_MAX_ROWS &&
+        return "table too large: $(length(rows_raw)) rows (max $TABLE_JSON_MAX_ROWS)"
+
+    rows = Dict{String,String}[]
+    for (i, row) in enumerate(rows_raw)
+        row isa AbstractDict || return "table rows[$i] must be an object"
+        d = Dict{String,String}()
+        for (k, cell) in row
+            ks = String(k)
+            _is_table_cell_scalar(cell) || return "table rows[$i].$ks: table cell not scalar"
+            d[ks] = _cell_to_string(cell)
+        end
+        push!(rows, d)
+    end
+    return SharedTable(columns = cols, rows = rows)
+end
+
+"""Serialize SharedTable to JSON-ready Dict `{columns, rows}`."""
+function _table_to_dict(table::SharedTable)::Dict{String,Any}
+    rows_out = Dict{String,Any}[]
+    for row in table.rows
+        d = Dict{String,Any}()
+        for (k, v) in row
+            d[k] = v
+        end
+        push!(rows_out, d)
+    end
+    return Dict{String,Any}(
+        "columns" => collect(String, table.columns),
+        "rows" => rows_out,
     )
 end
 
@@ -646,6 +727,10 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
 
     paused = _json_bool(get(d, "paused", nothing), false)
 
+    # Optional SharedTable (P2-PR3); missing/null → empty; bad type → whole parse fails
+    table = _table_from_json(get(d, "table", nothing))
+    table isa String && return table
+
     return (
         charts = charts,
         active = active,
@@ -654,6 +739,7 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
         show_chart_lines = show_lines,
         visual_prefs = visual_prefs,
         paused = paused,
+        table = table,
     )
 end
 
@@ -687,6 +773,7 @@ function _apply_parsed!(m::SPCWorkbenchModel, parsed::NamedTuple)
     m.show_chart_lines = parsed.show_chart_lines
     m.visual_prefs = parsed.visual_prefs
     m.paused = parsed.paused
+    m.table = parsed.table  # mirror HTML apply; do NOT auto-rematerialize (KD-P2-18)
     m.library_selected = clamp(parsed.active, 1, length(parsed.charts))
     _clear_load_ephemerals!(m)
     _ensure_charts!(m)  # sync legacy mirrors from new active
@@ -699,20 +786,19 @@ end
     workbench_to_dict(m::SPCWorkbenchModel) -> Dict
 
 Serialize workbench session to JSON-ready Dict (schema v1).
-Always writes per-chart `live_enabled`. Never writes admins/passcodes.
+Always writes per-chart `live_enabled` and `col_lot`. Never writes admins/passcodes.
 
-**PR6 known limit (schema v1):** `m.table::SharedTable` is **not** persisted.
-Charts keep copy-on-map series in `values` + `source`/`col_*` maps, so display
-works after load; builder re-materialize needs an empty table until CSV re-import
-(or a future schema bump that stores `table: {columns, rows}`). KD25: table is
-in-memory after import only.
+Optional `table` (SharedTable as `{columns, rows}`) is written only when
+non-empty (`columns` or `rows` non-empty); omitted when empty to keep fixtures
+small (KD-P2-18). Load restores the table without auto-rematerializing charts —
+series `values` remain display source of truth on load.
 """
 function workbench_to_dict(m::SPCWorkbenchModel)::Dict
     _ensure_charts!(m)
     _sync_active_back!(m)
     charts = [_chart_to_dict(ch) for ch in m.charts]
     tools = [Dict{String,Any}("id" => t.id, "description" => t.description) for t in m.tools]
-    return Dict{String,Any}(
+    d = Dict{String,Any}(
         "version" => _WB_SCHEMA_VERSION,
         "active" => clamp(m.active, 1, max(1, length(m.charts))),
         "charts" => charts,
@@ -722,6 +808,11 @@ function workbench_to_dict(m::SPCWorkbenchModel)::Dict
         "visual_prefs" => Dict{String,Any}(k => v for (k, v) in m.visual_prefs),
         "paused" => m.paused,
     )
+    # Omit empty table (KD-P2-18)
+    if !isempty(m.table.columns) || !isempty(m.table.rows)
+        d["table"] = _table_to_dict(m.table)
+    end
+    return d
 end
 
 """
@@ -748,8 +839,8 @@ end
     workbench_from_dict!(m, d) -> nothing | String
 
 In-place apply. Fail closed: on error, `m` is unchanged.
-Replaces charts/active/tools/optional prefs; clears UI ephemerals;
-preserves rng/tick/quit/geometry/live_max.
+Replaces charts/active/tools/table/optional prefs; clears UI ephemerals;
+preserves rng/tick/quit/geometry/live_max. Does not auto-rematerialize charts.
 """
 function workbench_from_dict!(m::SPCWorkbenchModel, d)::Union{Nothing,String}
     parsed = _parse_workbench_dict(d)

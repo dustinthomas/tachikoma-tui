@@ -4128,6 +4128,203 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
         @test m.library_selected == 2
     end
 
+    # ── P2-PR3: SharedTable + col_lot in schema v1 ─────────────────────
+
+    @testset "P2-PR3: old fixture without table → empty SharedTable" begin
+        d = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [
+                Dict{String,Any}(
+                    "id" => "CHT-old",
+                    "name" => "Legacy",
+                    "chart_type" => "I-MR",
+                    "values" => [10.0, 11.0, 12.0],
+                    "live_enabled" => false,
+                ),
+            ],
+            # no "table" key
+        )
+        m = workbench_from_dict(d)
+        @test m isa SPCWorkbenchModel
+        @test m.table isa SharedTable
+        @test isempty(m.table.columns)
+        @test isempty(m.table.rows)
+        @test m.charts[1].data.values == [10.0, 11.0, 12.0]
+        @test m.charts[1].col_lot == ""  # omitted → ""
+        # null table also empty
+        d["table"] = nothing
+        m2 = workbench_from_dict(d)
+        @test m2 isa SPCWorkbenchModel
+        @test isempty(m2.table.rows)
+        @test isempty(m2.table.columns)
+    end
+
+    @testset "P2-PR3: table load OK; no rematerialize; manual materialize recovers" begin
+        # Series values intentionally differ from table so we can prove load does
+        # not auto-rematerialize (series remain source of truth on load).
+        series_vals = [99.0, 98.0, 97.0]
+        table_rows = [
+            Dict{String,Any}("Timestamp" => "t1", "Tool" => "T1", "Value" => 100.1, "Lot" => "L1"),
+            Dict{String,Any}("Timestamp" => "t2", "Tool" => "T1", "Value" => 100.2, "Lot" => "L1"),
+            Dict{String,Any}("Timestamp" => "t3", "Tool" => "T1", "Value" => 100.3, "Lot" => "L2"),
+        ]
+        d = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [
+                Dict{String,Any}(
+                    "id" => "CHT-tab",
+                    "name" => "FromTable",
+                    "chart_type" => "I-MR",
+                    "values" => series_vals,
+                    "live_enabled" => false,
+                    "source" => "table",
+                    "col_value" => "Value",
+                    "col_tool" => "Tool",
+                    "col_time" => "Timestamp",
+                    "col_lot" => "Lot",
+                ),
+            ],
+            "table" => Dict{String,Any}(
+                "columns" => ["Timestamp", "Tool", "Value", "Lot"],
+                "rows" => table_rows,
+            ),
+        )
+        m = workbench_from_dict(d)
+        @test m isa SPCWorkbenchModel
+        @test m.table.columns == ["Timestamp", "Tool", "Value", "Lot"]
+        @test length(m.table.rows) == 3
+        @test m.table.rows[1]["Value"] == "100.1"  # Real coerced to string
+        @test m.table.rows[1]["Lot"] == "L1"
+        # series values unchanged (no auto-rematerialize)
+        @test m.charts[1].data.values == series_vals
+        @test m.charts[1].col_lot == "Lot"
+        # manual rematerialize recovers table-sourced series
+        materialize_chart_from_table!(m.charts[1], m.table)
+        @test m.charts[1].source === :table
+        @test m.charts[1].data.values ≈ [100.1, 100.2, 100.3]
+        @test m.charts[1].live_enabled === false
+    end
+
+    @testset "P2-PR3: table wrong type → error; model unchanged" begin
+        d0 = generate_spc_workbench_data(6; seed = 11)
+        m = SPCWorkbenchModel(data = d0, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        m.charts[1].usl = 77.0
+        m.charts[1].data.values[1] = 1.234
+        snapshot_vals = copy(m.charts[1].data.values)
+        snapshot_usl = m.charts[1].usl
+        snapshot_n = length(m.charts)
+        m.table = SharedTable(
+            columns = ["Value"],
+            rows = [Dict("Value" => "1.0")],
+        )
+        table_cols_before = copy(m.table.columns)
+
+        bad = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [
+                Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0]),
+            ],
+            "table" => "not-an-object",
+        )
+        err = workbench_from_dict!(m, bad)
+        @test err isa AbstractString
+        @test occursin("table", err)
+        @test length(m.charts) == snapshot_n
+        @test m.charts[1].data.values == snapshot_vals
+        @test m.charts[1].usl == snapshot_usl
+        @test m.table.columns == table_cols_before
+
+        # nested non-scalar cell
+        bad_cell = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [
+                Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0]),
+            ],
+            "table" => Dict{String,Any}(
+                "columns" => ["Value"],
+                "rows" => [Dict{String,Any}("Value" => [1, 2, 3])],
+            ),
+        )
+        err2 = workbench_from_dict!(m, bad_cell)
+        @test err2 isa AbstractString
+        @test occursin("scalar", err2)
+        @test m.charts[1].usl == snapshot_usl
+        @test m.table.columns == table_cols_before
+    end
+
+    @testset "P2-PR3: oversized table rows → error" begin
+        n = TachikomaTUI.TABLE_JSON_MAX_ROWS + 1
+        big_rows = [Dict{String,Any}("Value" => "1") for _ in 1:n]
+        d = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [
+                Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0]),
+            ],
+            "table" => Dict{String,Any}(
+                "columns" => ["Value"],
+                "rows" => big_rows,
+            ),
+        )
+        r = workbench_from_dict(d)
+        @test r isa AbstractString
+        @test occursin("too large", r) || occursin("table", r)
+
+        d0 = generate_spc_workbench_data(4; seed = 2)
+        m = SPCWorkbenchModel(data = d0, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        snap = copy(m.charts[1].data.values)
+        err = workbench_from_dict!(m, d)
+        @test err isa AbstractString
+        @test m.charts[1].data.values == snap
+    end
+
+    @testset "P2-PR3: col_lot always written; round-trip" begin
+        m = _make_session()
+        m.charts[1].col_lot = "Wafer"
+        m.charts[2].col_lot = ""
+        d = workbench_to_dict(m)
+        @test haskey(d["charts"][1], "col_lot")
+        @test d["charts"][1]["col_lot"] == "Wafer"
+        @test haskey(d["charts"][2], "col_lot")
+        @test d["charts"][2]["col_lot"] == ""
+        m2 = workbench_from_dict(d)
+        @test m2 isa SPCWorkbenchModel
+        @test m2.charts[1].col_lot == "Wafer"
+        @test m2.charts[2].col_lot == ""
+    end
+
+    @testset "P2-PR3: empty table omitted on write; non-empty round-trips" begin
+        m = _make_session()
+        @test isempty(m.table.columns) && isempty(m.table.rows)
+        d = workbench_to_dict(m)
+        @test !haskey(d, "table")
+
+        m.table = SharedTable(
+            columns = ["Timestamp", "Tool", "Value"],
+            rows = [
+                Dict("Timestamp" => "t1", "Tool" => "A", "Value" => "1.5"),
+                Dict("Timestamp" => "t2", "Tool" => "A", "Value" => "2.5"),
+            ],
+        )
+        d2 = workbench_to_dict(m)
+        @test haskey(d2, "table")
+        @test d2["table"]["columns"] == ["Timestamp", "Tool", "Value"]
+        @test length(d2["table"]["rows"]) == 2
+        m3 = workbench_from_dict(d2)
+        @test m3 isa SPCWorkbenchModel
+        @test m3.table.columns == ["Timestamp", "Tool", "Value"]
+        @test length(m3.table.rows) == 2
+        @test m3.table.rows[2]["Value"] == "2.5"
+        # chart series still from values field (no rematerialize)
+        @test m3.charts[1].data.values == m.charts[1].data.values
+    end
+
 end
 
 end # module TestSPCWorkbenchJSON

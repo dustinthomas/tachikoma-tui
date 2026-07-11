@@ -159,6 +159,7 @@ load_workbench!(m, "session.json")       # in-session replace (library W)
 | `show_chart_lines` | no | CL / σ / specs visibility |
 | `visual_prefs` | no | Series connector prefs |
 | `paused` | no | Bool; default false if omitted |
+| `table` | no | SharedTable `{columns, rows}`; **omitted on save when empty**; missing/null → empty on load |
 
 ### Per-chart object
 
@@ -176,17 +177,32 @@ load_workbench!(m, "session.json")       # in-session replace (library W)
 | `manual_cl` / `manual_ucl` / `manual_lcl` | no | Number or null |
 | `subgroup_size` | no | Integer (default 5) |
 | `live_enabled` | no | Always written on save; **omitted → false** on load |
+| `source` | no | `"series"` (default) or `"table"` provenance |
+| `col_value` / `col_n` / `col_tool` / `col_time` | no | Column maps for table materialize |
+| `col_lot` | no | Always written on save; **omitted → `""`** on load; X̄ group column |
 | `viewport` | no | `{x0, x1, ylo, yhi}`; bootstrapped if missing |
+
+### SharedTable object (`table`)
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `columns` | no | Array of strings (default `[]` if omitted) |
+| `rows` | no | Array of row objects; each cell must be scalar (string / number / bool / null) |
+
+- Cells are coerced to strings on load (`null` → `""`).
+- Extra keys on a row (not listed in `columns`) are kept; missing column keys stay absent until materialize (`get(row, col, "")`).
+- **Fail closed:** wrong `table` type, non-array columns/rows, non-object row, non-scalar cell, or more than **50 000** rows → whole session parse fails (model unchanged on in-place load).
+- **No auto-rematerialize on load:** chart `values` remain display source of truth; call `materialize_chart_from_table!` (e.g. builder apply) to rebuild series from the restored table.
 
 ### Load semantics
 
-- **Fail closed:** corrupt / unsupported version / empty charts → error string;
-  in-place load does not mutate charts.
+- **Fail closed:** corrupt / unsupported version / empty charts / bad `table` → error string;
+  in-place load does not mutate charts or table.
 - **Never** deserialize `admins` / passcodes (ignored if present).
-- Unknown chart keys ignored.
-- `load_workbench!` replaces charts/active/tools/optional prefs; clears UI
+- Unknown chart / root keys ignored.
+- `load_workbench!` replaces charts/active/tools/table/optional prefs; clears UI
   ephemerals (config/edit/hover/drag/prompt); preserves `rng`, `tick`, `quit`,
-  geometry, `live_max`.
+  geometry, `live_max`. Does **not** call `materialize_chart_from_table!`.
 - Status: `"loaded …"`, `"saved …"`, or prefixed errors.
 
 ### Minimal example
