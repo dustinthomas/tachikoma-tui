@@ -1878,19 +1878,20 @@ end
         T.update!(m, T.KeyEvent('b'))
         @test m.view_mode === :builder
 
-        # BUILDER_FIELDS: 1 name, 2 col_value, 3 col_tool, 4 tools, 5 limits_mode,
-        # 6 manual_cl, 7 manual_ucl, 8 manual_lcl, 9 chart_type
-        # Navigate to limits_mode (field 5) and toggle to manual
-        for _ in 1:4
+        # BUILDER_FIELDS (P2-PR5): 1 name, 2 chart_type, 3 col_value, 4 col_n,
+        # 5 col_tool, 6 col_time, 7 col_lot, 8 tools, 9 owner, 10 subgroup_size,
+        # 11 limits_mode, 12 manual_cl, 13 manual_ucl, 14 manual_lcl
+        # Navigate to limits_mode (field 11) and toggle to manual
+        for _ in 1:10
             T.update!(m, T.KeyEvent(:down))
         end
-        @test m.builder_selected == 5
+        @test m.builder_selected == 11
         T.update!(m, T.KeyEvent(:enter))  # toggle auto → manual
         @test current_chart(m).limits_mode === :manual
 
-        # manual_cl (field 6): edit to 100
+        # manual_cl (field 12): edit to 100
         T.update!(m, T.KeyEvent(:down))
-        @test m.builder_selected == 6
+        @test m.builder_selected == 12
         T.update!(m, T.KeyEvent(:enter))
         @test m.builder_editing === true
         # clear any prefilled buf and type 100
@@ -1926,7 +1927,7 @@ end
         for _ in 1:2
             T.update!(m, T.KeyEvent(:up))  # back to manual_cl
         end
-        @test m.builder_selected == 6
+        @test m.builder_selected == 12
         T.update!(m, T.KeyEvent(:enter))
         m.builder_buf = ""
         for c in "nope"
@@ -1945,6 +1946,147 @@ end
         @test current_chart(m).manual_cl == 100.0
         @test current_chart(m).manual_ucl == 106.0
         @test current_chart(m).manual_lcl == 94.0
+    end
+
+    @testset "P2-PR5: builder col_lot/col_n/col_time/subgroup_size/owner + Xbar materialize" begin
+        # Field order: 1 name, 2 chart_type, 3 col_value, 4 col_n, 5 col_tool,
+        # 6 col_time, 7 col_lot, 8 tools, 9 owner, 10 subgroup_size, …
+        d = generate_spc_workbench_data(10; seed = 21)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        T.update!(m, T.KeyEvent('b'))
+        @test m.view_mode === :builder
+        @test length(BUILDER_FIELDS) >= 14
+        @test :col_lot in BUILDER_FIELDS
+        @test :col_n in BUILDER_FIELDS
+        @test :col_time in BUILDER_FIELDS
+        @test :subgroup_size in BUILDER_FIELDS
+        @test :owner in BUILDER_FIELDS
+
+        # Render shows new labels (taller backend so all fields fit)
+        tb = T.TestBackend(100, 28); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 28), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:28 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("Lot col", full)
+        @test occursin("N col", full)
+        @test occursin("Time col", full)
+        @test occursin("Subgroup n", full)
+        @test occursin("Owner", full)
+
+        # Helper: select field by absolute index via keys from current selection
+        function _goto_field!(m, idx)
+            while m.builder_selected < idx
+                T.update!(m, T.KeyEvent(:down))
+            end
+            while m.builder_selected > idx
+                T.update!(m, T.KeyEvent(:up))
+            end
+            @test m.builder_selected == idx
+        end
+        function _edit_field!(m, idx, text)
+            _goto_field!(m, idx)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.builder_editing === true
+            m.builder_buf = ""
+            for c in text
+                T.update!(m, T.KeyEvent(c))
+            end
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.builder_editing === false
+            @test m.last_event == "field set"
+        end
+
+        # col_n (4), col_time (6), col_lot (7), owner (9) — string fields
+        _edit_field!(m, 4, "n")
+        @test current_chart(m).col_n == "n"
+        _edit_field!(m, 6, "Timestamp")
+        @test current_chart(m).col_time == "Timestamp"
+        _edit_field!(m, 7, "Wafer")
+        @test current_chart(m).col_lot == "Wafer"
+        _edit_field!(m, 9, "fab-eng")
+        @test current_chart(m).owner == "fab-eng"
+
+        # subgroup_size (10): clamp 2..25; invalid keeps prior
+        _edit_field!(m, 10, "3")
+        @test current_chart(m).subgroup_size == 3
+        _edit_field!(m, 10, "99")  # clamp to 25
+        @test current_chart(m).subgroup_size == 25
+        _edit_field!(m, 10, "1")   # clamp to 2
+        @test current_chart(m).subgroup_size == 2
+        _goto_field!(m, 10)
+        T.update!(m, T.KeyEvent(:enter))
+        m.builder_buf = ""
+        for c in "nope"
+            T.update!(m, T.KeyEvent(c))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test current_chart(m).subgroup_size == 2  # unchanged
+        @test m.last_event == "invalid number"
+
+        # y/Y still cycles chart_type only (global shortcut; not field-dependent)
+        @test current_chart(m).chart_type === I_MR
+        T.update!(m, T.KeyEvent('y'))
+        @test current_chart(m).chart_type === Xbar_R
+        @test occursin("type", m.last_event)
+        # col_lot must not have been cleared by y
+        @test current_chart(m).col_lot == "Wafer"
+
+        # owner string matches filter_owner
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
+        set_filter_owner!(m, "fab-eng")
+        @test length(visible_charts(m)) == 1
+        @test visible_charts(m)[1].owner == "fab-eng"
+        set_filter_owner!(m, "other")
+        @test isempty(visible_charts(m))
+        clear_filters!(m)
+
+        # Xbar col_lot materialize path via builder apply (a)
+        m.table = SharedTable(
+            columns = ["Timestamp", "Tool", "Wafer", "Value"],
+            rows = [
+                Dict("Timestamp" => "t1", "Tool" => "ETCH-A", "Wafer" => "W01", "Value" => "8"),
+                Dict("Timestamp" => "t2", "Tool" => "ETCH-A", "Wafer" => "W01", "Value" => "10"),
+                Dict("Timestamp" => "t3", "Tool" => "ETCH-A", "Wafer" => "W01", "Value" => "12"),
+                Dict("Timestamp" => "t4", "Tool" => "ETCH-A", "Wafer" => "W02", "Value" => "11"),
+                Dict("Timestamp" => "t5", "Tool" => "ETCH-A", "Wafer" => "W02", "Value" => "12"),
+                Dict("Timestamp" => "t6", "Tool" => "ETCH-A", "Wafer" => "W02", "Value" => "13"),
+                Dict("Timestamp" => "t7", "Tool" => "ETCH-A", "Wafer" => "W03", "Value" => "9"),
+                Dict("Timestamp" => "t8", "Tool" => "ETCH-A", "Wafer" => "W03", "Value" => "11"),
+                Dict("Timestamp" => "t9", "Tool" => "ETCH-A", "Wafer" => "W03", "Value" => "13"),
+            ],
+        )
+        ch = current_chart(m)
+        ch.chart_type = Xbar_R
+        ch.tools = ["ETCH-A"]
+        ch.col_value = "Value"
+        ch.col_tool = "Tool"
+        ch.col_time = "Timestamp"
+        ch.col_lot = "Wafer"
+        ch.subgroup_size = 3
+        T.update!(m, T.KeyEvent('b'))
+        @test m.view_mode === :builder
+        # labels still present after setup
+        tb2 = T.TestBackend(100, 28); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 28), [], []))
+        full2 = join([string(T.row_text(tb2, i)) for i in 1:28 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("Wafer", full2)
+        @test occursin("Xbar-R", full2) || occursin("Xbar", full2)
+
+        T.update!(m, T.KeyEvent('a'))  # apply + materialize
+        @test m.view_mode === :dashboard
+        ch = current_chart(m)
+        @test ch.source === :table
+        @test ch.live_enabled === false
+        @test get(ch.data.meta, "table_subgroups", false) === true
+        @test ch.data.values ≈ [10.0, 12.0, 11.0]
+        @test ch.data.meta["labels"] == ["W01", "W02", "W03"]
+        @test ch.data.meta["secondary_name"] == "R"
+        @test ch.data.meta["secondary_vals"] ≈ [4.0, 2.0, 4.0]
+        @test ch.col_lot == "Wafer"
+        @test ch.subgroup_size == 3
+        @test ch.owner == "fab-eng"
+        @test occursin("materialized", m.last_event)
     end
 
     @testset "dashboard multi-chart text + multiple plots visible simultaneously" begin

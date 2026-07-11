@@ -56,6 +56,31 @@ under the **active** plot only (neighbors stay single-series when drawn).
 | Mouse | Primary only — secondary is display-only; `plot_area` / `viewport` stay primary |
 | Height | If multi-pane would starve dual (active outer &lt; 14), **temporary single-pane compress** for that frame so dual can fit; not permanent focused mode. Pref off restores neighbor panes. |
 
+### Builder mode (`b` / `B`)
+
+Keyboard form for the **active** chart. Esc/`q`/`b` close to dashboard (never quit).
+
+| Key | Action |
+|-----|--------|
+| `↑` `↓` | Move field selection |
+| Enter / Space | Edit string field, or toggle `limits_mode` / cycle `chart_type` |
+| `a` / `A` | Apply + materialize from in-memory SharedTable (when non-empty) |
+| `1`…`8` | Toggle WECO rule N on the chart |
+| `y` / `Y` | Cycle **chart type only** (I-MR → Xbar-R → …) |
+
+**Fields (order):** Name, Chart type, Value col, N col, Tool col, Time col, Lot col,
+Tools (csv), Owner, Subgroup n, Limits mode, Manual CL / UCL / LCL.
+
+| Field | Notes |
+|-------|--------|
+| `col_lot` | X̄ group column; with Xbar-R/S + non-empty lot → table-subgroup materialize |
+| `col_n` | Sample-size column map (attribute charts) |
+| `col_time` | Timestamp / label column |
+| `subgroup_size` | Integer clamped **2..25**; invalid edit keeps prior |
+| `owner` | String; matches session `filter_owner` (strip equality) |
+
+No size-binning fields yet. Table summary line shows row/col counts and chart `source`.
+
 ### Live toggle (`g` / `G`)
 
 Per-chart only (no model-level live flag):

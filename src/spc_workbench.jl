@@ -2269,33 +2269,51 @@ export ToolEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_ac
 export visible_charts, dashboard_pane_charts
 # set_filter_tool! / set_filter_type! / set_filter_owner! / clear_filters! stay package-private
 
-# Builder form field order (PR6 minimal form)
+# Builder form field order (P2-PR5: col maps + subgroup + owner)
 const BUILDER_FIELDS = [
-    :name, :col_value, :col_tool, :tools, :limits_mode,
-    :manual_cl, :manual_ucl, :manual_lcl, :chart_type,
+    :name, :chart_type, :col_value, :col_n, :col_tool, :col_time, :col_lot,
+    :tools, :owner, :subgroup_size, :limits_mode,
+    :manual_cl, :manual_ucl, :manual_lcl,
 ]
 const BUILDER_FIELD_LABELS = Dict{Symbol,String}(
     :name => "Name",
+    :chart_type => "Chart type",
     :col_value => "Value col",
+    :col_n => "N col",
     :col_tool => "Tool col",
+    :col_time => "Time col",
+    :col_lot => "Lot col",
     :tools => "Tools (csv)",
+    :owner => "Owner",
+    :subgroup_size => "Subgroup n",
     :limits_mode => "Limits mode",
     :manual_cl => "Manual CL",
     :manual_ucl => "Manual UCL",
     :manual_lcl => "Manual LCL",
-    :chart_type => "Chart type",
 )
 const _CHART_TYPE_CYCLE = ChartType[I_MR, Xbar_R, Xbar_S, p_chart, np_chart, c_chart, u_chart]
 
 function _builder_field_value(ch::ChartSpec, field::Symbol)::String
     if field === :name
         return ch.name
+    elseif field === :chart_type
+        return chart_type_to_string(ch.chart_type)
     elseif field === :col_value
         return ch.col_value
+    elseif field === :col_n
+        return ch.col_n
     elseif field === :col_tool
         return ch.col_tool
+    elseif field === :col_time
+        return ch.col_time
+    elseif field === :col_lot
+        return ch.col_lot
     elseif field === :tools
         return join(ch.tools, ",")
+    elseif field === :owner
+        return ch.owner
+    elseif field === :subgroup_size
+        return string(ch.subgroup_size)
     elseif field === :limits_mode
         return String(ch.limits_mode)
     elseif field === :manual_cl
@@ -2304,8 +2322,6 @@ function _builder_field_value(ch::ChartSpec, field::Symbol)::String
         return ch.manual_ucl === nothing ? "" : string(ch.manual_ucl)
     elseif field === :manual_lcl
         return ch.manual_lcl === nothing ? "" : string(ch.manual_lcl)
-    elseif field === :chart_type
-        return chart_type_to_string(ch.chart_type)
     end
     return ""
 end
@@ -2314,21 +2330,46 @@ end
 Apply builder edit buffer to chart field.
 Returns event message. Invalid numeric text keeps prior value and returns `"invalid number"`.
 Empty string on manual_* intentionally clears to `nothing`.
+`subgroup_size` parses Int then clamps 2..25; garbage keeps prior.
 """
 function _builder_apply_buf!(ch::ChartSpec, field::Symbol, buf::AbstractString)::String
     s = String(buf)
     if field === :name
         ch.name = isempty(strip(s)) ? ch.name : String(strip(s))
         return "field set"
+    elseif field === :chart_type
+        ct = parse_chart_type(strip(s))
+        ct !== nothing && (ch.chart_type = ct)
+        return "field set"
     elseif field === :col_value
         ch.col_value = String(strip(s))
+        return "field set"
+    elseif field === :col_n
+        ch.col_n = String(strip(s))
         return "field set"
     elseif field === :col_tool
         ch.col_tool = String(strip(s))
         return "field set"
+    elseif field === :col_time
+        ch.col_time = String(strip(s))
+        return "field set"
+    elseif field === :col_lot
+        ch.col_lot = String(strip(s))
+        return "field set"
     elseif field === :tools
         parts = [String(strip(p)) for p in split(s, ',')]
         ch.tools = filter(!isempty, parts)
+        return "field set"
+    elseif field === :owner
+        ch.owner = String(strip(s))
+        return "field set"
+    elseif field === :subgroup_size
+        st = strip(s)
+        v = tryparse(Int, st)
+        if v === nothing
+            return "invalid number"
+        end
+        ch.subgroup_size = _clamp_subgroup_n(v)
         return "field set"
     elseif field === :limits_mode
         ls = lowercase(strip(s))
@@ -2362,10 +2403,6 @@ function _builder_apply_buf!(ch::ChartSpec, field::Symbol, buf::AbstractString):
         else
             ch.manual_lcl = v
         end
-        return "field set"
-    elseif field === :chart_type
-        ct = parse_chart_type(strip(s))
-        ct !== nothing && (ch.chart_type = ct)
         return "field set"
     end
     return "field set"
