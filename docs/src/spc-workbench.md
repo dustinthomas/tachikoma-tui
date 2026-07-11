@@ -185,7 +185,7 @@ load_workbench!(m, "session.json")       # in-session replace (library W)
 | `charts` | **yes** | Non-empty array of chart objects |
 | `active` | **yes** | 1-based index (clamped on load) |
 | `tools` | no | Array of `{id, description}` |
-| `default_rules` | no | WECO enable map (defaults applied if omitted) |
+| `default_rules` | no | Session WECO enable map for **new** charts (`add_chart!` seed). Distinct from per-chart `enabled_rules`. Omitted → module `DEFAULT_WECO_RULES`. |
 | `show_chart_lines` | no | CL / σ / specs visibility |
 | `visual_prefs` | no | Series connector prefs |
 | `paused` | no | Bool; default false if omitted |
@@ -200,7 +200,7 @@ load_workbench!(m, "session.json")       # in-session replace (library W)
 | `chart_type` | **yes** | Wire string: `I-MR`, `Xbar-R`, `Xbar-S`, `p`, `np`, `c`, `u` |
 | `values` | **yes** | Array of numbers (may be empty) |
 | `usl` / `target` / `lsl` | no | Number or null |
-| `enabled_rules` | no | Object of rule-id → bool |
+| `enabled_rules` | no | Per-chart WECO map (rule-id → bool). Not the session `default_rules`. |
 | `param` / `units` / `owner` | no | Strings |
 | `tools` | no | Array of tool id strings |
 | `limits_mode` | no | `"auto"` (default) or `"manual"` |
@@ -233,6 +233,10 @@ load_workbench!(m, "session.json")       # in-session replace (library W)
 - `load_workbench!` replaces charts/active/tools/table/optional prefs; clears UI
   ephemerals (config/edit/hover/drag/prompt); preserves `rng`, `tick`, `quit`,
   geometry, `live_max`. Does **not** call `materialize_chart_from_table!`.
+- Session `default_rules` round-trips independently of per-chart `enabled_rules`.
+  After load, `add_chart!` seeds new charts from restored session defaults.
+  Demo seed (`_ensure_charts!`) keeps explicit rules and does not rewrite from
+  session defaults.
 - Status: `"loaded …"`, `"saved …"`, or prefixed errors.
 
 ### Minimal example

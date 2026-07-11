@@ -1311,6 +1311,43 @@ include("../src/spc_workbench.jl")
         nested["nested"]["k"] = 99
         @test m_meta.charts[aidx].data.meta["nested"]["k"] == 1
 
+        # KD-P2-21: add_chart! seeds from m.default_rules (session), not active mirror
+        m_def = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m_def)
+        @test m_def.default_rules["WECO-6"] === false  # module default
+        @test m_def.default_rules !== m_def.enabled_rules
+        m_def.default_rules["WECO-6"] = true
+        m_def.default_rules["WECO-1"] = false
+        # mutate active chart rules independently — must not affect seed source
+        m_def.charts[1].enabled_rules["WECO-7"] = true
+        m_def.enabled_rules["WECO-7"] = true
+        idx_seed = add_chart!(m_def; name = "FromDefaults")
+        seeded = m_def.charts[idx_seed]
+        @test seeded.enabled_rules["WECO-6"] === true
+        @test seeded.enabled_rules["WECO-1"] === false
+        @test get(seeded.enabled_rules, "WECO-7", false) === false  # not from active
+        @test seeded.enabled_rules !== m_def.default_rules  # deep copy
+        m_def.default_rules["WECO-6"] = false
+        @test seeded.enabled_rules["WECO-6"] === true  # independent after seed
+
+        # demos / _ensure_charts! keep explicit rules — do not pull m.default_rules
+        m_demo = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        m_demo.default_rules = Dict{String,Bool}(
+            "WECO-1" => false, "WECO-2" => false, "WECO-3" => false,
+            "WECO-4" => false, "WECO-5" => false, "WECO-6" => true,
+            "WECO-7" => true, "WECO-8" => true,
+        )
+        _ensure_charts!(m_demo)
+        @test length(m_demo.charts) == 3
+        # Primary uses legacy m.enabled_rules at seed time (still DEFAULT), not default_rules
+        @test m_demo.charts[1].enabled_rules["WECO-1"] === true
+        @test m_demo.charts[1].enabled_rules["WECO-6"] === false
+        # Secondary/Tertiary use ChartSpec defaults (DEFAULT_WECO_RULES)
+        @test m_demo.charts[2].enabled_rules["WECO-1"] === true
+        @test m_demo.charts[2].enabled_rules["WECO-6"] === false
+        @test m_demo.charts[3].enabled_rules["WECO-1"] === true
+        @test m_demo.charts[3].enabled_rules["WECO-6"] === false
+
         # seed :single
         m_s = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
         _ensure_charts!(m_s)
@@ -4396,6 +4433,75 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
         finally
             isfile(path) && rm(path; force = true)
         end
+    end
+
+    @testset "session default_rules distinct from per-chart (KD-P2-21)" begin
+        m = _make_session()
+        # Session defaults ≠ active chart rules
+        m.default_rules = copy(DEFAULT_WECO_RULES)
+        m.default_rules["WECO-6"] = true
+        m.default_rules["WECO-8"] = true
+        m.default_rules["WECO-1"] = false
+        # Active chart keeps its own rules (distinct from session defaults)
+        act = m.charts[m.active]
+        act.enabled_rules["WECO-2"] = false
+        # Per-chart on chart 1 already has WECO-6 true / WECO-1 false from _make_session
+        @test m.charts[1].enabled_rules["WECO-6"] === true
+        @test m.charts[1].enabled_rules["WECO-1"] === false
+
+        d = workbench_to_dict(m)
+        @test d["default_rules"]["WECO-6"] === true
+        @test d["default_rules"]["WECO-8"] === true
+        @test d["default_rules"]["WECO-1"] === false
+        # root default_rules is NOT the active chart map
+        @test d["default_rules"]["WECO-2"] === true  # session still DEFAULT true; active has false
+        @test d["charts"][m.active]["enabled_rules"]["WECO-2"] === false
+        # per-chart chart 1 rules remain in chart object
+        @test d["charts"][1]["enabled_rules"]["WECO-6"] === true
+        @test d["charts"][1]["enabled_rules"]["WECO-1"] === false
+
+        path = joinpath(tempdir(), "spc_wb_def_$(rand(UInt32)).json")
+        try
+            @test save_workbench(m, path) === nothing
+            loaded = load_workbench(path)
+            @test loaded isa SPCWorkbenchModel
+            @test loaded.default_rules["WECO-6"] === true
+            @test loaded.default_rules["WECO-8"] === true
+            @test loaded.default_rules["WECO-1"] === false
+            # per-chart still independent after load
+            @test loaded.charts[1].enabled_rules["WECO-6"] === true
+            @test loaded.charts[1].enabled_rules["WECO-1"] === false
+            @test loaded.charts[loaded.active].enabled_rules["WECO-2"] === false
+            # enabled_rules mirror is active chart, not session defaults
+            @test loaded.enabled_rules["WECO-2"] === false
+            @test loaded.enabled_rules !== loaded.default_rules
+            # add_chart! on loaded uses session defaults
+            nidx = add_chart!(loaded; name = "AfterLoad")
+            @test loaded.charts[nidx].enabled_rules["WECO-6"] === true
+            @test loaded.charts[nidx].enabled_rules["WECO-8"] === true
+            @test loaded.charts[nidx].enabled_rules["WECO-1"] === false
+            @test loaded.charts[nidx].enabled_rules !== loaded.default_rules
+        finally
+            isfile(path) && rm(path; force = true)
+        end
+
+        # omitted default_rules → module DEFAULT_WECO_RULES
+        bare = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [
+                Dict{String,Any}(
+                    "id" => "CHT-def",
+                    "name" => "Bare",
+                    "chart_type" => "I-MR",
+                    "values" => [1.0, 2.0, 3.0],
+                ),
+            ],
+        )
+        m_bare = workbench_from_dict(bare)
+        @test m_bare isa SPCWorkbenchModel
+        @test m_bare.default_rules["WECO-1"] === true
+        @test m_bare.default_rules["WECO-6"] === false
     end
 
     @testset "omitted live_enabled → false (safe default)" begin

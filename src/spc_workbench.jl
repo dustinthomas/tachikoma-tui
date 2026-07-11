@@ -1713,8 +1713,10 @@ end
     lsl::Union{Float64, Nothing} = nothing
     editing::Union{Symbol, Nothing} = nothing
     edit_buf::String = ""
-    # enabled_rules carried for live/config
+    # enabled_rules: legacy mirror of active chart rules (live/config sync)
     enabled_rules::Dict{String, Bool} = copy(DEFAULT_WECO_RULES)
+    # Session defaults for new charts via add_chart! (KD-P2-21); distinct from per-chart
+    default_rules::Dict{String, Bool} = copy(DEFAULT_WECO_RULES)
     # Chart line visibility (CL / ±1σ / ±2σ / ±3σ / Specs)
     show_chart_lines::Dict{String, Bool} = copy(DEFAULT_CHART_LINES)
     # Graph visual preferences (extensible panel; start with solid series line)
@@ -1849,6 +1851,9 @@ end
 
 Append a valid ChartSpec. Returns new 1-based index. Sets library_selected;
 does not change active unless charts was empty.
+
+Seeds `enabled_rules` from `m.default_rules` (session defaults, KD-P2-21).
+Demos / `_ensure_charts!` keep explicit per-chart rules and do not use this path.
 """
 function add_chart!(
     m::SPCWorkbenchModel;
@@ -1866,7 +1871,7 @@ function add_chart!(
         name = String(name),
         data = d,
         viewport = _boot_viewport(d; show_lines = m.show_chart_lines),
-        enabled_rules = copy(DEFAULT_WECO_RULES),
+        enabled_rules = copy(m.default_rules),
     )
     push!(m.charts, ch)
     idx = length(m.charts)

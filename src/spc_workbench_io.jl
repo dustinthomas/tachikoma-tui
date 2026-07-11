@@ -774,7 +774,9 @@ function _apply_parsed!(m::SPCWorkbenchModel, parsed::NamedTuple)
     m.charts = parsed.charts
     m.active = parsed.active
     m.tools = parsed.tools
-    m.enabled_rules = parsed.default_rules
+    # Session defaults (KD-P2-21); per-chart rules live on chart objects.
+    # m.enabled_rules is synced from active chart in _ensure_charts!.
+    m.default_rules = parsed.default_rules
     m.show_chart_lines = parsed.show_chart_lines
     m.visual_prefs = parsed.visual_prefs
     m.paused = parsed.paused
@@ -811,7 +813,7 @@ function workbench_to_dict(m::SPCWorkbenchModel)::Dict
         "active" => clamp(m.active, 1, max(1, length(m.charts))),
         "charts" => charts,
         "tools" => tools,
-        "default_rules" => Dict{String,Any}(k => v for (k, v) in m.enabled_rules),
+        "default_rules" => Dict{String,Any}(k => v for (k, v) in m.default_rules),
         "show_chart_lines" => Dict{String,Any}(k => v for (k, v) in m.show_chart_lines),
         "visual_prefs" => Dict{String,Any}(k => v for (k, v) in m.visual_prefs),
         "paused" => m.paused,
@@ -1256,7 +1258,8 @@ function _apply_html_parsed!(m::SPCWorkbenchModel, parsed::NamedTuple)
     m.charts = parsed.charts
     m.active = parsed.active
     m.tools = parsed.tools
-    m.enabled_rules = parsed.default_rules
+    # Session defaults (KD-P2-21); per-chart rules stay on chart objects.
+    m.default_rules = parsed.default_rules
     m.table = parsed.table
     m.library_selected = clamp(parsed.active, 1, length(parsed.charts))
     m.paused = true  # archive import pauses live (same spirit as CSV)
