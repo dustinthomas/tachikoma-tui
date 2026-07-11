@@ -500,17 +500,24 @@ const DEFAULT_CHART_LINES = Dict{String,Bool}(
 _line_on(m, key::AbstractString) = get(m.show_chart_lines, key, true)
 
 # Extensible graph visual preferences (add keys over time; panel lists VISUAL_PREF_KEYS)
-const VISUAL_PREF_KEYS = ["solid_series", "solid_stroke", "braille_series"]
+const VISUAL_PREF_KEYS = ["solid_series", "solid_stroke", "braille_series", "secondary_canvas"]
 const VISUAL_PREF_LABELS = Dict{String,String}(
     "solid_series" => "Dotted series (• connect)",
     "solid_stroke" => "Solid stroke (box-drawing)",
     "braille_series" => "Braille canvas line (between dots)",
+    "secondary_canvas" => "Secondary canvas (MR/R/s)",
 )
 const DEFAULT_VISUAL_PREFS = Dict{String,Bool}(
     "solid_series" => true,
     "solid_stroke" => true,
     "braille_series" => true,
+    "secondary_canvas" => true,
 )
+
+# Dual secondary canvas layout (KD-P2-15): min outer height for two stacked Blocks;
+# primary/secondary height fraction when splitting the active plot rect.
+const DUAL_MIN_OUTER_H = 14
+const DUAL_PRIMARY_FRAC = 0.62
 
 _pref_on(m, key::AbstractString) = get(m.visual_prefs, key, get(DEFAULT_VISUAL_PREFS, key, false))
 
@@ -911,6 +918,90 @@ end
 # Always default to :mr for I-MR fidelity matching HTML autoLimits.
 # Every display site (markers, hover, list, side Cpk) must use this instead of raw .data.sigma.
 
+"""
+Secondary series for dual-canvas / side stats (MR / R / s).
+
+Values are plot-ready (I-MR: length n-1 MRs, no leading null). Limits match HTML
+`autoLimits` secondary block: MR uses D4₂ (=3.267); R uses D3/D4; s uses B3/B4.
+Empty when type has no secondary (attributes) or insufficient data.
+"""
+struct SecondarySeries
+    name::String                 # "MR" | "R" | "s" | ""
+    values::Vector{Float64}
+    bar::Union{Float64,Nothing}  # mean of values (same as ChartRenderContext.secondary_bar)
+    cl::Union{Float64,Nothing}
+    ucl::Union{Float64,Nothing}
+    lcl::Union{Float64,Nothing}
+end
+
+"""Empty secondary (no values / no limits). Optional name for type label continuity."""
+empty_secondary_series(name::AbstractString = "") =
+    SecondarySeries(String(name), Float64[], nothing, nothing, nothing, nothing)
+
+"""
+    _secondary_with_limits(name, values, chart_type, n) -> SecondarySeries
+
+Build SecondarySeries with HTML-matching control limits from SS_FACTORS.
+Degenerate bar==0 still yields cl=ucl=lcl=0 (valid). Empty values → all nothing.
+"""
+function _secondary_with_limits(
+    name::AbstractString,
+    values::Vector{Float64},
+    chart_type::ChartType,
+    n::Int,
+)::SecondarySeries
+    isempty(values) && return empty_secondary_series(name)
+    bar = mean(values)
+    if chart_type == I_MR
+        # Moving range uses n=2 factors (HTML: UCL = 3.267·MR̄, LCL = 0)
+        f = SS_FACTORS[2]
+        return SecondarySeries(String(name), values, bar, bar, f.D4 * bar, 0.0)
+    elseif chart_type == Xbar_R
+        f = SS_FACTORS[_clamp_subgroup_n(n)]
+        return SecondarySeries(String(name), values, bar, bar, f.D4 * bar, f.D3 * bar)
+    elseif chart_type == Xbar_S
+        f = SS_FACTORS[_clamp_subgroup_n(n)]
+        return SecondarySeries(String(name), values, bar, bar, f.B4 * bar, f.B3 * bar)
+    else
+        return empty_secondary_series(name)
+    end
+end
+
+"""
+    secondary_series_for(ch, primary) -> SecondarySeries
+
+Pure secondary series + limits for chart `ch` given its resolved primary vector.
+Manual primary limits do **not** invent secondary limits — secondary is always
+auto from the secondary series (HTML autoLimits secondary block is independent).
+"""
+function secondary_series_for(ch::ChartSpec, primary::Vector{Float64})::SecondarySeries
+    if is_attribute_chart(ch.chart_type)
+        return empty_secondary_series("")
+    elseif _has_table_subgroups(ch) && (ch.chart_type == Xbar_R || ch.chart_type == Xbar_S)
+        sec = Float64.(get(ch.data.meta, "secondary_vals", Float64[]))
+        name = String(get(ch.data.meta, "secondary_name", ch.chart_type == Xbar_R ? "R" : "s"))
+        n_sg = _clamp_subgroup_n(Int(get(ch.data.meta, "subgroup_n", ch.subgroup_size)))
+        return _secondary_with_limits(name, sec, ch.chart_type, n_sg)
+    elseif ch.chart_type == Xbar_R
+        n = _clamp_subgroup_n(ch.subgroup_size)
+        # Ranges from raw series chunks (not from primary means) — incomplete tail dropped
+        _, ranges, _ = subgroup_means_and_ranges(ch.data.values, n)
+        return _secondary_with_limits("R", ranges, Xbar_R, n)
+    elseif ch.chart_type == Xbar_S
+        n = _clamp_subgroup_n(ch.subgroup_size)
+        _, svals, _ = subgroup_means_and_s(ch.data.values, n)
+        return _secondary_with_limits("s", svals, Xbar_S, n)
+    elseif ch.chart_type == I_MR
+        if length(primary) < 2
+            return empty_secondary_series("MR")
+        end
+        mrs = collect(abs.(diff(primary)))
+        return _secondary_with_limits("MR", mrs, I_MR, 2)
+    else
+        return empty_secondary_series("")
+    end
+end
+
 struct ChartRenderContext
     lz::LimitsAndZones
     viol_indices::Set{Int}
@@ -918,9 +1009,11 @@ struct ChartRenderContext
     band::Symbol
     # Plotted primary series (individuals for I-MR; X̄ for Xbar_R/S)
     primary_values::Vector{Float64}
-    # Side-panel secondary summary (R̄ / s̄ / MR̄); dual secondary Canvas deferred (P2)
+    # Side-panel secondary summary (R̄ / s̄ / MR̄) — kept for compat with view/side stats
     secondary_name::String
     secondary_bar::Union{Float64,Nothing}
+    # Full secondary series + control limits (P2 dual canvas; pure API in P2-PR1)
+    secondary::SecondarySeries
 end
 
 """
@@ -1078,41 +1171,31 @@ function auto_limits(
 end
 
 """
-    _primary_and_secondary(ch) -> (primary, secondary_name, secondary_bar)
+    _primary_and_secondary(ch) -> (primary, secondary::SecondarySeries)
 
-Series-chunk primary for plotting/WECO; secondary bar for side panel
-(R̄ / s̄ / MR̄). Dual secondary Canvas remains deferred (P2 optional polish).
+Series-chunk primary for plotting/WECO; secondary series + HTML limits via
+`secondary_series_for`. Side panel still uses `.name` / `.bar` (compat fields on
+ChartRenderContext). Dual secondary Canvas drawing is P2-PR2 (view only).
 PR7b: when `meta["table_subgroups"]`, `data.values` are already X̄ and secondary is in meta.
-I_MR: primary is individuals; secondary_bar is mean moving range (MR̄).
+I_MR: primary is individuals; secondary.values are MRs length n-1.
 """
 function _primary_and_secondary(ch::ChartSpec)
     vs = ch.data.values
-    if _has_table_subgroups(ch) && (ch.chart_type == Xbar_R || ch.chart_type == Xbar_S)
-        sec = get(ch.data.meta, "secondary_vals", Float64[])
-        name = String(get(ch.data.meta, "secondary_name", ch.chart_type == Xbar_R ? "R" : "s"))
-        bar = isempty(sec) ? nothing : mean(Float64.(sec))
-        return (Float64.(vs), name, bar)
+    primary = if _has_table_subgroups(ch) && (ch.chart_type == Xbar_R || ch.chart_type == Xbar_S)
+        Float64.(vs)
     elseif ch.chart_type == Xbar_R
         n = _clamp_subgroup_n(ch.subgroup_size)
-        xbar, ranges, _ = subgroup_means_and_ranges(vs, n)
-        bar = isempty(ranges) ? nothing : mean(ranges)
-        return (xbar, "R", bar)
+        xbar, _, _ = subgroup_means_and_ranges(vs, n)
+        xbar
     elseif ch.chart_type == Xbar_S
         n = _clamp_subgroup_n(ch.subgroup_size)
-        xbar, svals, _ = subgroup_means_and_s(vs, n)
-        bar = isempty(svals) ? nothing : mean(svals)
-        return (xbar, "s", bar)
-    elseif ch.chart_type == I_MR
-        primary = Float64.(vs)
-        if length(primary) < 2
-            return (primary, "MR", nothing)
-        end
-        mrs = abs.(diff(primary))
-        bar = isempty(mrs) ? nothing : mean(mrs)
-        return (primary, "MR", bar)
+        xbar, _, _ = subgroup_means_and_s(vs, n)
+        xbar
     else
-        return (Float64.(vs), "", nothing)
+        Float64.(vs)
     end
+    sec = secondary_series_for(ch, primary)
+    return (primary, sec)
 end
 
 """
@@ -1156,16 +1239,19 @@ end
     resolve_chart_render_context(ch; sigma_method=:mr)
 
 Pure resolver gateway. Returns canonical lz, WECO viol set, cpk, band, primary series,
-and secondary (R̄/s̄) side-panel stats.
+secondary name/bar (side-panel compat), and full `SecondarySeries` (values + limits).
 
 Manual branch (PR5): when `_manual_limits_effective` (mode + all three set + σ>0),
-sigma = (ucl - cl) / 3. Non-positive σ and incomplete manual fall through to auto.
+sigma = (ucl - cl) / 3 applies to **primary only**. Secondary limits stay auto from
+the secondary series (HTML autoLimits secondary block independent of manual primary).
 Auto path: PR7 type-aware auto for Xbar_R / Xbar_S (series chunks); PR7b table-column
 subgroups pass precomputed secondary so means are not re-chunked; else I_MR/:mr.
 """
 function resolve_chart_render_context(ch::ChartSpec; sigma_method::Symbol = :mr)::ChartRenderContext
     vs = ch.data.values
-    primary, sec_name, sec_bar = _primary_and_secondary(ch)
+    primary, sec = _primary_and_secondary(ch)
+    sec_name = sec.name
+    sec_bar = sec.bar
     table_sg = _has_table_subgroups(ch)
     n_sg = if table_sg
         _clamp_subgroup_n(Int(get(ch.data.meta, "subgroup_n", ch.subgroup_size)))
@@ -1176,13 +1262,13 @@ function resolve_chart_render_context(ch::ChartSpec; sigma_method::Symbol = :mr)
     if _manual_limits_effective(ch)
         lz = _limits_from_manual(ch)
     elseif table_sg && (ch.chart_type == Xbar_R || ch.chart_type == Xbar_S)
-        sec = get(ch.data.meta, "secondary_vals", Float64[])
+        sec_vals = get(ch.data.meta, "secondary_vals", Float64[])
         lz = auto_limits(
             primary;
             chart_type = ch.chart_type,
             subgroup_size = n_sg,
             sigma_method = sigma_method,
-            secondary = sec,
+            secondary = sec_vals,
         )
     else
         lz = auto_limits(vs; chart_type = ch.chart_type, subgroup_size = ch.subgroup_size,
@@ -1208,7 +1294,7 @@ function resolve_chart_render_context(ch::ChartSpec; sigma_method::Symbol = :mr)
         cpk_val = cr.cpk
         b = cpk_band(cr.cpk)
     end
-    ChartRenderContext(lz, viol_set, cpk_val, b, primary, sec_name, sec_bar)
+    ChartRenderContext(lz, viol_set, cpk_val, b, primary, sec_name, sec_bar, sec)
 end
 
 """
@@ -1294,6 +1380,7 @@ export weco_detect, compute_limits_and_zones, compute_capability, generate_spc_w
 export detect_oos, cpk_band, cpk_color_for_band
 export compute_fit_y_range, y_extras_from_limits, fit_viewport_y!, auto_fit_viewport_y!
 export ChartRenderContext, resolve_chart_render_context, point_status, auto_limits
+export SecondarySeries, secondary_series_for, empty_secondary_series
 export SS_FACTORS, subgroup_means_and_ranges, subgroup_means_and_s, is_attribute_chart
 export group_values_by_keys, subgroup_means_and_ranges_from_groups, subgroup_means_and_s_from_groups
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
@@ -1633,8 +1720,10 @@ end
     lsl::Union{Float64, Nothing} = nothing
     editing::Union{Symbol, Nothing} = nothing
     edit_buf::String = ""
-    # enabled_rules carried for live/config
+    # enabled_rules: legacy mirror of active chart rules (live/config sync)
     enabled_rules::Dict{String, Bool} = copy(DEFAULT_WECO_RULES)
+    # Session defaults for new charts via add_chart! (KD-P2-21); distinct from per-chart
+    default_rules::Dict{String, Bool} = copy(DEFAULT_WECO_RULES)
     # Chart line visibility (CL / ±1σ / ±2σ / ±3σ / Specs)
     show_chart_lines::Dict{String, Bool} = copy(DEFAULT_CHART_LINES)
     # Graph visual preferences (extensible panel; start with solid series line)
@@ -1646,11 +1735,12 @@ end
     library_scroll::Int = 0
     library_area::Rect = Rect(0, 0, 0, 0)
     library_last_click::Union{Nothing, NamedTuple{(:idx, :tick), Tuple{Int, Int}}} = nothing
-    view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder
+    view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder, :tools, :table
     # Library / prompt SM (GC-PR2 / KD21)
     prompt_kind::Union{Nothing,Symbol} = nothing
     # :import_csv | :export_csv | :save_workbench | :load_workbench | :rename_chart
     # :filter_tool | :filter_type | :filter_owner  (GC-PR4)
+    # :tool_add_id | :tool_add_desc | :tool_edit_desc  (P2-PR4 tools registry)
     prompt_buf::String = ""
     pending_delete::Bool = false
     # Prefill only for export prompts — never silent write to default path
@@ -1658,6 +1748,11 @@ end
     # Seed policy when charts empty — NEVER flip default from :triple
     seed_demos::Symbol = :triple     # :triple | :single | :none
     tools::Vector{ToolEntry} = ToolEntry[]
+    # Tools registry UI (P2-PR4) — master list of ToolEntry; chart assign stays builder ch.tools
+    tools_selected::Int = 1
+    tools_scroll::Int = 0
+    tools_area::Rect = Rect(0, 0, 0, 0)
+    tool_pending_id::String = ""   # staged id between :tool_add_id → :tool_add_desc
     # Prefill only for save/load prompts — never silent write to default path
     last_workbench_path::String = ""
     # Session-ephemeral dashboard/library filters (GC-PR4) — NOT in JSON schema
@@ -1667,10 +1762,243 @@ end
     filter_prompt_field::Symbol = :tool  # cycle :tool → :type → :owner on each f open
     # Phase B (PR6 / KD25): in-memory SharedTable after CSV ingress
     table::SharedTable = SharedTable()
+    # SharedTable grid (P2-PR7 / KD-P2-20) — keyboard-only modal
+    table_row::Int = 1                 # 1-based cursor row into m.table.rows
+    table_col::Int = 1                 # 1-based cursor col into m.table.columns
+    table_scroll_row::Int = 0          # 0-based row window start
+    table_scroll_col::Int = 0          # 0-based col window start
+    table_area::Rect = Rect(0, 0, 0, 0)
+    table_editing::Bool = false
+    table_buf::String = ""
     # Builder form state (keyboard-only modal)
     builder_selected::Int = 1
     builder_editing::Bool = false
     builder_buf::String = ""
+end
+
+# ── SharedTable grid helpers (P2-PR7 / KD-P2-20) ─────────────────────────
+
+const TABLE_MAX_RENDER_COLS = 50
+const TABLE_DEFAULT_CELL_W = 12
+
+function _table_n_rows(m::SPCWorkbenchModel)::Int
+    return length(m.table.rows)
+end
+
+function _table_n_cols(m::SPCWorkbenchModel)::Int
+    return min(length(m.table.columns), TABLE_MAX_RENDER_COLS)
+end
+
+"""Truncate/pad cell text to fixed display width (ASCII-oriented)."""
+function _table_cell_display(s::AbstractString, w::Int)::String
+    w <= 0 && return ""
+    t = String(s)
+    n = length(t)
+    if n > w
+        return w == 1 ? string(first(t)) : (first(t, w - 1) * "…")
+    end
+    return rpad(t, w)
+end
+
+function _table_cell_value(m::SPCWorkbenchModel, r::Int, c::Int)::String
+    nr = length(m.table.rows)
+    nc = length(m.table.columns)
+    (r < 1 || r > nr || c < 1 || c > nc) && return ""
+    col = m.table.columns[c]
+    return String(get(m.table.rows[r], col, ""))
+end
+
+function _table_set_cell!(m::SPCWorkbenchModel, r::Int, c::Int, val::AbstractString)
+    nr = length(m.table.rows)
+    nc = length(m.table.columns)
+    (r < 1 || r > nr || c < 1 || c > nc) && return
+    col = m.table.columns[c]
+    m.table.rows[r][col] = String(val)
+    return nothing
+end
+
+"""Rows visible in grid body (title/summary/header/footer chrome ≈ 8 lines)."""
+function _table_visible_row_capacity(m::SPCWorkbenchModel)::Int
+    a = m.table_area
+    (a.height <= 0 || a.width <= 0) && return 8
+    return max(1, a.height - 8)
+end
+
+"""Columns visible given cell width (row index gutter 5 + separators)."""
+function _table_visible_col_capacity(m::SPCWorkbenchModel; cell_w::Int = TABLE_DEFAULT_CELL_W)::Int
+    a = m.table_area
+    nc = _table_n_cols(m)
+    nc <= 0 && return 1
+    (a.width <= 0) && return min(nc, 4)
+    avail = max(1, a.width - 8)  # left pad + "# " gutter
+    cw = max(4, cell_w)
+    return max(1, min(nc, avail ÷ (cw + 1)))
+end
+
+"""Clamp cursor and keep selection inside the scroll window."""
+function _sync_table_scroll!(m::SPCWorkbenchModel;
+                             row_cap::Int = _table_visible_row_capacity(m),
+                             col_cap::Int = _table_visible_col_capacity(m))
+    nr = length(m.table.rows)
+    nc = _table_n_cols(m)
+    if nr <= 0 || nc <= 0
+        m.table_row = 1
+        m.table_col = 1
+        m.table_scroll_row = 0
+        m.table_scroll_col = 0
+        return
+    end
+    m.table_row = clamp(m.table_row, 1, nr)
+    m.table_col = clamp(m.table_col, 1, nc)
+    rc = max(1, row_cap)
+    if m.table_row <= m.table_scroll_row
+        m.table_scroll_row = m.table_row - 1
+    elseif m.table_row > m.table_scroll_row + rc
+        m.table_scroll_row = m.table_row - rc
+    end
+    m.table_scroll_row = clamp(m.table_scroll_row, 0, max(0, nr - rc))
+    cc = max(1, col_cap)
+    if m.table_col <= m.table_scroll_col
+        m.table_scroll_col = m.table_col - 1
+    elseif m.table_col > m.table_scroll_col + cc
+        m.table_scroll_col = m.table_col - cc
+    end
+    m.table_scroll_col = clamp(m.table_scroll_col, 0, max(0, nc - cc))
+    return nothing
+end
+
+"""Explicit rematerialize of active chart from SharedTable (never implicit on load)."""
+function _table_rematerialize_active!(m::SPCWorkbenchModel)
+    _ensure_charts!(m)
+    ch = current_chart(m)
+    nrows = length(m.table.rows)
+    if nrows == 0
+        m.last_event = "empty table — nothing to rematerialize"
+        return
+    end
+    materialize_chart_from_table!(ch, m.table; show_lines = m.show_chart_lines)
+    # Push chart → legacy mirrors (materialize owns ch.data; do NOT _sync_active_back!)
+    m.data = ch.data
+    m.viewport = ch.viewport
+    m.usl = ch.usl
+    m.target = ch.target
+    m.lsl = ch.lsl
+    m.enabled_rules = ch.enabled_rules
+    m.last_event = "rematerialized $(length(ch.data.values)) pts from table"
+    return nothing
+end
+
+function _handle_table_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
+    _ensure_charts!(m)
+    nr = length(m.table.rows)
+    nc = _table_n_cols(m)
+
+    # Mid-edit: Esc cancel; Enter commit; printable into buf; q is literal
+    if m.table_editing
+        if evt.key == :escape
+            m.table_editing = false
+            m.table_buf = ""
+            m.last_event = "cell edit cancel"
+            return
+        elseif evt.key == :enter
+            if nr >= 1 && nc >= 1
+                m.table_row = clamp(m.table_row, 1, nr)
+                m.table_col = clamp(m.table_col, 1, nc)
+                _table_set_cell!(m, m.table_row, m.table_col, m.table_buf)
+                m.last_event = "cell set r=$(m.table_row) c=$(m.table_col)"
+            else
+                m.last_event = "empty table — no cell"
+            end
+            m.table_editing = false
+            m.table_buf = ""
+            return
+        elseif evt.key == :backspace
+            m.table_buf = isempty(m.table_buf) ? "" : chop(m.table_buf)
+            m.last_event = "edit: $(m.table_buf)"
+            return
+        elseif evt.key == :char
+            c = evt.char
+            if c >= ' ' && c != '\x7f'
+                m.table_buf *= string(c)
+                m.last_event = "edit: $(m.table_buf)"
+            end
+            return
+        end
+        return
+    end
+
+    if evt.key == :escape || (evt.key == :char && (evt.char == 'q' || evt.char == 'Q'))
+        m.view_mode = :dashboard
+        m.table_editing = false
+        m.table_buf = ""
+        m.last_event = "table closed"
+        return
+    end
+
+    if evt.key == :up
+        if nr >= 1
+            m.table_row = max(1, m.table_row - 1)
+        end
+        _sync_table_scroll!(m)
+        m.last_event = "table r=$(m.table_row) c=$(m.table_col)"
+        return
+    elseif evt.key == :down
+        if nr >= 1
+            m.table_row = min(nr, m.table_row + 1)
+        end
+        _sync_table_scroll!(m)
+        m.last_event = "table r=$(m.table_row) c=$(m.table_col)"
+        return
+    elseif evt.key == :left
+        if nc >= 1
+            m.table_col = max(1, m.table_col - 1)
+        end
+        _sync_table_scroll!(m)
+        m.last_event = "table r=$(m.table_row) c=$(m.table_col)"
+        return
+    elseif evt.key == :right
+        if nc >= 1
+            m.table_col = min(nc, m.table_col + 1)
+        end
+        _sync_table_scroll!(m)
+        m.last_event = "table r=$(m.table_row) c=$(m.table_col)"
+        return
+    elseif evt.key == :pageup
+        if nr >= 1
+            step = max(1, _table_visible_row_capacity(m))
+            m.table_row = max(1, m.table_row - step)
+        end
+        _sync_table_scroll!(m)
+        m.last_event = "table page up r=$(m.table_row)"
+        return
+    elseif evt.key == :pagedown
+        if nr >= 1
+            step = max(1, _table_visible_row_capacity(m))
+            m.table_row = min(nr, m.table_row + step)
+        end
+        _sync_table_scroll!(m)
+        m.last_event = "table page down r=$(m.table_row)"
+        return
+    elseif evt.key == :enter
+        if nr < 1 || nc < 1
+            m.last_event = "empty table — no cell to edit"
+            return
+        end
+        m.table_row = clamp(m.table_row, 1, nr)
+        m.table_col = clamp(m.table_col, 1, nc)
+        m.table_editing = true
+        m.table_buf = _table_cell_value(m, m.table_row, m.table_col)
+        m.last_event = "edit cell r=$(m.table_row) c=$(m.table_col)"
+        return
+    elseif evt.key == :char
+        c = evt.char
+        if c == 'r' || c == 'R'
+            # Explicit rematerialize active chart (KD-P2-18 / design: never auto on load)
+            _table_rematerialize_active!(m)
+            return
+        end
+    end
+    return  # absorb other keys — no fall-through to dashboard
 end
 
 should_quit(m::SPCWorkbenchModel) = m.quit
@@ -1763,6 +2091,9 @@ end
 
 Append a valid ChartSpec. Returns new 1-based index. Sets library_selected;
 does not change active unless charts was empty.
+
+Seeds `enabled_rules` from `m.default_rules` (session defaults, KD-P2-21).
+Demos / `_ensure_charts!` keep explicit per-chart rules and do not use this path.
 """
 function add_chart!(
     m::SPCWorkbenchModel;
@@ -1780,7 +2111,7 @@ function add_chart!(
         name = String(name),
         data = d,
         viewport = _boot_viewport(d; show_lines = m.show_chart_lines),
-        enabled_rules = copy(DEFAULT_WECO_RULES),
+        enabled_rules = copy(m.default_rules),
     )
     push!(m.charts, ch)
     idx = length(m.charts)
@@ -1898,6 +2229,83 @@ function set_active_chart!(m::SPCWorkbenchModel, idx::Int)
     m.active = idx
     m.library_selected = idx
     _ensure_charts!(m)  # sync legacy mirrors from new active
+    return nothing
+end
+
+# ── Tools registry pure CRUD (P2-PR4) ───────────────────────────────────
+# Master list `m.tools::Vector{ToolEntry}` is distinct from per-chart `ch.tools`
+# (filter assignment). Chart tool ids are assigned via builder field :tools.
+
+"""
+    add_tool!(m, id, desc="") -> Union{Int,Nothing}
+
+Append a ToolEntry. Refuses empty id (after strip) and duplicate id
+(case-sensitive). Returns new 1-based index or `nothing` on refuse.
+Sets `tools_selected` to the new entry on success.
+"""
+function add_tool!(m::SPCWorkbenchModel, id::AbstractString, desc::AbstractString = "")::Union{Int,Nothing}
+    tid = String(strip(id))
+    isempty(tid) && return nothing
+    any(t -> t.id == tid, m.tools) && return nothing
+    push!(m.tools, ToolEntry(id = tid, description = String(strip(desc))))
+    idx = length(m.tools)
+    m.tools_selected = idx
+    return idx
+end
+
+"""
+    delete_tool!(m, idx) -> Bool
+
+Remove tool at 1-based index. Clamps `tools_selected`. Returns true if deleted.
+"""
+function delete_tool!(m::SPCWorkbenchModel, idx::Int)::Bool
+    n = length(m.tools)
+    (idx < 1 || idx > n) && return false
+    deleteat!(m.tools, idx)
+    n2 = length(m.tools)
+    if n2 == 0
+        m.tools_selected = 1
+        m.tools_scroll = 0
+    else
+        if m.tools_selected > n2
+            m.tools_selected = n2
+        elseif m.tools_selected > idx
+            m.tools_selected = m.tools_selected - 1
+        elseif m.tools_selected == idx
+            m.tools_selected = min(idx, n2)
+        end
+        m.tools_selected = clamp(m.tools_selected, 1, n2)
+    end
+    return true
+end
+
+"""Rows available for the tools list (matches `_render_tools_page!` geometry).
+
+Chrome: title row + status row + spacing ≈ 4 top; footer/prompt reserve ≈ 4 bottom
+→ capacity = height − 8 (same reservation as library). Used by key-path
+`_sync_tools_scroll!` and by render when it does not pass an explicit capacity.
+"""
+function _tools_visible_capacity(m::SPCWorkbenchModel)::Int
+    a = m.tools_area
+    h = (a.height > 0) ? a.height : 20
+    # Must match render: list starts ~y+4, list_bottom = bottom(area)-4 → height-8
+    return max(1, h - 8)
+end
+
+"""Keep `tools_selected` in range and `tools_scroll` so selection is visible."""
+function _sync_tools_scroll!(m::SPCWorkbenchModel, ntools::Int = length(m.tools),
+                             vis::Int = _tools_visible_capacity(m))
+    ntools <= 0 && (m.tools_selected = 1; m.tools_scroll = 0; return)
+    m.tools_selected = clamp(m.tools_selected, 1, ntools)
+    sel = m.tools_selected
+    max_scroll = max(0, ntools - vis)
+    scroll = clamp(m.tools_scroll, 0, max_scroll)
+    if sel <= scroll
+        scroll = sel - 1
+    elseif sel > scroll + vis
+        scroll = sel - vis
+    end
+    m.tools_scroll = clamp(scroll, 0, max_scroll)
     return nothing
 end
 
@@ -2094,33 +2502,51 @@ export ToolEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_ac
 export visible_charts, dashboard_pane_charts
 # set_filter_tool! / set_filter_type! / set_filter_owner! / clear_filters! stay package-private
 
-# Builder form field order (PR6 minimal form)
+# Builder form field order (P2-PR5: col maps + subgroup + owner)
 const BUILDER_FIELDS = [
-    :name, :col_value, :col_tool, :tools, :limits_mode,
-    :manual_cl, :manual_ucl, :manual_lcl, :chart_type,
+    :name, :chart_type, :col_value, :col_n, :col_tool, :col_time, :col_lot,
+    :tools, :owner, :subgroup_size, :limits_mode,
+    :manual_cl, :manual_ucl, :manual_lcl,
 ]
 const BUILDER_FIELD_LABELS = Dict{Symbol,String}(
     :name => "Name",
+    :chart_type => "Chart type",
     :col_value => "Value col",
+    :col_n => "N col",
     :col_tool => "Tool col",
+    :col_time => "Time col",
+    :col_lot => "Lot col",
     :tools => "Tools (csv)",
+    :owner => "Owner",
+    :subgroup_size => "Subgroup n",
     :limits_mode => "Limits mode",
     :manual_cl => "Manual CL",
     :manual_ucl => "Manual UCL",
     :manual_lcl => "Manual LCL",
-    :chart_type => "Chart type",
 )
 const _CHART_TYPE_CYCLE = ChartType[I_MR, Xbar_R, Xbar_S, p_chart, np_chart, c_chart, u_chart]
 
 function _builder_field_value(ch::ChartSpec, field::Symbol)::String
     if field === :name
         return ch.name
+    elseif field === :chart_type
+        return chart_type_to_string(ch.chart_type)
     elseif field === :col_value
         return ch.col_value
+    elseif field === :col_n
+        return ch.col_n
     elseif field === :col_tool
         return ch.col_tool
+    elseif field === :col_time
+        return ch.col_time
+    elseif field === :col_lot
+        return ch.col_lot
     elseif field === :tools
         return join(ch.tools, ",")
+    elseif field === :owner
+        return ch.owner
+    elseif field === :subgroup_size
+        return string(ch.subgroup_size)
     elseif field === :limits_mode
         return String(ch.limits_mode)
     elseif field === :manual_cl
@@ -2129,8 +2555,6 @@ function _builder_field_value(ch::ChartSpec, field::Symbol)::String
         return ch.manual_ucl === nothing ? "" : string(ch.manual_ucl)
     elseif field === :manual_lcl
         return ch.manual_lcl === nothing ? "" : string(ch.manual_lcl)
-    elseif field === :chart_type
-        return chart_type_to_string(ch.chart_type)
     end
     return ""
 end
@@ -2139,21 +2563,46 @@ end
 Apply builder edit buffer to chart field.
 Returns event message. Invalid numeric text keeps prior value and returns `"invalid number"`.
 Empty string on manual_* intentionally clears to `nothing`.
+`subgroup_size` parses Int then clamps 2..25; garbage keeps prior.
 """
 function _builder_apply_buf!(ch::ChartSpec, field::Symbol, buf::AbstractString)::String
     s = String(buf)
     if field === :name
         ch.name = isempty(strip(s)) ? ch.name : String(strip(s))
         return "field set"
+    elseif field === :chart_type
+        ct = parse_chart_type(strip(s))
+        ct !== nothing && (ch.chart_type = ct)
+        return "field set"
     elseif field === :col_value
         ch.col_value = String(strip(s))
+        return "field set"
+    elseif field === :col_n
+        ch.col_n = String(strip(s))
         return "field set"
     elseif field === :col_tool
         ch.col_tool = String(strip(s))
         return "field set"
+    elseif field === :col_time
+        ch.col_time = String(strip(s))
+        return "field set"
+    elseif field === :col_lot
+        ch.col_lot = String(strip(s))
+        return "field set"
     elseif field === :tools
         parts = [String(strip(p)) for p in split(s, ',')]
         ch.tools = filter(!isempty, parts)
+        return "field set"
+    elseif field === :owner
+        ch.owner = String(strip(s))
+        return "field set"
+    elseif field === :subgroup_size
+        st = strip(s)
+        v = tryparse(Int, st)
+        if v === nothing
+            return "invalid number"
+        end
+        ch.subgroup_size = _clamp_subgroup_n(v)
         return "field set"
     elseif field === :limits_mode
         ls = lowercase(strip(s))
@@ -2187,10 +2636,6 @@ function _builder_apply_buf!(ch::ChartSpec, field::Symbol, buf::AbstractString):
         else
             ch.manual_lcl = v
         end
-        return "field set"
-    elseif field === :chart_type
-        ct = parse_chart_type(strip(s))
-        ct !== nothing && (ch.chart_type = ct)
         return "field set"
     end
     return "field set"
@@ -2323,12 +2768,87 @@ end
 
 # ── Update (Key + Mouse, full fidelity) ─────────────────────────────────
 
+"""Max tick delta (via re-view) between presses to count as double-click (KD-P2-19)."""
+const LIBRARY_DBLCLICK_TICKS = 8
+
 """Rows available for the chart list (title/summary/footer reserved)."""
 function _library_visible_capacity(m::SPCWorkbenchModel)::Int
     a = m.library_area
     h = (a.height > 0) ? a.height : 20
     # title + blank + summary + blank ≈ 4; footer/prompt reserve ≈ 4
     return max(1, h - 8)
+end
+
+"""
+    _library_row_at(m, x, y) -> Union{Nothing,Int}
+
+Hit-test library list geometry (KD-P2-19). Returns absolute index into
+`m.charts`, or `nothing` if outside the list / empty / prompt / pending_delete.
+List top is `library_area.y + 4` (mirrors `_render_library_page!`); indices map
+through `visible_charts` then chart id → absolute index.
+"""
+function _library_row_at(m::SPCWorkbenchModel, x::Int, y::Int)::Union{Nothing,Int}
+    m.prompt_kind !== nothing && return nothing
+    m.pending_delete && return nothing
+
+    a = m.library_area
+    (a.width <= 0 || a.height <= 0) && return nothing
+    !contains(a, x, y) && return nothing
+
+    # Hardcoded chrome matches _render_library_page! and _library_visible_capacity (h-8).
+    # Prefer library_list_rect if list chrome rows change later (design KD-P2-19).
+    list_top = a.y + 4
+    list_bottom = bottom(a) - 4
+    (y < list_top || y > list_bottom) && return nothing
+
+    vis = visible_charts(m)
+    isempty(vis) && return nothing
+
+    vi = m.library_scroll + (y - list_top) + 1   # 1-based index into visible_charts
+    (vi < 1 || vi > length(vis)) && return nothing
+
+    return findfirst(c -> c.id == vis[vi].id, m.charts)
+end
+
+"""Library-mode mouse: single-click select, double-click activate; no dashboard pan."""
+function _update_library_mouse!(m::SPCWorkbenchModel, evt::MouseEvent)
+    # Never drive dashboard hover/pan from library
+    m.hover_x = nothing
+    m.hovered = nothing
+    if evt.action == mouse_release
+        m.drag_start = nothing
+    end
+
+    # prompt / pending_delete: keyboard-only (still consume mouse)
+    if m.prompt_kind !== nothing || m.pending_delete
+        m.last_event = string(evt.action, " ", evt.button, " (modal)")
+        return
+    end
+
+    m.last_event = string(evt.action, " ", evt.button)
+
+    if evt.action == mouse_press && evt.button == mouse_left
+        abs_i = _library_row_at(m, evt.x, evt.y)
+        abs_i === nothing && return
+
+        # Double-click: same abs index within LIBRARY_DBLCLICK_TICKS (tick advances in view)
+        lc = m.library_last_click
+        if lc !== nothing && lc.idx == abs_i && (m.tick - lc.tick) <= LIBRARY_DBLCLICK_TICKS
+            m.library_selected = abs_i
+            set_active_chart!(m, abs_i)
+            m.view_mode = :dashboard
+            m.library_last_click = nothing
+            m.last_event = "active chart $(m.active)"
+            return
+        end
+
+        # Single-click select (not activate)
+        m.library_selected = abs_i
+        _sync_library_scroll_vis!(m, visible_charts(m))
+        m.library_last_click = (idx = abs_i, tick = m.tick)
+        m.last_event = "library sel $(m.library_selected)"
+        return
+    end
 end
 
 """Keep `library_selected` in range and `library_scroll` so selection is visible."""
@@ -2476,6 +2996,59 @@ function _apply_prompt!(m::SPCWorkbenchModel)
         m.prompt_kind = nothing
         m.prompt_buf = ""
         return
+    elseif kind === :tool_add_id
+        tid = strip(buf)
+        if isempty(tid)
+            m.last_event = "tool add cancel: empty id"
+            m.prompt_kind = nothing
+            m.prompt_buf = ""
+            m.tool_pending_id = ""
+            return
+        end
+        if any(t -> t.id == tid, m.tools)
+            # keep prompt open for retry
+            m.last_event = "tool add err: duplicate id"
+            return
+        end
+        m.tool_pending_id = String(tid)
+        m.prompt_kind = :tool_add_desc
+        m.prompt_buf = ""
+        m.last_event = "prompt tool_add_desc"
+        return
+    elseif kind === :tool_add_desc
+        tid = m.tool_pending_id
+        m.tool_pending_id = ""
+        if isempty(strip(tid))
+            m.last_event = "tool add cancel: empty id"
+            m.prompt_kind = nothing
+            m.prompt_buf = ""
+            return
+        end
+        idx = add_tool!(m, tid, buf)
+        if idx === nothing
+            m.last_event = "tool add err: refused"
+        else
+            _sync_tools_scroll!(m)
+            m.last_event = "added tool $(m.tools[idx].id)"
+        end
+        m.prompt_kind = nothing
+        m.prompt_buf = ""
+        return
+    elseif kind === :tool_edit_desc
+        ntools = length(m.tools)
+        if ntools < 1
+            m.last_event = "tool edit cancel: no tools"
+            m.prompt_kind = nothing
+            m.prompt_buf = ""
+            return
+        end
+        m.tools_selected = clamp(m.tools_selected, 1, ntools)
+        old = m.tools[m.tools_selected]
+        m.tools[m.tools_selected] = ToolEntry(id = old.id, description = String(strip(buf)))
+        m.last_event = "edited tool $(old.id)"
+        m.prompt_kind = nothing
+        m.prompt_buf = ""
+        return
     else
         m.prompt_kind = nothing
         m.prompt_buf = ""
@@ -2487,6 +3060,8 @@ function _open_prompt!(m::SPCWorkbenchModel, kind::Symbol; seed::AbstractString 
     m.prompt_kind = kind
     m.prompt_buf = String(seed)
     m.pending_delete = false
+    # Clear stale dblclick so click → prompt → Esc → click cannot false-activate
+    m.library_last_click = nothing
     m.last_event = "prompt $kind"
 end
 
@@ -2498,6 +3073,12 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     # Builder modal — Esc/q close without quit (before global quit handler)
     if m.view_mode == :builder
         _handle_builder_keys!(m, evt)
+        return
+    end
+
+    # SharedTable grid modal (P2-PR7 / KD-P2-20)
+    if m.view_mode == :table
+        _handle_table_keys!(m, evt)
         return
     end
 
@@ -2633,11 +3214,17 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         is_filter_prompt = m.prompt_kind === :filter_tool ||
                            m.prompt_kind === :filter_type ||
                            m.prompt_kind === :filter_owner
+        is_tool_prompt = m.prompt_kind === :tool_add_id ||
+                         m.prompt_kind === :tool_add_desc ||
+                         m.prompt_kind === :tool_edit_desc
         if evt.key == :escape
             m.prompt_kind = nothing
             # Filters stay as last applied. Clear buf: next `f` reseeds from filter_*,
             # not from the cancelled edit (comment previously overpromised re-edit).
             m.prompt_buf = ""
+            if is_tool_prompt
+                m.tool_pending_id = ""
+            end
             m.last_event = is_filter_prompt ? "filter edit cancel" : "prompt cancel"
             return
         elseif evt.key == :enter
@@ -2666,17 +3253,30 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     end
 
     # pending_delete: y confirms; any other key (incl Esc) clears — never quit
+    # Mode-local: tools mode deletes tool; library (or other) deletes chart.
     if m.pending_delete
         if evt.key == :char && (evt.char == 'y' || evt.char == 'Y')
-            nch = length(m.charts)
-            if nch >= 1
-                m.library_selected = clamp(m.library_selected, 1, nch)
+            if m.view_mode == :tools
+                ntools = length(m.tools)
+                if ntools >= 1
+                    m.tools_selected = clamp(m.tools_selected, 1, ntools)
+                end
+                ok = ntools >= 1 && delete_tool!(m, m.tools_selected)
+                m.pending_delete = false
+                _sync_tools_scroll!(m)
+                m.last_event = ok ? "deleted tool" : "delete tool refused"
+                return
+            else
+                nch = length(m.charts)
+                if nch >= 1
+                    m.library_selected = clamp(m.library_selected, 1, nch)
+                end
+                ok = nch >= 1 && delete_chart!(m, m.library_selected)
+                m.pending_delete = false
+                _sync_library_scroll!(m)
+                m.last_event = ok ? "deleted chart" : "delete refused (last chart)"
+                return
             end
-            ok = nch >= 1 && delete_chart!(m, m.library_selected)
-            m.pending_delete = false
-            _sync_library_scroll!(m)
-            m.last_event = ok ? "deleted chart" : "delete refused (last chart)"
-            return
         else
             m.pending_delete = false
             m.last_event = "delete cancelled"
@@ -2702,6 +3302,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         if evt.key == :escape || (evt.key == :char && evt.char == 'q')
             m.view_mode = :dashboard
             m.pending_delete = false
+            m.library_last_click = nothing  # prevent Esc→reopen false dblclick
             m.last_event = "library closed"
             return
         elseif evt.key == :up
@@ -2729,6 +3330,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                 m.library_selected = ai === nothing ? 1 : ai
                 set_active_chart!(m, m.library_selected)
                 m.view_mode = :dashboard
+                m.library_last_click = nothing  # exit path: clear dblclick state
                 m.last_event = "active chart $(m.active)"
             else
                 m.last_event = "No charts match filters"
@@ -2755,6 +3357,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                     m.last_event = "cannot delete last chart"
                 else
                     m.pending_delete = true
+                    m.library_last_click = nothing  # keyboard-only confirm; no stale dblclick
                     m.last_event = "confirm delete? y/N"
                 end
                 return
@@ -2780,6 +3383,70 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return  # absorb other keys (left/right pan, digits, …) — no fall-through
     end
 
+    # Tools registry mode (P2-PR4) — Esc/q close without quit (KD21 ordering)
+    if m.view_mode == :tools
+        ntools = length(m.tools)
+        if ntools >= 1
+            m.tools_selected = clamp(m.tools_selected, 1, ntools)
+        end
+        if evt.key == :escape || (evt.key == :char && evt.char == 'q')
+            m.view_mode = :dashboard
+            m.pending_delete = false
+            m.tool_pending_id = ""
+            m.last_event = "tools closed"
+            return
+        elseif evt.key == :up
+            if ntools >= 1
+                m.tools_selected = max(1, m.tools_selected - 1)
+            end
+            _sync_tools_scroll!(m)
+            m.last_event = "tools sel $(m.tools_selected)"
+            return
+        elseif evt.key == :down
+            if ntools >= 1
+                m.tools_selected = min(ntools, m.tools_selected + 1)
+            end
+            _sync_tools_scroll!(m)
+            m.last_event = "tools sel $(m.tools_selected)"
+            return
+        elseif evt.key == :enter
+            # Optional: apply selected id as filter_tool and return to dashboard
+            if ntools >= 1
+                m.tools_selected = clamp(m.tools_selected, 1, ntools)
+                set_filter_tool!(m, m.tools[m.tools_selected].id)
+                m.view_mode = :dashboard
+            else
+                m.last_event = "no tools in registry"
+            end
+            return
+        elseif evt.key == :char
+            c = evt.char
+            if c == 'a' || c == 'A'
+                m.tool_pending_id = ""
+                _open_prompt!(m, :tool_add_id; seed = "")
+                return
+            elseif c == 'n' || c == 'N'
+                if ntools < 1
+                    m.last_event = "no tools to edit"
+                else
+                    m.tools_selected = clamp(m.tools_selected, 1, ntools)
+                    seed = m.tools[m.tools_selected].description
+                    _open_prompt!(m, :tool_edit_desc; seed = seed)
+                end
+                return
+            elseif c == 'd' || c == 'D'
+                if ntools < 1
+                    m.last_event = "no tools to delete"
+                else
+                    m.pending_delete = true
+                    m.last_event = "confirm delete tool? y/N"
+                end
+                return
+            end
+        end
+        return  # absorb other keys — no fall-through
+    end
+
     # Global quit (dashboard only — modes already returned above)
     if evt.key == :escape || (evt.key == :char && evt.char == 'q')
         m.quit = true
@@ -2794,8 +3461,30 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.library_selected = clamp(m.active, 1, max(1, length(m.charts)))
             m.pending_delete = false
             m.prompt_kind = nothing
+            m.library_last_click = nothing  # fresh open: no stale dblclick from prior session
             _sync_library_scroll!(m)
             m.last_event = "library open"
+            return
+        elseif c == 'x' || c == 'X'
+            # Open tools registry (P2-PR4 / KD-P2-6)
+            m.view_mode = :tools
+            ntools = length(m.tools)
+            m.tools_selected = ntools >= 1 ? clamp(m.tools_selected, 1, ntools) : 1
+            m.pending_delete = false
+            m.prompt_kind = nothing
+            m.tool_pending_id = ""
+            _sync_tools_scroll!(m)
+            m.last_event = "tools open"
+            return
+        elseif c == 'd' || c == 'D'
+            # SharedTable grid (P2-PR7 / KD-P2-20) — dashboard only; library/tools keep d=delete
+            m.view_mode = :table
+            m.table_editing = false
+            m.table_buf = ""
+            m.prompt_kind = nothing
+            m.pending_delete = false
+            _sync_table_scroll!(m)
+            m.last_event = "table open"
             return
         elseif _handle_filter_char!(m, c)
             # GC-PR4: f cycles filter prompt; F clears all (dashboard)
@@ -2918,10 +3607,18 @@ end
 
 function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     _ensure_charts!(m)
-    # Modal / library / prompt / pending_delete: keyboard-only (KD16)
+    # Library: hit-test select / double-click activate (KD-P2-19); not blanket keyboard-only
+    if m.view_mode == :library
+        _update_library_mouse!(m, evt)
+        return
+    end
+    # Modal / tools / table / prompt / pending_delete: keyboard-only (KD16)
     if m.config_open || m.editing !== nothing ||
        m.view_mode == :help || m.view_mode == :keymap ||
-       m.view_mode == :library || m.view_mode == :builder ||
+       m.view_mode == :builder ||
+       m.view_mode == :tools ||
+       m.view_mode == :table ||
+       m.prompt_kind !== nothing || m.pending_delete
        m.prompt_kind !== nothing || m.pending_delete
         m.last_event = string(evt.action, " ", evt.button, " (modal)")
         m.hover_x = nothing
@@ -2989,6 +3686,268 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     _sync_active_back!(m)
 end
 
+# ── Dual secondary canvas helpers (KD-P2-15 / 16 / 17) ─────────────────
+
+"""True when visual pref is on and context has a non-empty secondary series."""
+function _dual_secondary_eligible(m::SPCWorkbenchModel, ctx::ChartRenderContext)::Bool
+    _pref_on(m, "secondary_canvas") || return false
+    isempty(ctx.secondary.values) && return false
+    return true
+end
+
+"""
+Split `active` into stacked primary (~62%) + secondary (~35%) outer rects.
+Returns `nothing` when outer height cannot host both min sizes (primary ≥8, secondary ≥6).
+"""
+function _split_dual_plot_rects(active::Rect)
+    H = active.height
+    H < DUAL_MIN_OUTER_H && return nothing
+    h_pri = max(8, round(Int, H * DUAL_PRIMARY_FRAC))
+    h_sec = H - h_pri
+    if h_sec < 6
+        h_pri = H - 6
+        h_sec = 6
+    end
+    (h_pri < 8 || h_sec < 6) && return nothing
+    pri = Rect(active.x, active.y, active.width, h_pri)
+    sec = Rect(active.x, active.y + h_pri, active.width, h_sec)
+    return (pri, sec)
+end
+
+"""
+Ephemeral secondary Viewport (KD-P2-16). Never store on the model; never mutate `m.viewport`.
+Owns X domain only (1..n_sec). Y fit is owned solely by `_render_series_canvas!` (cl/ucl/lcl
+extras when `draw_sigma_zones=false`) so fit policy lives in one place.
+I-MR: values are length n−1 MRs; index i pairs with primary point i+1 for correlation.
+"""
+function _ephemeral_secondary_viewport(sec::SecondarySeries)::Viewport
+    n = length(sec.values)
+    vp = Viewport(x0 = 1, x1 = max(1, n), ylo = 0.0, yhi = 1.0)
+    n > 0 && clamp_viewport!(vp, n)
+    return vp
+end
+
+"""
+    _render_series_canvas!(buf, outer, m, f; title, values, viewport, …) -> plot_inner
+
+Draw one series into `outer` Rect: Block(title) + Canvas + connectors + limit lines (KD-P2-17).
+Does **not** set `m.plot_area` / `m.viewport` unless `bind_mouse=true` (primary only).
+Secondary path: CL/UCL/LCL only (`draw_sigma_zones`/`draw_weco_markers`/`draw_specs`/`draw_hover` false).
+"""
+function _render_series_canvas!(
+    buf, outer::Rect, m::SPCWorkbenchModel, f::Frame;
+    title::AbstractString,
+    values::AbstractVector{<:Real},
+    viewport::Viewport,
+    cl::Union{Real,Nothing} = nothing,
+    ucl::Union{Real,Nothing} = nothing,
+    lcl::Union{Real,Nothing} = nothing,
+    lz::Union{LimitsAndZones,Nothing} = nothing,
+    ctx::Union{ChartRenderContext,Nothing} = nothing,
+    chart::Union{ChartSpec,Nothing} = nothing,
+    bind_mouse::Bool = false,
+    draw_weco_markers::Bool = false,
+    draw_specs::Bool = false,
+    draw_sigma_zones::Bool = false,
+    draw_hover::Bool = false,
+    title_style = tstyle(:title),
+    border_style = tstyle(:border),
+    usl = nothing,
+    lsl = nothing,
+)::Rect
+    plot_block = Block(title = String(title), border_style = border_style, title_style = title_style)
+    plot_inner = render(plot_block, outer, buf)
+    if bind_mouse
+        m.plot_area = plot_inner
+    end
+
+    cw = plot_inner.width
+    chh = plot_inner.height
+    n_plot = length(values)
+    if cw <= 0 || chh <= 0 || n_plot <= 0
+        return plot_inner
+    end
+
+    clamp_viewport!(viewport, n_plot)
+
+    # Y fit: primary uses full lz + specs prefs; secondary uses cl/ucl/lcl extras only
+    if draw_sigma_zones && lz !== nothing
+        auto_fit_viewport_y!(viewport, values, lz;
+            usl = usl, lsl = lsl, show_lines = m.show_chart_lines)
+    else
+        extras = Float64[]
+        cl !== nothing && isfinite(Float64(cl)) && push!(extras, Float64(cl))
+        ucl !== nothing && isfinite(Float64(ucl)) && push!(extras, Float64(ucl))
+        lcl !== nothing && isfinite(Float64(lcl)) && push!(extras, Float64(lcl))
+        fit_viewport_y!(viewport, values; extras = extras)
+    end
+
+    viol_set = ctx === nothing ? Set{Int}() : ctx.viol_indices
+    c = create_canvas(cw, chh; style = !isempty(viol_set) ? tstyle(:accent) : tstyle(:primary))
+    dw, dh = canvas_dot_size(c)
+
+    prev = nothing
+    for i in viewport.x0:viewport.x1
+        if i < 1 || i > n_plot
+            continue
+        end
+        v = Float64(values[i])
+        dx = map_to_dot_x(i, viewport, dw)
+        dy = map_to_dot_y(v, viewport, dh)
+        set_point!(c, dx, dy)
+        if prev !== nothing && _pref_on(m, "braille_series")
+            line!(c, prev[1], prev[2], dx, dy)
+        end
+        prev = (dx, dy)
+    end
+
+    # Limit / zone lines on canvas
+    if draw_sigma_zones && lz !== nothing
+        if _line_on(m, "sigma1")
+            for (z, dash) in [(lz.ucl1, 2), (lz.lcl1, 2)]
+                zy = map_to_dot_y(z, viewport, dh)
+                dashed_line!(c, 0, zy, dw - 1, zy; dash = dash)
+            end
+        end
+        if _line_on(m, "sigma2")
+            for (z, dash) in [(lz.ucl2, 3), (lz.lcl2, 3)]
+                zy = map_to_dot_y(z, viewport, dh)
+                dashed_line!(c, 0, zy, dw - 1, zy; dash = dash)
+            end
+        end
+        if _line_on(m, "sigma3")
+            dashed_line!(c, 0, map_to_dot_y(lz.ucl, viewport, dh), dw - 1, map_to_dot_y(lz.ucl, viewport, dh); dash = 4)
+            dashed_line!(c, 0, map_to_dot_y(lz.lcl, viewport, dh), dw - 1, map_to_dot_y(lz.lcl, viewport, dh); dash = 4)
+        end
+        if _line_on(m, "cl")
+            line!(c, 0, map_to_dot_y(lz.cl, viewport, dh), dw - 1, map_to_dot_y(lz.cl, viewport, dh))
+        end
+        if draw_specs && _line_on(m, "specs")
+            if usl !== nothing
+                sy = map_to_dot_y(Float64(usl), viewport, dh)
+                dashed_line!(c, 0, sy, dw - 1, sy; dash = 2)
+            end
+            if lsl !== nothing
+                sy = map_to_dot_y(Float64(lsl), viewport, dh)
+                dashed_line!(c, 0, sy, dw - 1, sy; dash = 2)
+            end
+        end
+    else
+        # Secondary (or simplified): CL / UCL / LCL only when provided
+        if ucl !== nothing
+            dashed_line!(c, 0, map_to_dot_y(Float64(ucl), viewport, dh), dw - 1, map_to_dot_y(Float64(ucl), viewport, dh); dash = 4)
+        end
+        if lcl !== nothing
+            dashed_line!(c, 0, map_to_dot_y(Float64(lcl), viewport, dh), dw - 1, map_to_dot_y(Float64(lcl), viewport, dh); dash = 4)
+        end
+        if cl !== nothing
+            line!(c, 0, map_to_dot_y(Float64(cl), viewport, dh), dw - 1, map_to_dot_y(Float64(cl), viewport, dh))
+        end
+    end
+
+    render_canvas(c, plot_inner, f)
+
+    # Colorized limit overlays on buffer cells
+    function _draw_lim_line!(rect, val, sty, step = 3)
+        yy = data_val_to_cell_row(Float64(val), rect, viewport)
+        for xx in rect.x:right(rect)
+            if (xx % step) == 0
+                set_char!(buf, xx, yy, '-', sty)
+            end
+        end
+    end
+    if draw_sigma_zones && lz !== nothing
+        if draw_specs && _line_on(m, "specs")
+            if usl !== nothing; _draw_lim_line!(plot_inner, usl, tstyle(:error, bold = true), 2); end
+            if lsl !== nothing; _draw_lim_line!(plot_inner, lsl, tstyle(:error, bold = true), 2); end
+        end
+        if _line_on(m, "sigma3")
+            _draw_lim_line!(plot_inner, lz.ucl, tstyle(:warning, bold = true), 4)
+            _draw_lim_line!(plot_inner, lz.lcl, tstyle(:warning, bold = true), 4)
+        end
+        if _line_on(m, "sigma2")
+            _draw_lim_line!(plot_inner, lz.ucl2, tstyle(:secondary), 3)
+            _draw_lim_line!(plot_inner, lz.lcl2, tstyle(:secondary), 3)
+        end
+        if _line_on(m, "sigma1")
+            _draw_lim_line!(plot_inner, lz.ucl1, tstyle(:text_dim), 2)
+            _draw_lim_line!(plot_inner, lz.lcl1, tstyle(:text_dim), 2)
+        end
+        if _line_on(m, "cl")
+            cly = data_val_to_cell_row(lz.cl, plot_inner, viewport)
+            for xx in plot_inner.x:right(plot_inner); set_char!(buf, xx, cly, '─', tstyle(:accent)); end
+        end
+    else
+        if ucl !== nothing
+            _draw_lim_line!(plot_inner, ucl, tstyle(:warning, bold = true), 4)
+        end
+        if lcl !== nothing
+            _draw_lim_line!(plot_inner, lcl, tstyle(:warning, bold = true), 4)
+        end
+        if cl !== nothing
+            cly = data_val_to_cell_row(Float64(cl), plot_inner, viewport)
+            for xx in plot_inner.x:right(plot_inner); set_char!(buf, xx, cly, '─', tstyle(:accent)); end
+        end
+    end
+
+    # Hover / select overlays (primary only)
+    if draw_hover
+        if m.hover_x !== nothing
+            hx = clamp(m.hover_x, plot_inner.x, right(plot_inner))
+            for y in (plot_inner.y + 1):(bottom(plot_inner) - 1)
+                set_char!(buf, hx, y, '│', tstyle(:accent))
+            end
+        end
+        if (si = m.selected) !== nothing && 1 <= si <= n_plot && si >= viewport.x0 && si <= viewport.x1
+            hx = data_index_to_cell(si, plot_inner, viewport)
+            for y in (plot_inner.y + 1):(bottom(plot_inner) - 1)
+                set_char!(buf, hx, y, '┃', tstyle(:secondary, bold = true))
+            end
+        end
+        if (hi = m.hovered) !== nothing && 1 <= hi <= n_plot && hi >= viewport.x0 && hi <= viewport.x1
+            hy = data_val_to_cell_row(Float64(values[hi]), plot_inner, viewport)
+            set_char!(buf, plot_inner.x + 1, hy, '─', tstyle(:accent))
+        end
+    end
+
+    draw_series_connectors!(buf, plot_inner, values, viewport, m)
+
+    # Point markers
+    for i in viewport.x0:viewport.x1
+        if i < 1 || i > n_plot
+            continue
+        end
+        dx = data_index_to_cell(i, plot_inner, viewport)
+        dy = data_val_to_cell_row(Float64(values[i]), plot_inner, viewport)
+        if draw_weco_markers && ctx !== nothing && chart !== nothing
+            st = point_status(i, ctx, chart)
+            if st == :oos
+                sym = '✕'; sty = tstyle(:error, bold = true)
+            elseif st == :ooc
+                sym = '◆'; sty = tstyle(:warning, bold = true)
+            else
+                sym = '●'; sty = tstyle(:primary, bold = true)
+            end
+        else
+            sym = '●'; sty = tstyle(:primary, bold = true)
+        end
+        set_char!(buf, dx, dy, sym, sty)
+    end
+
+    if draw_hover && ctx !== nothing
+        if (hi = m.hovered) !== nothing && 1 <= hi <= n_plot && hi >= viewport.x0 && hi <= viewport.x1 && m.drag_start === nothing
+            draw_hover_tooltip!(buf, plot_inner, hi, Float64(values[hi]), hi in viol_set, viewport;
+                usl = usl, target = m.target, lsl = lsl)
+        end
+    end
+
+    # X-range labels
+    set_string!(buf, plot_inner.x, plot_inner.y + chh - 1, string(viewport.x0), tstyle(:text_dim))
+    set_string!(buf, right(plot_inner) - 3, plot_inner.y + chh - 1, string(viewport.x1), tstyle(:text_dim))
+
+    return plot_inner
+end
+
 # ── View (full, with slices) ────────────────────────────────────────────
 
 function view(m::SPCWorkbenchModel, f::Frame)
@@ -3018,7 +3977,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
         return
     end
 
-    # Mode overlays: help / keymap / library / builder (dedicated pages; no dashboard bleed)
+    # Mode overlays: help / keymap / library / builder / tools / table (dedicated pages; no dashboard bleed)
     if m.view_mode == :help
         _render_help_page!(buf, area, m)
         return
@@ -3030,6 +3989,13 @@ function view(m::SPCWorkbenchModel, f::Frame)
         return
     elseif m.view_mode == :builder
         _render_builder_page!(buf, area, m)
+        return
+    elseif m.view_mode == :tools
+        _render_tools_page!(buf, area, m)
+        return
+    elseif m.view_mode == :table
+        _render_table_page!(buf, area, m)
+        return
         return
     end
 
@@ -3072,8 +4038,26 @@ function view(m::SPCWorkbenchModel, f::Frame)
         end
     end
 
+    # Dual secondary eligibility + temporary single-pane compress (KD-P2-15)
+    # Resolve active context once for dual decision (reuse for primary draw below).
+    ch_for_dual = current_chart(m)
+    dual_ctx = (n > 0 && length(ch_for_dual.data.values) > 0) ?
+        resolve_chart_render_context(ch_for_dual; sigma_method = :mr) : nothing
+    dual_eligible = dual_ctx !== nothing && _dual_secondary_eligible(m, dual_ctx)
+    if dual_eligible && is_dashboard_multi && active_plot_rect.height < DUAL_MIN_OUTER_H
+        # Temporary compress only when full plot can actually host dual (else keep multi + primary-only)
+        if plot_rect.height >= DUAL_MIN_OUTER_H
+            is_dashboard_multi = false
+            active_plot_rect = plot_rect
+            second_plot_rect = nothing
+            third_plot_rect = nothing
+        end
+    end
+    dual_split = dual_eligible ? _split_dual_plot_rects(active_plot_rect) : nothing
+    show_dual = dual_split !== nothing
+
     # header
-    hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [m]library [f]filter [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
+    hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [m]library [x]tools [d]table [f]filter [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
 
     # A6: empty filter match — plot message + side list (Charts: 0/N) + footer (no full early return)
@@ -3093,7 +4077,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
             set_string!(buf, side_inner.x, side_inner.y + 1, " (no match)", tstyle(:warning))
         end
         left = " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
-        render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+        render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m x d f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
         return
     end
 
@@ -3153,168 +4137,73 @@ function view(m::SPCWorkbenchModel, f::Frame)
         return
     end
 
-    # normal (or dashboard multi) render for active
+    # Active primary (+ optional dual secondary canvas under it — KD-P2-15/16/17)
     chname = isempty(m.charts) ? "Data" : current_chart(m).name
     empty_hint = (n == 0) ? " — No data — import CSV or clone a demo" : ""
-    plot_block = Block(title = "Dashboard: $(chname) [$(m.active)/$(length(m.charts))] (│ hover  ┃ select  drag pan  wheel zoom)  [ ] switch$(empty_hint)", border_style = tstyle(:border), title_style = tstyle(:title))
-    plot_inner = render(plot_block, active_plot_rect, buf)
-    m.plot_area = plot_inner
+    pri_title = "Dashboard: $(chname) [$(m.active)/$(length(m.charts))] (│ hover  ┃ select  drag pan  wheel zoom)  [ ] switch$(empty_hint)"
+    primary_outer = show_dual ? dual_split[1] : active_plot_rect
+    secondary_outer = show_dual ? dual_split[2] : nothing
 
-    cw = plot_inner.width
-    ch = plot_inner.height
+    ch_act = current_chart(m)
+    ctx = dual_ctx === nothing ?
+        (n > 0 ? resolve_chart_render_context(ch_act; sigma_method = :mr) : nothing) :
+        dual_ctx
 
-    if cw > 0 && ch > 0 && n > 0
-        ch_act = current_chart(m)
-        ctx = resolve_chart_render_context(ch_act; sigma_method = :mr)
-        viol_set = ctx.viol_indices
-        lz_disp = ctx.lz   # type-aware limits (I-MR :mr or Xbar A2/A3)
-        # Plot primary series: individuals (I-MR) or subgroup means (Xbar_R/S)
+    if n > 0 && ctx !== nothing && !isempty(ctx.primary_values)
         plot_vals = ctx.primary_values
         n_plot = length(plot_vals)
-        if n_plot > 0
-            # Keep viewport within primary length (Xbar has fewer points than raw series)
-            clamp_viewport!(m.viewport, n_plot)
-            # Auto-scale Y so visible points + enabled limit/spec lines stay inside the plot
-            auto_fit_viewport_y!(m.viewport, plot_vals, lz_disp;
-                usl = m.usl, lsl = m.lsl, show_lines = m.show_chart_lines)
-            ch_act.viewport = m.viewport
+        lz_disp = ctx.lz
+        # Keep viewport within primary length (Xbar has fewer points than raw series)
+        clamp_viewport!(m.viewport, n_plot)
+        ch_act.viewport = m.viewport
 
-            c = create_canvas(cw, ch; style = !isempty(viol_set) ? tstyle(:accent) : tstyle(:primary))
-            dw, dh = canvas_dot_size(c)
+        _render_series_canvas!(
+            buf, primary_outer, m, f;
+            title = pri_title,
+            values = plot_vals,
+            viewport = m.viewport,
+            cl = lz_disp.cl, ucl = lz_disp.ucl, lcl = lz_disp.lcl,
+            lz = lz_disp,
+            ctx = ctx,
+            chart = ch_act,
+            bind_mouse = true,
+            draw_weco_markers = true,
+            draw_specs = true,
+            draw_sigma_zones = true,
+            draw_hover = true,
+            usl = m.usl,
+            lsl = m.lsl,
+        )
+        # Primary-only ownership: plot_area set by helper; viewport Y from primary fit only
+        ch_act.viewport = m.viewport
 
-            prev = nothing
-            for i in m.viewport.x0:m.viewport.x1
-                if i < 1 || i > n_plot
-                    continue
-                end
-                v = plot_vals[i]
-                dx = map_to_dot_x(i, m.viewport, dw)
-                dy = map_to_dot_y(v, m.viewport, dh)
-                set_point!(c, dx, dy)
-                if prev !== nothing && _pref_on(m, "braille_series")
-                    line!(c, prev[1], prev[2], dx, dy)
-                end
-                prev = (dx, dy)
+        # Dual secondary: ephemeral Viewport; never mutates m.viewport / m.plot_area (KD-P2-16)
+        if show_dual && secondary_outer !== nothing
+            sec = ctx.secondary
+            if !isempty(sec.values)
+                sec_vp = _ephemeral_secondary_viewport(sec)
+                sec_title = "$(sec.name) (secondary)"
+                _render_series_canvas!(
+                    buf, secondary_outer, m, f;
+                    title = sec_title,
+                    values = sec.values,
+                    viewport = sec_vp,
+                    cl = sec.cl, ucl = sec.ucl, lcl = sec.lcl,
+                    bind_mouse = false,
+                    draw_weco_markers = false,
+                    draw_specs = false,
+                    draw_sigma_zones = false,
+                    draw_hover = false,
+                    title_style = tstyle(:text_dim),
+                    border_style = tstyle(:border),
+                )
             end
-
-            # limits + zones (slice 5) -- gated by show_chart_lines
-            lz = lz_disp
-            if _line_on(m, "sigma1")
-                for (z, dash) in [(lz.ucl1, 2), (lz.lcl1, 2)]
-                    zy = map_to_dot_y(z, m.viewport, dh)
-                    dashed_line!(c, 0, zy, dw-1, zy; dash = dash)
-                end
-            end
-            if _line_on(m, "sigma2")
-                for (z, dash) in [(lz.ucl2, 3), (lz.lcl2, 3)]
-                    zy = map_to_dot_y(z, m.viewport, dh)
-                    dashed_line!(c, 0, zy, dw-1, zy; dash = dash)
-                end
-            end
-            if _line_on(m, "sigma3")
-                dashed_line!(c, 0, map_to_dot_y(lz.ucl, m.viewport, dh), dw-1, map_to_dot_y(lz.ucl, m.viewport, dh); dash=4)
-                dashed_line!(c, 0, map_to_dot_y(lz.lcl, m.viewport, dh), dw-1, map_to_dot_y(lz.lcl, m.viewport, dh); dash=4)
-            end
-            if _line_on(m, "cl")
-                line!(c, 0, map_to_dot_y(lz.cl, m.viewport, dh), dw-1, map_to_dot_y(lz.cl, m.viewport, dh))
-            end
-
-            # spec lines if set (slice 5)
-            if _line_on(m, "specs")
-                if m.usl !== nothing
-                    sy = map_to_dot_y(m.usl, m.viewport, dh)
-                    dashed_line!(c, 0, sy, dw-1, sy; dash=2)
-                end
-                if m.lsl !== nothing
-                    sy = map_to_dot_y(m.lsl, m.viewport, dh)
-                    dashed_line!(c, 0, sy, dw-1, sy; dash=2)
-                end
-            end
-
-            render_canvas(c, plot_inner, f)
-
-            # Colorized limit/zone/spec lines (distinct styles; gated by show_chart_lines)
-            lz_c = lz_disp
-            function _draw_lim_line!(rect, val, sty, step=3)
-                yy = data_val_to_cell_row(val, rect, m.viewport)
-                for xx in rect.x:right(rect)
-                    if (xx % step) == 0
-                        set_char!(buf, xx, yy, '-', sty)
-                    end
-                end
-            end
-            if _line_on(m, "specs")
-                if m.usl !== nothing; _draw_lim_line!(plot_inner, m.usl, tstyle(:error, bold=true), 2); end
-                if m.lsl !== nothing; _draw_lim_line!(plot_inner, m.lsl, tstyle(:error, bold=true), 2); end
-            end
-            if _line_on(m, "sigma3")
-                _draw_lim_line!(plot_inner, lz_c.ucl, tstyle(:warning, bold=true), 4)
-                _draw_lim_line!(plot_inner, lz_c.lcl, tstyle(:warning, bold=true), 4)
-            end
-            if _line_on(m, "sigma2")
-                _draw_lim_line!(plot_inner, lz_c.ucl2, tstyle(:secondary), 3)
-                _draw_lim_line!(plot_inner, lz_c.lcl2, tstyle(:secondary), 3)
-            end
-            if _line_on(m, "sigma1")
-                _draw_lim_line!(plot_inner, lz_c.ucl1, tstyle(:text_dim), 2)
-                _draw_lim_line!(plot_inner, lz_c.lcl1, tstyle(:text_dim), 2)
-            end
-            if _line_on(m, "cl")
-                cly = data_val_to_cell_row(lz_c.cl, plot_inner, m.viewport)
-                for xx in plot_inner.x:right(plot_inner); set_char!(buf, xx, cly, '─', tstyle(:accent)); end
-            end
-
-            # overlays (fidelity)
-            if m.hover_x !== nothing
-                hx = clamp(m.hover_x, plot_inner.x, right(plot_inner))
-                for y in (plot_inner.y+1):(bottom(plot_inner)-1)
-                    set_char!(buf, hx, y, '│', tstyle(:accent))
-                end
-            end
-            if (si = m.selected) !== nothing && 1 <= si <= n_plot && si >= m.viewport.x0 && si <= m.viewport.x1
-                hx = data_index_to_cell(si, plot_inner, m.viewport)
-                for y in (plot_inner.y+1):(bottom(plot_inner)-1)
-                    set_char!(buf, hx, y, '┃', tstyle(:secondary, bold=true))
-                end
-            end
-            if (hi = m.hovered) !== nothing && 1 <= hi <= n_plot && hi >= m.viewport.x0 && hi <= m.viewport.x1
-                hy = data_val_to_cell_row(plot_vals[hi], plot_inner, m.viewport)
-                set_char!(buf, plot_inner.x + 1, hy, '─', tstyle(:accent))
-            end
-
-            # Series connectors (visual prefs): dotted • and/or solid box-drawing stroke
-            draw_series_connectors!(buf, plot_inner, plot_vals, m.viewport, m)
-
-            # markers on primary (X̄ for Xbar charts)
-            for i in m.viewport.x0:m.viewport.x1
-                if i < 1 || i > n_plot
-                    continue
-                end
-                dx = data_index_to_cell(i, plot_inner, m.viewport)
-                dy = data_val_to_cell_row(plot_vals[i], plot_inner, m.viewport)
-                st = point_status(i, ctx, ch_act)
-                if st == :oos
-                    sym = '✕'
-                    sty = tstyle(:error, bold=true)
-                elseif st == :ooc
-                    sym = '◆'
-                    sty = tstyle(:warning, bold=true)  # yellow WECO / OOC diamond
-                else
-                    sym = '●'
-                    sty = tstyle(:primary, bold=true)
-                end
-                set_char!(buf, dx, dy, sym, sty)
-            end
-
-            # tooltip
-            if (hi = m.hovered) !== nothing && 1 <= hi <= n_plot && hi >= m.viewport.x0 && hi <= m.viewport.x1 && m.drag_start === nothing
-                draw_hover_tooltip!(buf, plot_inner, hi, plot_vals[hi], hi in viol_set, m.viewport; usl=m.usl, target=m.target, lsl=m.lsl)
-            end
-
-            # labels
-            set_string!(buf, plot_inner.x, plot_inner.y + ch - 1, string(m.viewport.x0), tstyle(:text_dim))
-            set_string!(buf, right(plot_inner)-3, plot_inner.y + ch - 1, string(m.viewport.x1), tstyle(:text_dim))
         end
+    else
+        # Empty / no primary: still draw a Block shell and bind mouse area to primary outer
+        plot_block = Block(title = pri_title, border_style = tstyle(:border), title_style = tstyle(:title))
+        plot_inner = render(plot_block, primary_outer, buf)
+        m.plot_area = plot_inner
     end
 
     # Read-only extra panes from dashboard_pane_charts (panes[2], panes[3]) — not m.charts[2]/[3]
@@ -3533,7 +4422,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
         # Mode badge = effective gateway path (same predicate as resolve_chart_render_context)
         mode_lbl = _manual_limits_effective(act_ch) ? "limits:manual" : "limits:auto"
         set_string!(buf, x, y, "n=$n_primary $mode_lbl", tstyle(:text)); y += 1
-        # Secondary (Rbar/sbar/MRbar) on same line as cl/σ — dual canvas deferred (P2)
+        # Secondary stats (Rbar/sbar/MRbar); dual secondary canvas under active plot when pref on
         cl_sigma = "cl=$(round(lz.cl;digits=2)) σ=$(round(lz.sigma;digits=2))"
         if act_ctx.secondary_bar !== nothing && !isempty(act_ctx.secondary_name)
             sec_lbl = if act_ctx.secondary_name == "R"
@@ -3710,7 +4599,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     else
         " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
     end
-    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m x d f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
 end
 
 # small helper for fmt
@@ -3827,7 +4716,73 @@ function _render_library_page!(buf, area, m)
     # Footer keys — I/O wired (GC-PR3) + filters (GC-PR4)
     if y <= bottom(area) - 1
         set_string!(buf, area.x + 2, bottom(area) - 1,
-            "↑↓ select  Enter activate  a add  c clone  d+y delete  n rename  i/e/w/W I/O  f/F filter  Esc/q close",
+            "↑↓/click select  Enter/dblclick activate  a add  c clone  d+y delete  n rename  i/e/w/W  f/F  Esc/q",
+            tstyle(:text_dim))
+    end
+    if y <= bottom(area)
+        set_string!(buf, area.x + 2, bottom(area),
+            " last=$(m.last_event)",
+            tstyle(:text_dim))
+    end
+end
+
+# ── Tools registry page (P2-PR4) — master list m.tools; assign via builder ─
+function _render_tools_page!(buf, area, m)
+    m.tools_area = area
+    set_string!(buf, area.x + 1, area.y, "TOOLS REGISTRY  (Esc/q close → dashboard)", tstyle(:title, bold=true))
+    y = area.y + 2
+    ntools = length(m.tools)
+    if ntools >= 1
+        m.tools_selected = clamp(m.tools_selected, 1, ntools)
+    end
+    set_string!(buf, area.x + 2, y,
+        "Tools: $ntools   selected=$(m.tools_selected)   (registry ≠ chart tools filter list)",
+        tstyle(:text_dim))
+    y += 2
+    # Shared capacity helper (height−8 chrome) — same as key-path scroll sync
+    capacity = _tools_visible_capacity(m)
+    _sync_tools_scroll!(m, ntools, capacity)
+    if ntools == 0
+        set_string!(buf, area.x + 2, y, "No tools — press [a] to add", tstyle(:warning, bold=true))
+        y += 1
+        set_string!(buf, area.x + 2, y,
+            "  Master ids only; assign tools to charts via builder field Tools (csv).",
+            tstyle(:text_dim))
+        y += 1
+    else
+        first_i = m.tools_scroll + 1
+        last_i = min(ntools, m.tools_scroll + capacity)
+        for i in first_i:last_i
+            t = m.tools[i]
+            marker = i == m.tools_selected ? "▶" : " "
+            desc = isempty(t.description) ? "—" : t.description
+            line = "$marker $i. $(t.id)  $desc"
+            sty = i == m.tools_selected ? tstyle(:accent, bold=true) : tstyle(:text)
+            set_string!(buf, area.x + 2, y, line, sty)
+            y += 1
+        end
+    end
+    y = min(y + 1, bottom(area) - 3)
+    if m.pending_delete && ntools >= 1
+        tid = m.tools[m.tools_selected].id
+        set_string!(buf, area.x + 2, y,
+            "DELETE tool \"$tid\"?  press y to confirm, any other key cancel",
+            tstyle(:error, bold=true))
+        y += 1
+    elseif m.prompt_kind !== nothing
+        kind_lbl = string(m.prompt_kind)
+        set_string!(buf, area.x + 2, y,
+            "PROMPT [$kind_lbl]: $(m.prompt_buf)_",
+            tstyle(:accent, bold=true))
+        y += 1
+        set_string!(buf, area.x + 2, y,
+            "  Enter=apply  Esc=cancel  (q types into buffer)",
+            tstyle(:text_dim))
+        y += 1
+    end
+    if y <= bottom(area) - 1
+        set_string!(buf, area.x + 2, bottom(area) - 1,
+            "↑↓ select  Enter filter+close  a add  n edit desc  d+y delete  Esc/q close",
             tstyle(:text_dim))
     end
     if y <= bottom(area)
@@ -3851,6 +4806,8 @@ function _render_help_page!(buf, area, m)
         "  v/V     open chart-line visibility config (CL/±σ/specs)",
         "  o/O     open Visual Preferences (solid series line, …)",
         "  m/M     open chart library (list / add / clone / delete / rename)",
+        "  x/X     open tools registry (master tool ids; assign to charts via builder)",
+        "  d/D     open SharedTable grid (inspect / light cell edit; not Excel)",
         "  f       cycle filter prompt (tool → type → owner); Enter apply; Esc cancel",
         "  F       clear all filters (tool/type/owner); rehomes active if needed",
         "  b/B     open chart builder (name, cols, tools, manual limits, WECO)",
@@ -3864,12 +4821,21 @@ function _render_help_page!(buf, area, m)
         "  [ ]     switch active chart (multi-dashboard)",
         "  h/?     this help",
         "  k       keyboard map page",
-        "  q/esc   quit (close library/builder/help first)",
+        "  q/esc   quit (close library/tools/builder/table/help first)",
         "",
-        "LIBRARY (m): ↑↓ select · Enter activate · a add · c clone · d+y delete · n rename",
+        "LIBRARY (m): ↑↓/click select · Enter/dblclick activate · a add · c clone · d+y delete · n rename",
         "  i import CSV · e export CSV · w save JSON · W load JSON (path prompts)",
         "  f/F filters same as dashboard (list shows visible_charts only)",
         "  Note: seed demos often have empty tools — tool filter may hide all until assigned.",
+        "  Mode-gate: library d = delete chart; dashboard d = table grid (KD-P2-20).",
+        "",
+        "TABLE (d): arrows move cell · PgUp/PgDn page · Enter edit cell · r rematerialize active",
+        "  Esc/q close → dashboard (never quit). Empty table shows a warn message.",
+        "  Edits write strings into SharedTable only; r rebuilds active chart series explicitly.",
+        "",
+        "TOOLS REGISTRY (x): master m.tools ids + descriptions (JSON tools array).",
+        "  ↑↓ select · a add (id then desc) · n edit desc · d+y delete · Enter set filter_tool",
+        "  Registry ≠ chart filter lists (ch.tools); assign tools on charts via builder.",
         "",
         "RICH VISUALS:",
         "  ◆ = OOC (WECO violation, yellow/warning)",
@@ -3878,7 +4844,9 @@ function _render_help_page!(buf, area, m)
         "  Dashed: zone lines (±1/2/3σ), specs (USL/LSL red)",
         "",
         "DASHBOARD: multiple charts visible (switch with []); each has own viewport/specs/rules.",
-        "SIDE STATS: Rbar/sbar (Xbar) and MRbar (I-MR); dual secondary plot canvas deferred (P2).",
+        "DUAL CANVAS: I-MR/Xbar show MR/R/s under active plot when Visual pref Secondary canvas is ON.",
+        "  Multi-pane may temporarily hide neighbors so dual fits (not permanent focused mode).",
+        "SIDE STATS: Rbar/sbar (Xbar) and MRbar (I-MR) always; secondary canvas toggle in Visual (o).",
         "HTML archive: load_html_archive / load_html_archive! (#spc-state); strips admins/passcodes.",
         "WECO RULES (defaults 1-5 ON): 1=beyond3σ, 2=2of3@2σ, 3=4of5@1σ, 4=8sameCL, 5=6trend, 6=14alt, 7=15in1σ, 8=8out1σ",
         "See original HTML for full defs + workflow. This TUI ports core I-MR + WECO + Cpk fidelity.",
@@ -3895,18 +4863,20 @@ function _render_keymap_page!(buf, area, m)
     y = area.y + 2
     kbd = [
         "KEYS:",
-        "  m M / f F   Library (↑↓ a c d n i/e/w/W) / filters (cycle tool→type→owner; F clear)",
+        "  m M / x X   Library (↑↓ a c d n i/e/w/W) / Tools registry (↑↓ a n d+y Enter)",
+        "  f F         Filters (cycle tool→type→owner; F clear)",
+        "  d D         SharedTable grid (arrows · Enter edit · r rematerialize · Esc close)",
         "  p/P         Pause/Resume live mode",
         "  g/G         Toggle live_enabled on active chart",
-        "  r R z Z     Reset view (full range + auto y)",
+        "  r R z Z     Reset view (full range + auto y)  [table mode: r rematerialize]",
         "  c C / v V / o O  Config WECO / Lines / Visual prefs",
-        "  b B         Chart builder (manual limits, cols, tools)",
+        "  b B         Chart builder (manual limits, cols, tools assign)",
         "  u t l / s   Edit USL/Target/LSL / clear specs",
         "  1-8         Toggle WECO-N (or 1-5 in Lines tab)",
         "  [ ] < >     Prev / Next chart (dashboard)",
-        "  ← →         Pan left/right",
+        "  ← →         Pan left/right (table: move cell)",
         "  h ? / k     Help / This keymap",
-        "  q Esc       Quit (library/builder: close mode, not quit)",
+        "  q Esc       Quit (library/tools/builder/table: close mode, not quit)",
         "",
         "MOUSE:",
         "  Move        Hover + vertical follow │ + tooltip",
@@ -3915,14 +4885,105 @@ function _render_keymap_page!(buf, area, m)
         "  Left release Snap ┃ to nearest point + select",
         "  Wheel up    Zoom in (around cursor)",
         "  Wheel down  Zoom out",
+        "  Library     Click select; double-click activate (≤8 ticks)",
         "",
-        "Config: Tab WECO↔Lines; ↑↓/digits/space; Esc/c/v close. Lines ●=draw on chart.",
+        "Config: Tab WECO↔Lines↔Visual; ↑↓/digits/space; Esc/c/v/o close. Lines ●=draw on chart.",
+        "Visual: solid/stroke/braille + Secondary canvas (MR/R/s under active; may hide neighbors).",
         "Builder: ↑↓ fields; Enter edit/toggle; a apply/materialize; 1-8 WECO; y type.",
         "Library i/e/w/W + f/F filters (session-only; demo tools may be empty).",
+        "Tools registry: master m.tools; chart ch.tools assigned via builder (not registry alone).",
+        "Table (d): full-page SharedTable; no auto-rematerialize on load; r explicit.",
     ]
     for (i, ln) in enumerate(kbd)
         if y + i - 1 > bottom(area); break; end
         set_string!(buf, area.x + 2, y + i - 1, ln, tstyle(i==1 || startswith(ln,"MOUSE") ? :accent : :text))
+    end
+end
+
+# ── SharedTable grid page (P2-PR7 / KD-P2-20) — full page; no dashboard chrome ─
+function _render_table_page!(buf, area, m)
+    m.table_area = area
+    set_string!(buf, area.x + 1, area.y,
+        "SHARED TABLE  (Esc/q close · arrows · Enter edit · r rematerialize active)",
+        tstyle(:title, bold = true))
+    y = area.y + 2
+    nr = length(m.table.rows)
+    nc_all = length(m.table.columns)
+    nc = _table_n_cols(m)
+    cell_w = TABLE_DEFAULT_CELL_W
+    row_cap = _table_visible_row_capacity(m)
+    col_cap = _table_visible_col_capacity(m; cell_w = cell_w)
+    _sync_table_scroll!(m; row_cap = row_cap, col_cap = col_cap)
+
+    set_string!(buf, area.x + 2, y,
+        "rows=$nr cols=$nc_all  cursor=($(_table_n_rows(m) > 0 ? m.table_row : 0),$(nc > 0 ? m.table_col : 0))  scroll=($(m.table_scroll_row),$(m.table_scroll_col))" *
+        (nc_all > TABLE_MAX_RENDER_COLS ? "  (showing first $TABLE_MAX_RENDER_COLS cols)" : ""),
+        tstyle(:text_dim))
+    y += 1
+
+    if nr == 0 || nc_all == 0
+        set_string!(buf, area.x + 2, y + 1,
+            "Empty table — import CSV (library i) or load session (library W)",
+            tstyle(:warning, bold = true))
+        y += 3
+        set_string!(buf, area.x + 2, y,
+            "  SharedTable is session data; chart series rematerialize only via [r] or builder apply.",
+            tstyle(:text_dim))
+        y += 2
+    else
+        # Header row of column names (windowed)
+        c0 = m.table_scroll_col + 1
+        c1 = min(nc, m.table_scroll_col + col_cap)
+        hdr_parts = String["#"]
+        for c in c0:c1
+            name = m.table.columns[c]
+            mark = c == m.table_col ? "▶" : " "
+            push!(hdr_parts, mark * _table_cell_display(name, cell_w - 1))
+        end
+        set_string!(buf, area.x + 2, y, join(hdr_parts, " "), tstyle(:accent, bold = true))
+        y += 1
+
+        r0 = m.table_scroll_row + 1
+        r1 = min(nr, m.table_scroll_row + row_cap)
+        for r in r0:r1
+            y > bottom(area) - 3 && break
+            row_mark = r == m.table_row ? "▶" : " "
+            parts = String[row_mark * lpad(string(r), 3)]
+            for c in c0:c1
+                val = _table_cell_value(m, r, c)
+                if m.table_editing && r == m.table_row && c == m.table_col
+                    val = m.table_buf * "▌"
+                end
+                cell = _table_cell_display(val, cell_w)
+                if r == m.table_row && c == m.table_col && !m.table_editing
+                    # highlight selected cell with brackets when not editing
+                    cell = _table_cell_display("[" * _table_cell_value(m, r, c) * "]", cell_w)
+                end
+                push!(parts, cell)
+            end
+            sty = r == m.table_row ? tstyle(:accent, bold = true) : tstyle(:text)
+            set_string!(buf, area.x + 2, y, join(parts, " "), sty)
+            y += 1
+        end
+    end
+
+    # Edit / status strip near bottom
+    y = min(max(y + 1, bottom(area) - 2), bottom(area) - 1)
+    if m.table_editing
+        colname = (nc >= 1 && m.table_col <= length(m.table.columns)) ?
+            m.table.columns[clamp(m.table_col, 1, length(m.table.columns))] : "?"
+        set_string!(buf, area.x + 2, y,
+            "EDIT [$colname r=$(m.table_row)]: $(m.table_buf)_  Enter=commit  Esc=cancel",
+            tstyle(:accent, bold = true))
+    else
+        set_string!(buf, area.x + 2, y,
+            "↑↓←→ move  PgUp/PgDn page  Enter edit  r rematerialize active  Esc/q close",
+            tstyle(:text_dim))
+    end
+    if y + 1 <= bottom(area)
+        set_string!(buf, area.x + 2, bottom(area),
+            " last=$(m.last_event)",
+            tstyle(:text_dim))
     end
 end
 
@@ -3999,7 +5060,7 @@ function _live_may_advance(m::SPCWorkbenchModel)::Bool
     m.config_open && return false
     m.prompt_kind !== nothing && return false
     m.pending_delete && return false
-    m.view_mode in (:help, :keymap, :library, :builder) && return false
+    m.view_mode in (:help, :keymap, :library, :builder, :tools, :table) && return false
     ch = current_chart(m)
     (isempty(ch.data.values) || !ch.live_enabled) && return false
     return true
