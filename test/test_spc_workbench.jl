@@ -3013,6 +3013,7 @@ end
         re_view!()
         T.update!(m, T.KeyEvent('n'))
         @test m.prompt_kind === :rename_chart
+        @test m.library_last_click === nothing  # prompt open clears stale dblclick
         sel_p = m.library_selected
         T.update!(m, T.MouseEvent(x_mid, y_row2, T.mouse_left, T.mouse_press, false, false, false))
         @test occursin("modal", m.last_event)
@@ -3021,6 +3022,74 @@ end
         @test m.view_mode == :library
         T.update!(m, T.KeyEvent(:escape))
         @test m.prompt_kind === nothing
+
+        # --- Issue 1 regression: Esc → reopen → single-click must NOT activate ---
+        re_view!()
+        T.update!(m, T.MouseEvent(x_mid, y_row2, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.library_selected == 2
+        @test m.library_last_click !== nothing
+        act_before = m.active
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+        @test m.library_last_click === nothing
+        re_view!()
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        @test m.library_last_click === nothing  # open also clears
+        re_view!()
+        T.update!(m, T.MouseEvent(x_mid, y_row2, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.view_mode == :library          # still library — select only
+        @test m.library_selected == 2
+        @test m.active == act_before           # did not activate
+        @test m.library_last_click !== nothing
+        @test m.library_last_click.idx == 2
+
+        # --- Slow second click (Δtick > LIBRARY_DBLCLICK_TICKS) must NOT activate ---
+        re_view!()
+        first_tick = m.library_last_click.tick
+        # Simulate time passing without real multi-frame wait
+        m.tick = first_tick + LIBRARY_DBLCLICK_TICKS + 1
+        @test (m.tick - m.library_last_click.tick) > LIBRARY_DBLCLICK_TICKS
+        T.update!(m, T.MouseEvent(x_mid, y_row2, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.view_mode == :library
+        @test m.active == act_before
+        @test m.library_selected == 2
+        @test m.library_last_click.idx == 2
+        @test m.library_last_click.tick == m.tick  # retimed as new single select
+    end
+
+    @testset "library mouse: scrolled hit-test uses library_scroll offset" begin
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 3), paused = true)
+        _ensure_charts!(m)
+        for i in 1:10
+            add_chart!(m; name = "Extra-$i")
+        end
+        nch = length(m.charts)
+        @test nch >= 12
+
+        tb = T.TestBackend(80, 14)
+        T.update!(m, T.KeyEvent('m'))
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 14), [], []))
+        a = m.library_area
+        list_top = a.y + 4
+        x_mid = a.x + 4
+
+        # Force scroll so first visible row is chart 6 (scroll=5 → vi = 5 + 0 + 1 = 6)
+        m.library_scroll = 5
+        m.library_selected = 6
+        @test _library_row_at(m, x_mid, list_top) == 6
+        @test _library_row_at(m, x_mid, list_top + 1) == 7
+
+        act0 = m.active
+        T.update!(m, T.MouseEvent(x_mid, list_top, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.library_selected == 6
+        @test m.view_mode == :library
+        @test m.active == act0  # single-click does not activate
+        T.update!(m, T.MouseEvent(x_mid, list_top + 1, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.library_selected == 7
+        @test m.view_mode == :library
+        @test m.active == act0
     end
 
     @testset "library mouse: filtered list maps visible row → absolute index" begin

@@ -2513,7 +2513,8 @@ function _library_row_at(m::SPCWorkbenchModel, x::Int, y::Int)::Union{Nothing,In
     (a.width <= 0 || a.height <= 0) && return nothing
     !contains(a, x, y) && return nothing
 
-    # Must match render: title @ y, summary @ y+2, list starts after blank @ y+4
+    # Hardcoded chrome matches _render_library_page! and _library_visible_capacity (h-8).
+    # Prefer library_list_rect if list chrome rows change later (design KD-P2-19).
     list_top = a.y + 4
     list_bottom = bottom(a) - 4
     (y < list_top || y > list_bottom) && return nothing
@@ -2777,6 +2778,8 @@ function _open_prompt!(m::SPCWorkbenchModel, kind::Symbol; seed::AbstractString 
     m.prompt_kind = kind
     m.prompt_buf = String(seed)
     m.pending_delete = false
+    # Clear stale dblclick so click → prompt → Esc → click cannot false-activate
+    m.library_last_click = nothing
     m.last_event = "prompt $kind"
 end
 
@@ -3011,6 +3014,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         if evt.key == :escape || (evt.key == :char && evt.char == 'q')
             m.view_mode = :dashboard
             m.pending_delete = false
+            m.library_last_click = nothing  # prevent Esc→reopen false dblclick
             m.last_event = "library closed"
             return
         elseif evt.key == :up
@@ -3038,6 +3042,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                 m.library_selected = ai === nothing ? 1 : ai
                 set_active_chart!(m, m.library_selected)
                 m.view_mode = :dashboard
+                m.library_last_click = nothing  # exit path: clear dblclick state
                 m.last_event = "active chart $(m.active)"
             else
                 m.last_event = "No charts match filters"
@@ -3064,6 +3069,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                     m.last_event = "cannot delete last chart"
                 else
                     m.pending_delete = true
+                    m.library_last_click = nothing  # keyboard-only confirm; no stale dblclick
                     m.last_event = "confirm delete? y/N"
                 end
                 return
@@ -3167,6 +3173,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.library_selected = clamp(m.active, 1, max(1, length(m.charts)))
             m.pending_delete = false
             m.prompt_kind = nothing
+            m.library_last_click = nothing  # fresh open: no stale dblclick from prior session
             _sync_library_scroll!(m)
             m.last_event = "library open"
             return
@@ -4220,7 +4227,7 @@ function _render_library_page!(buf, area, m)
     # Footer keys — I/O wired (GC-PR3) + filters (GC-PR4)
     if y <= bottom(area) - 1
         set_string!(buf, area.x + 2, bottom(area) - 1,
-            "↑↓ select  Enter activate  a add  c clone  d+y delete  n rename  i/e/w/W I/O  f/F filter  Esc/q close",
+            "↑↓/click select  Enter/dblclick activate  a add  c clone  d+y delete  n rename  i/e/w/W  f/F  Esc/q",
             tstyle(:text_dim))
     end
     if y <= bottom(area)
@@ -4326,7 +4333,7 @@ function _render_help_page!(buf, area, m)
         "  k       keyboard map page",
         "  q/esc   quit (close library/tools/builder/help first)",
         "",
-        "LIBRARY (m): ↑↓ select · Enter activate · a add · c clone · d+y delete · n rename",
+        "LIBRARY (m): ↑↓/click select · Enter/dblclick activate · a add · c clone · d+y delete · n rename",
         "  i import CSV · e export CSV · w save JSON · W load JSON (path prompts)",
         "  f/F filters same as dashboard (list shows visible_charts only)",
         "  Note: seed demos often have empty tools — tool filter may hide all until assigned.",
@@ -4380,6 +4387,7 @@ function _render_keymap_page!(buf, area, m)
         "  Left release Snap ┃ to nearest point + select",
         "  Wheel up    Zoom in (around cursor)",
         "  Wheel down  Zoom out",
+        "  Library     Click select; double-click activate (≤8 ticks)",
         "",
         "Config: Tab WECO↔Lines; ↑↓/digits/space; Esc/c/v close. Lines ●=draw on chart.",
         "Builder: ↑↓ fields; Enter edit/toggle; a apply/materialize; 1-8 WECO; y type.",
