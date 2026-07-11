@@ -2881,7 +2881,7 @@ end
         @test m.view_mode == :library
     end
 
-    @testset "library: mouse no-op / no stuck drag; ↑↓ selection" begin
+    @testset "library: mouse no dashboard pan; ↑↓ selection; pending modal" begin
         m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 5), paused = true)
         _ensure_charts!(m)
         nch = length(m.charts)
@@ -2894,11 +2894,14 @@ end
 
         T.update!(m, T.KeyEvent('m'))
         @test m.view_mode == :library
+        # Re-view so library_area is set for hit-test
+        T.view(m, T.Frame(T.TestBackend(80, 18).buf, T.Rect(1, 1, 80, 18), [], []))
 
+        # Move: clears hover; does not pan dashboard
         T.update!(m, T.MouseEvent(12, 6, T.mouse_left, T.mouse_move, false, false, false))
         @test m.hover_x === nothing
         @test m.hovered === nothing
-        @test occursin("modal", m.last_event)
+        @test m.view_mode == :library
 
         T.update!(m, T.MouseEvent(12, 6, T.mouse_left, T.mouse_release, false, false, false))
         @test m.drag_start === nothing
@@ -2918,11 +2921,148 @@ end
 
         T.update!(m, T.KeyEvent('d'))
         @test m.pending_delete
+        sel0 = m.library_selected
         T.update!(m, T.MouseEvent(5, 5, T.mouse_left, T.mouse_press, false, false, false))
         @test occursin("modal", m.last_event)
+        @test m.library_selected == sel0  # keyboard-only while pending_delete
         T.update!(m, T.KeyEvent(:escape))
         @test m.pending_delete == false
         @test m.quit == false
+    end
+
+    @testset "library mouse: click select + double-click activate (KD-P2-19)" begin
+        # Tick advances in view, not update!(MouseEvent) — re-view between clicks.
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(10; seed = 7), paused = true)
+        _ensure_charts!(m)
+        nch = length(m.charts)
+        @test nch >= 2
+        set_active_chart!(m, 1)
+        m.library_selected = 1
+
+        tb = T.TestBackend(80, 18)
+        function re_view!()
+            T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 18), [], []))
+        end
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode == :library
+        re_view!()
+        a = m.library_area
+        @test a.width > 0 && a.height > 0
+        list_top = a.y + 4
+        # Row 0 (first visible) → abs index 1; row 1 → abs index 2
+        x_mid = a.x + 4
+        y_row1 = list_top
+        y_row2 = list_top + 1
+        y_title = a.y           # header — not a list row
+        y_footer = T.bottom(a)  # footer last line
+
+        # Pure hit-test geometry
+        @test _library_row_at(m, x_mid, y_row1) == 1
+        @test _library_row_at(m, x_mid, y_row2) == 2
+        @test _library_row_at(m, x_mid, y_title) === nothing
+        @test _library_row_at(m, x_mid, y_footer) === nothing
+
+        # Single-click selects row 2 (does not activate)
+        T.update!(m, T.MouseEvent(x_mid, y_row2, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.library_selected == 2
+        @test m.active == 1
+        @test m.view_mode == :library
+        @test m.library_last_click !== nothing
+        @test m.library_last_click.idx == 2
+        @test occursin("library sel 2", m.last_event)
+
+        # Click title/footer → selection unchanged
+        sel_before = m.library_selected
+        T.update!(m, T.MouseEvent(x_mid, y_title, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.library_selected == sel_before
+        @test m.view_mode == :library
+        T.update!(m, T.MouseEvent(x_mid, y_footer, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.library_selected == sel_before
+
+        # Different row second press → new select, reset last_click (not activate)
+        re_view!()  # advance tick for disciplined timing
+        T.update!(m, T.MouseEvent(x_mid, y_row1, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.library_selected == 1
+        @test m.active == 1
+        @test m.view_mode == :library
+        @test m.library_last_click.idx == 1
+
+        # Double-click same row within LIBRARY_DBLCLICK_TICKS → activate + dashboard
+        re_view!()  # Δtick small (1 view tick)
+        @test (m.tick - m.library_last_click.tick) <= LIBRARY_DBLCLICK_TICKS
+        T.update!(m, T.MouseEvent(x_mid, y_row1, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.active == 1
+        @test m.view_mode == :dashboard
+        @test m.library_last_click === nothing
+        @test occursin("active chart", m.last_event)
+
+        # Double-click row 2 to activate chart 2
+        T.update!(m, T.KeyEvent('m'))
+        re_view!()
+        T.update!(m, T.MouseEvent(x_mid, y_row2, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.library_selected == 2
+        re_view!()
+        T.update!(m, T.MouseEvent(x_mid, y_row2, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.active == 2
+        @test m.view_mode == :dashboard
+        @test m.library_last_click === nothing
+
+        # Prompt open → click no-op on selection
+        T.update!(m, T.KeyEvent('m'))
+        re_view!()
+        T.update!(m, T.KeyEvent('n'))
+        @test m.prompt_kind === :rename_chart
+        sel_p = m.library_selected
+        T.update!(m, T.MouseEvent(x_mid, y_row2, T.mouse_left, T.mouse_press, false, false, false))
+        @test occursin("modal", m.last_event)
+        @test m.library_selected == sel_p
+        @test m.prompt_kind === :rename_chart
+        @test m.view_mode == :library
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+    end
+
+    @testset "library mouse: filtered list maps visible row → absolute index" begin
+        d = generate_spc_workbench_data(8; seed = 19)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        idx1 = add_chart!(m; name = "Alpha")
+        idx2 = add_chart!(m; name = "Beta")
+        idx3 = add_chart!(m; name = "Gamma")
+        m.charts[idx1].owner = "Alice"
+        m.charts[idx2].owner = "Bob"
+        m.charts[idx3].owner = "Alice"
+        set_active_chart!(m, idx1)
+        set_filter_owner!(m, "Alice")  # visible: Alpha (1), Gamma (3) — Beta hidden
+        vis = visible_charts(m)
+        @test length(vis) == 2
+        @test vis[1].name == "Alpha"
+        @test vis[2].name == "Gamma"
+
+        tb = T.TestBackend(80, 18)
+        T.update!(m, T.KeyEvent('m'))
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 18), [], []))
+        a = m.library_area
+        x_mid = a.x + 4
+        list_top = a.y + 4
+        # Visible row 1 → abs Alpha; visible row 2 → abs Gamma (not raw index 2)
+        @test _library_row_at(m, x_mid, list_top) == idx1
+        @test _library_row_at(m, x_mid, list_top + 1) == idx3
+
+        m.library_selected = idx1
+        T.update!(m, T.MouseEvent(x_mid, list_top + 1, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.library_selected == idx3
+        @test m.active == idx1  # select only
+        @test m.view_mode == :library
+
+        # Double-click visible row 2 activates Gamma (abs idx3)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 18), [], []))
+        T.update!(m, T.MouseEvent(x_mid, list_top + 1, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.active == idx3
+        @test m.view_mode == :dashboard
+        @test m.library_selected == idx3
     end
 
     @testset "library: scroll keeps selection visible; corrupt sel clamps" begin

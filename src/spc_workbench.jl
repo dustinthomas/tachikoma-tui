@@ -2486,12 +2486,86 @@ end
 
 # ── Update (Key + Mouse, full fidelity) ─────────────────────────────────
 
+"""Max tick delta (via re-view) between presses to count as double-click (KD-P2-19)."""
+const LIBRARY_DBLCLICK_TICKS = 8
+
 """Rows available for the chart list (title/summary/footer reserved)."""
 function _library_visible_capacity(m::SPCWorkbenchModel)::Int
     a = m.library_area
     h = (a.height > 0) ? a.height : 20
     # title + blank + summary + blank ≈ 4; footer/prompt reserve ≈ 4
     return max(1, h - 8)
+end
+
+"""
+    _library_row_at(m, x, y) -> Union{Nothing,Int}
+
+Hit-test library list geometry (KD-P2-19). Returns absolute index into
+`m.charts`, or `nothing` if outside the list / empty / prompt / pending_delete.
+List top is `library_area.y + 4` (mirrors `_render_library_page!`); indices map
+through `visible_charts` then chart id → absolute index.
+"""
+function _library_row_at(m::SPCWorkbenchModel, x::Int, y::Int)::Union{Nothing,Int}
+    m.prompt_kind !== nothing && return nothing
+    m.pending_delete && return nothing
+
+    a = m.library_area
+    (a.width <= 0 || a.height <= 0) && return nothing
+    !contains(a, x, y) && return nothing
+
+    # Must match render: title @ y, summary @ y+2, list starts after blank @ y+4
+    list_top = a.y + 4
+    list_bottom = bottom(a) - 4
+    (y < list_top || y > list_bottom) && return nothing
+
+    vis = visible_charts(m)
+    isempty(vis) && return nothing
+
+    vi = m.library_scroll + (y - list_top) + 1   # 1-based index into visible_charts
+    (vi < 1 || vi > length(vis)) && return nothing
+
+    return findfirst(c -> c.id == vis[vi].id, m.charts)
+end
+
+"""Library-mode mouse: single-click select, double-click activate; no dashboard pan."""
+function _update_library_mouse!(m::SPCWorkbenchModel, evt::MouseEvent)
+    # Never drive dashboard hover/pan from library
+    m.hover_x = nothing
+    m.hovered = nothing
+    if evt.action == mouse_release
+        m.drag_start = nothing
+    end
+
+    # prompt / pending_delete: keyboard-only (still consume mouse)
+    if m.prompt_kind !== nothing || m.pending_delete
+        m.last_event = string(evt.action, " ", evt.button, " (modal)")
+        return
+    end
+
+    m.last_event = string(evt.action, " ", evt.button)
+
+    if evt.action == mouse_press && evt.button == mouse_left
+        abs_i = _library_row_at(m, evt.x, evt.y)
+        abs_i === nothing && return
+
+        # Double-click: same abs index within LIBRARY_DBLCLICK_TICKS (tick advances in view)
+        lc = m.library_last_click
+        if lc !== nothing && lc.idx == abs_i && (m.tick - lc.tick) <= LIBRARY_DBLCLICK_TICKS
+            m.library_selected = abs_i
+            set_active_chart!(m, abs_i)
+            m.view_mode = :dashboard
+            m.library_last_click = nothing
+            m.last_event = "active chart $(m.active)"
+            return
+        end
+
+        # Single-click select (not activate)
+        m.library_selected = abs_i
+        _sync_library_scroll_vis!(m, visible_charts(m))
+        m.library_last_click = (idx = abs_i, tick = m.tick)
+        m.last_event = "library sel $(m.library_selected)"
+        return
+    end
 end
 
 """Keep `library_selected` in range and `library_scroll` so selection is visible."""
@@ -3228,10 +3302,15 @@ end
 
 function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     _ensure_charts!(m)
-    # Modal / library / tools / prompt / pending_delete: keyboard-only (KD16)
+    # Library: hit-test select / double-click activate (KD-P2-19); not blanket keyboard-only
+    if m.view_mode == :library
+        _update_library_mouse!(m, evt)
+        return
+    end
+    # Modal / tools / prompt / pending_delete / builder / help: keyboard-only (KD16)
     if m.config_open || m.editing !== nothing ||
        m.view_mode == :help || m.view_mode == :keymap ||
-       m.view_mode == :library || m.view_mode == :builder ||
+       m.view_mode == :builder ||
        m.view_mode == :tools ||
        m.prompt_kind !== nothing || m.pending_delete
         m.last_event = string(evt.action, " ", evt.button, " (modal)")
