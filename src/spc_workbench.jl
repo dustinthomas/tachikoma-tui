@@ -2034,11 +2034,17 @@ function delete_tool!(m::SPCWorkbenchModel, idx::Int)::Bool
     return true
 end
 
+"""Rows available for the tools list (matches `_render_tools_page!` geometry).
+
+Chrome: title row + status row + spacing ≈ 4 top; footer/prompt reserve ≈ 4 bottom
+→ capacity = height − 8 (same reservation as library). Used by key-path
+`_sync_tools_scroll!` and by render when it does not pass an explicit capacity.
+"""
 function _tools_visible_capacity(m::SPCWorkbenchModel)::Int
     a = m.tools_area
-    (a.height < 4 || a.width < 4) && return 12
-    # title + status + footer ≈ 6 rows of chrome
-    return max(1, a.height - 6)
+    h = (a.height > 0) ? a.height : 20
+    # Must match render: list starts ~y+4, list_bottom = bottom(area)-4 → height-8
+    return max(1, h - 8)
 end
 
 """Keep `tools_selected` in range and `tools_scroll` so selection is visible."""
@@ -4158,8 +4164,8 @@ function _render_tools_page!(buf, area, m)
         "Tools: $ntools   selected=$(m.tools_selected)   (registry ≠ chart tools filter list)",
         tstyle(:text_dim))
     y += 2
-    list_bottom = bottom(area) - 4
-    capacity = max(1, list_bottom - y + 1)
+    # Shared capacity helper (height−8 chrome) — same as key-path scroll sync
+    capacity = _tools_visible_capacity(m)
     _sync_tools_scroll!(m, ntools, capacity)
     if ntools == 0
         set_string!(buf, area.x + 2, y, "No tools — press [a] to add", tstyle(:warning, bold=true))

@@ -3131,7 +3131,12 @@ end
         T.update!(m, T.KeyEvent(:escape))
         @test m.prompt_buf == ""  # cancel clears buf
 
-        # anti-port: never enter :filters mode (tools mode is P2-PR4 product UI)
+        # anti-port: never enter :filters mode; tools mode is allowed (P2-PR4)
+        # Positive open so allowlist is not vacuously true only on :dashboard
+        T.update!(m, T.KeyEvent('x'))
+        @test m.view_mode == :tools
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
         @test m.view_mode in (:dashboard, :library, :help, :keymap, :builder, :focused, :tools)
         @test m.view_mode != :filters
         # package-private setters exist on the included workbench surface
@@ -3146,6 +3151,18 @@ end
         _ensure_charts!(m)
         @test m.view_mode == :dashboard
         @test m.seed_demos === :triple
+
+        # KD-P2-20: dashboard d/D must not arm delete or open tools (reserved for table later)
+        ntools0 = length(m.tools)
+        T.update!(m, T.KeyEvent('d'))
+        @test m.view_mode == :dashboard
+        @test m.pending_delete == false
+        @test m.quit == false
+        @test length(m.tools) == ntools0
+        T.update!(m, T.KeyEvent('D'))
+        @test m.view_mode == :dashboard
+        @test m.pending_delete == false
+        @test m.quit == false
 
         T.update!(m, T.KeyEvent('x'))
         @test m.view_mode == :tools
@@ -4098,12 +4115,19 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
         try
             err = save_workbench(m, path)
             @test err === nothing
-            # leave filters set on model then load into same model
+            # leave filters + tools UI ephemerals set, then load into same model
+            m.tools_selected = 99
+            m.tools_scroll = 50
+            m.tool_pending_id = "STALE"
             err2 = load_workbench!(m, path)
             @test err2 === nothing
             @test m.filter_tool == ""
             @test m.filter_type == ""
             @test m.filter_owner == ""
+            @test m.tools_selected == 1
+            @test m.tools_scroll == 0
+            @test m.tool_pending_id == ""
+            @test m.view_mode == :dashboard
             @test m.filter_prompt_field === :tool
             @test length(visible_charts(m)) == length(m.charts)
             @test !isempty(m.charts)

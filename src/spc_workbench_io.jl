@@ -756,6 +756,11 @@ function _clear_load_ephemerals!(m::SPCWorkbenchModel)
     m.prompt_kind = nothing
     m.prompt_buf = ""
     m.pending_delete = false
+    # Tools registry UI ephemerals (P2-PR4) — selection/scroll/staged id not in JSON
+    m.tools_selected = 1
+    m.tools_scroll = 0
+    m.tool_pending_id = ""
+    m.tools_area = Rect(0, 0, 0, 0)
     # Session-ephemeral filters (GC-PR4) — not in JSON schema; always reset on load
     m.filter_tool = ""
     m.filter_type = ""
@@ -776,6 +781,9 @@ function _apply_parsed!(m::SPCWorkbenchModel, parsed::NamedTuple)
     m.table = parsed.table  # mirror HTML apply; do NOT auto-rematerialize (KD-P2-18)
     m.library_selected = clamp(parsed.active, 1, length(parsed.charts))
     _clear_load_ephemerals!(m)
+    # After clear, clamp tools_selected into new registry (empty → stays 1)
+    ntools = length(m.tools)
+    m.tools_selected = ntools >= 1 ? clamp(m.tools_selected, 1, ntools) : 1
     _ensure_charts!(m)  # sync legacy mirrors from new active
     return nothing
 end
