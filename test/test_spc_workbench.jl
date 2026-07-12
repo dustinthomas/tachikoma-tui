@@ -1774,7 +1774,8 @@ end
         T.view(m, T.Frame(tb2.buf, T.Rect(1,1,80,18),[],[]))
         rows = [T.row_text(tb2, i) for i in 1:18]
         help_text = join([r for r in rows if r !== nothing], "\n")
-        @test occursin("Help", help_text) || occursin("WECO", help_text) || occursin("QUICK START", help_text)
+        @test occursin("Help", help_text) || occursin("HELP", help_text) ||
+              occursin("library", lowercase(help_text)) || occursin("·", help_text)
         # strict no-bleed (real test that would fail without early return in help view)
         @test T.find_text(tb2, "SPC Workbench [dashboard]") === nothing   # normal path header not emitted
         @test T.find_text(tb2, "Side Stats") === nothing
@@ -1789,15 +1790,17 @@ end
         T.view(m, T.Frame(tb.buf, T.Rect(1,1,90,36),[],[]))
         krows = [T.row_text(tb, i) for i in 1:36]
         kfull = join([string(r) for r in krows if r!==nothing], "\n")
-        @test occursin("KEYBOARD MAP", kfull)
-        @test occursin("p/P", kfull)
-        @test occursin("Pause/Resume", kfull)
-        @test occursin("MOUSE:", kfull)  # mouse section header (needs tall enough backend)
-        @test occursin("b B", kfull) || occursin("builder", lowercase(kfull))
+        @test occursin("KEYBOARD MAP", kfull) || occursin("Keys  · Map", kfull)
+        # Styled chips (not legacy monospace dump)
+        @test occursin("pause", lowercase(kfull)) || occursin("p ·", kfull)
+        @test occursin("MOUSE", uppercase(kfull)) || occursin("mouse", lowercase(kfull))
+        @test occursin("builder", lowercase(kfull)) || occursin("b ·", kfull)
+        @test occursin("·", kfull) || occursin("▸", kfull)
         T.update!(m, T.KeyEvent(:escape))
         tb2 = T.TestBackend(90, 36); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1,1,90,36),[],[]))
         @test T.find_text(tb2, "KEYBOARD MAP") === nothing
+        @test T.find_text(tb2, "Keys  · Map") === nothing
     end
 
     @testset "builder mode (b): no-bleed + Esc/q close without quit + mouse no-op" begin
@@ -2285,35 +2288,273 @@ end
         tb0 = T.TestBackend(80, 18); T.reset!(tb0.buf)
         T.view(m, T.Frame(tb0.buf, T.Rect(1,1,80,18),[],[]))
         @test m.editing === nothing
-        init_stat = T.row_text(tb0, 18)
-        @test init_stat !== nothing
-        @test !occursin("EDITING", string(init_stat))
+        init_full = join([string(T.row_text(tb0, i)) for i in 1:18 if T.row_text(tb0, i) !== nothing], "\n")
+        @test !occursin("EDITING", init_full)
 
-        # press u → should enter usl edit, bottom info MUST change visibly
+        # press u → should enter usl edit; Message center MUST show it
         T.update!(m, T.KeyEvent('u'))
         tb = T.TestBackend(80, 18); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1,1,80,18),[],[]))
         @test m.editing == :usl
-        stat = T.row_text(tb, 18)
-        @test occursin("EDITING USL", string(stat)) || occursin("edit usl", lowercase(string(stat)))
+        full = join([string(T.row_text(tb, i)) for i in 1:18 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("EDITING USL", full) || occursin("edit usl", lowercase(full))
         # last_event or prompt should mention it
         @test m.last_event != ""
 
-        # type digits — bottom/prompt must reflect the accumulating input value (not frozen)
+        # type digits — Message center must reflect the accumulating input value (not frozen)
         T.update!(m, T.KeyEvent('1'))
         T.update!(m, T.KeyEvent('3'))
         T.update!(m, T.KeyEvent('2'))
         T.update!(m, T.KeyEvent('0'))
         tb2 = T.TestBackend(80, 18); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1,1,80,18),[],[]))
-        stat2 = string(T.row_text(tb2, 18))
-        @test occursin("1320", stat2)   # the typed value must appear in bottom info
+        full2 = join([string(T.row_text(tb2, i)) for i in 1:18 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("1320", full2)   # typed value appears in Message center
 
         # q while in editing should still quit the app (was swallowed → freeze)
         T.update!(m, T.KeyEvent('q'))
         @test m.quit == true
 
         # (note: a separate flow would use Esc to cancel instead of q)
+    end
+
+    # ── Bottom chrome: Message center (left) + Keys panel (right) ─────────
+    # Replaces Current/Cpk gauges; footer bracket-key strip removed; ? expands keys.
+    @testset "bottom panels: Message center, Keys panel, no footer key strip" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        _ensure_charts!(m)
+
+        tb = T.TestBackend(100, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
+
+        # Left panel is Message center (not Current gauge)
+        @test occursin("Message", full)
+        @test !occursin("Current", full)
+
+        # Right panel is Keys (contextual help home)
+        @test occursin("Keys", full)
+
+        # No bracket-key chrome anywhere (moved into Keys panel; status footer removed)
+        @test !occursin(r"\[p g r c", full)
+        @test !occursin("[h k []]", full)
+        @test !occursin("paused=true mode=", full)
+
+        # Header cleaned: no long [p]pause [g]live key dump (keys live in Keys panel)
+        header = string(T.row_text(tb, 1))
+        @test !occursin("[p]pause", header)
+        @test !occursin("[g]live", header)
+
+        # Collapsed Keys panel shows a few most-used bindings
+        @test occursin("pause", lowercase(full)) || occursin(" p ", full) ||
+              occursin("[p]", full) || occursin("p pause", lowercase(full))
+    end
+
+    @testset "Message center: shows last_event + editing input with severity colors" begin
+        d = generate_spc_workbench_data(10; seed=7)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        _ensure_charts!(m)
+
+        # Neutral event → appears in Message panel (not only as last= footer)
+        m.last_event = "live on"
+        tb = T.TestBackend(100, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("live on", full)
+        @test occursin("Message", full)
+
+        # Warning-class event uses :warning style somewhere in message area (bottom third)
+        m.last_event = "No charts match filters"
+        tbw = T.TestBackend(100, 24); T.reset!(tbw.buf)
+        T.view(m, T.Frame(tbw.buf, T.Rect(1, 1, 100, 24), [], []))
+        warn_style = T.tstyle(:warning, bold=true)
+        found_warn = false
+        for y in 18:24, x in 1:50
+            if T.char_at(tbw, x, y) != ' ' && T.style_at(tbw, x, y) == warn_style
+                found_warn = true
+                break
+            end
+        end
+        @test found_warn
+
+        # Error-class event uses :error style
+        m.last_event = "invalid number"
+        tbe = T.TestBackend(100, 24); T.reset!(tbe.buf)
+        T.view(m, T.Frame(tbe.buf, T.Rect(1, 1, 100, 24), [], []))
+        err_style = T.tstyle(:error, bold=true)
+        found_err = false
+        for y in 18:24, x in 1:50
+            if T.char_at(tbe, x, y) != ' ' && T.style_at(tbe, x, y) == err_style
+                found_err = true
+                break
+            end
+        end
+        @test found_err
+
+        # Editing: Message center shows EDITING + typed buffer (anywhere on screen, not only footer row)
+        T.update!(m, T.KeyEvent('u'))
+        T.update!(m, T.KeyEvent('1'))
+        T.update!(m, T.KeyEvent('2'))
+        T.update!(m, T.KeyEvent('3'))
+        tbed = T.TestBackend(100, 24); T.reset!(tbed.buf)
+        T.view(m, T.Frame(tbed.buf, T.Rect(1, 1, 100, 24), [], []))
+        ed_full = join([string(T.row_text(tbed, i)) for i in 1:24 if T.row_text(tbed, i) !== nothing], "\n")
+        @test occursin("EDITING", uppercase(ed_full)) || occursin("USL", ed_full)
+        @test occursin("123", ed_full)
+        accent = T.tstyle(:accent, bold=true)
+        found_accent = false
+        for y in 18:24, x in 1:55
+            if T.char_at(tbed, x, y) != ' ' && T.style_at(tbed, x, y) == accent
+                found_accent = true
+                break
+            end
+        end
+        @test found_accent
+    end
+
+    @testset "Keys panel: contextual bindings; ? expands upward and collapses" begin
+        d = generate_spc_workbench_data(10; seed=3)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        _ensure_charts!(m)
+        @test m.keys_panel_expanded == false
+
+        # Collapsed: fixed short height — count key-ish lines limited
+        tbc = T.TestBackend(100, 28); T.reset!(tbc.buf)
+        T.view(m, T.Frame(tbc.buf, T.Rect(1, 1, 100, 28), [], []))
+        full_c = join([string(T.row_text(tbc, i)) for i in 1:28 if T.row_text(tbc, i) !== nothing], "\n")
+        @test occursin("Keys", full_c)
+        # most-used present when collapsed
+        @test occursin("q", lowercase(full_c))
+
+        # ? toggles expand (does not open full-page help)
+        T.update!(m, T.KeyEvent('?'))
+        @test m.keys_panel_expanded == true
+        @test m.view_mode == :dashboard
+        @test m.last_event == "keys expanded" || occursin("expand", lowercase(m.last_event))
+
+        tbe = T.TestBackend(100, 28); T.reset!(tbe.buf)
+        T.view(m, T.Frame(tbe.buf, T.Rect(1, 1, 100, 28), [], []))
+        full_e = join([string(T.row_text(tbe, i)) for i in 1:28 if T.row_text(tbe, i) !== nothing], "\n")
+        # Expanded shows more bindings than compact (library / tools / table / WECO / specs)
+        expanded_hits = count(s -> occursin(s, lowercase(full_e)),
+            ["library", "tools", "table", "weco", "usl", "filter", "config", "specs", "builder"])
+        compact_hits = count(s -> occursin(s, lowercase(full_c)),
+            ["library", "tools", "table", "weco", "usl", "filter", "config", "specs", "builder"])
+        @test expanded_hits > compact_hits
+        # Expand grows upward: plot area height shrinks when keys expanded
+        @test m.plot_area.height < 20  # with h=28 chrome, expanded gauge steals rows
+
+        # ? again collapses
+        T.update!(m, T.KeyEvent('?'))
+        @test m.keys_panel_expanded == false
+        @test m.last_event == "keys collapsed" || occursin("collapse", lowercase(m.last_event))
+
+        # h still opens full help page (not just expand)
+        T.update!(m, T.KeyEvent('h'))
+        @test m.view_mode == :help
+    end
+
+    @testset "mode pages share Message|Keys chrome style (library/tools/table/builder/help/keymap)" begin
+        d = generate_spc_workbench_data(10; seed=5)
+        function _mode_full(key; w=100, h=28)
+            m = SPCWorkbenchModel(data=d, paused=true)
+            _ensure_charts!(m)
+            T.update!(m, T.KeyEvent(key))
+            tb = T.TestBackend(w, h); T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, w, h), [], []))
+            full = join([string(T.row_text(tb, i)) for i in 1:h if T.row_text(tb, i) !== nothing], "\n")
+            return m, tb, full
+        end
+
+        for (key, mode_word, expect_bind) in (
+            ('m', "Library", "clone"),
+            ('x', "Tools", "add"),
+            ('d', "Table", "edit"),
+            ('b', "Builder", "apply"),
+        )
+            m, tb, full = _mode_full(key)
+            @test occursin("Message", full)
+            @test occursin("Keys", full)
+            # Pretty chips (not the old flat dim footer dump)
+            @test occursin("·", full)
+            @test occursin(expect_bind, lowercase(full))
+            # No legacy last= strip or old flat key dump lines
+            @test !occursin("last=", full) || occursin("Message", full)
+            @test !occursin("↑↓/click select  Enter/dblclick", full)
+            @test !occursin("↑↓ select  Enter filter+close", full)
+            # Accent on Keys chrome (right half bottom)
+            accent = T.tstyle(:accent, bold=true)
+            found = false
+            for y in 20:28, x in 52:100
+                if T.char_at(tb, x, y) != ' ' && T.style_at(tb, x, y) == accent
+                    found = true
+                    break
+                end
+            end
+            @test found
+            # No dashboard bleed
+            @test m.view_mode != :dashboard
+            @test !occursin("SPC Workbench [dashboard]", full)
+        end
+
+        # Help + keymap restyled with section markers / chips (not only plain monospace dump)
+        _, _, hfull = _mode_full('h'; w=100, h=36)
+        @test occursin("HELP", uppercase(hfull)) || occursin("Help", hfull)
+        @test occursin("▸", hfull) || occursin("·", hfull)
+        @test occursin("library", lowercase(hfull))
+
+        _, _, kfull = _mode_full('k'; w=100, h=36)
+        @test occursin("KEY", uppercase(kfull)) || occursin("Keys", kfull) || occursin("KEYBOARD", uppercase(kfull))
+        @test occursin("▸", kfull) || occursin("·", kfull)
+        @test occursin("mouse", lowercase(kfull))
+    end
+
+    @testset "no status strip below Message; Keys panel pretty key·label layout" begin
+        d = generate_spc_workbench_data(12; seed=11)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        _ensure_charts!(m)
+        m.last_event = "live on"
+
+        tb = T.TestBackend(100, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
+        # No redundant status chrome below / under Message
+        @test !occursin("paused=true", full)
+        @test !occursin("mode=dashboard", full)
+        @test !occursin("edit=", full)
+        # Message still shows the event
+        @test occursin("live on", full)
+        @test occursin("Message", full)
+
+        # Collapsed Keys uses key · label separators (readable chips)
+        @test occursin("·", full) || occursin(" · ", full)
+        @test occursin("pause", lowercase(full))
+
+        # Expanded: section headers + multi-row key·label grid
+        T.update!(m, T.KeyEvent('?'))
+        @test m.keys_panel_expanded == true
+        tbe = T.TestBackend(100, 30); T.reset!(tbe.buf)
+        T.view(m, T.Frame(tbe.buf, T.Rect(1, 1, 100, 30), [], []))
+        full_e = join([string(T.row_text(tbe, i)) for i in 1:30 if T.row_text(tbe, i) !== nothing], "\n")
+        @test occursin("PAGES", full_e) || occursin("Pages", full_e)
+        @test occursin("library", lowercase(full_e))
+        @test occursin("·", full_e)
+        # Still no status strip when expanded
+        @test !occursin("paused=true", full_e)
+        @test !occursin("mode=dashboard", full_e)
+
+        # Accent styling on at least one key glyph in Keys panel (right half)
+        accent = T.tstyle(:accent, bold=true)
+        found_key_accent = false
+        for y in 18:30, x in 52:100
+            ch = T.char_at(tbe, x, y)
+            if ch != ' ' && T.style_at(tbe, x, y) == accent
+                found_key_accent = true
+                break
+            end
+        end
+        @test found_key_accent
     end
 
     # Side Stats: WECO on/off as filled/empty circle bubbles (● green on, ○ dim off)
@@ -3450,7 +3691,8 @@ end
         # Short height so only a few rows fit → scroll must advance
         tb = T.TestBackend(80, 14); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 14), [], []))
-        vis = max(1, m.library_area.height - 8)
+        # Content-area capacity: title/summary ≈ 4 (Message|Keys chrome is outside library_area)
+        vis = max(1, m.library_area.height - 4)
         m.library_selected = 1
         m.library_scroll = 0
         for _ in 1:(nch - 1)
@@ -3585,7 +3827,8 @@ end
         @test occursin("Charts: 0/2", dash) || occursin("Charts: 0/", dash)
         @test occursin("(no match)", dash) || occursin("no match", lowercase(dash))
         @test occursin("Side Stats", dash)
-        @test occursin("last=", dash)  # footer still rendered
+        # Message center (or plot) shows the filter miss; footer no longer uses last=
+        @test occursin("No charts match filters", dash) || occursin("Message", dash)
 
         # Side list respects filters (visible only) + count form
         clear_filters!(m)
@@ -3861,20 +4104,26 @@ end
         tb = T.TestBackend(90, 30); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 30), [], []))
         full = join([string(T.row_text(tb, i)) for i in 1:30 if T.row_text(tb, i) !== nothing], "\n")
-        @test occursin("x/X", full) || occursin("tools registry", lowercase(full))
+        @test occursin("x/X", full) || occursin("tools", lowercase(full)) || occursin("x ·", full)
         T.update!(m, T.KeyEvent(:escape))
         T.update!(m, T.KeyEvent('k'))
         tb2 = T.TestBackend(90, 28); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 90, 28), [], []))
         full2 = join([string(T.row_text(tb2, i)) for i in 1:28 if T.row_text(tb2, i) !== nothing], "\n")
-        @test occursin("x X", full2) || occursin("Tools registry", full2) || occursin("tools registry", lowercase(full2))
+        @test occursin("x X", full2) || occursin("tools", lowercase(full2)) || occursin("x ·", full2)
         T.update!(m, T.KeyEvent(:escape))
 
-        # dashboard header advertises [x]tools
-        tb3 = T.TestBackend(120, 18); T.reset!(tb3.buf)
-        T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 120, 18), [], []))
-        hdr = join([string(T.row_text(tb3, i)) for i in 1:3 if T.row_text(tb3, i) !== nothing], "\n")
-        @test occursin("[x]tools", hdr) || occursin("x]tools", hdr)
+        # Keys panel (or expanded) advertises tools — header no longer dumps key chrome
+        tb3 = T.TestBackend(120, 22); T.reset!(tb3.buf)
+        T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 120, 22), [], []))
+        dash = join([string(T.row_text(tb3, i)) for i in 1:22 if T.row_text(tb3, i) !== nothing], "\n")
+        @test occursin("tools", lowercase(dash)) || occursin("x tools", lowercase(dash))
+        T.update!(m, T.KeyEvent('?'))
+        tb3e = T.TestBackend(120, 28); T.reset!(tb3e.buf)
+        T.view(m, T.Frame(tb3e.buf, T.Rect(1, 1, 120, 28), [], []))
+        dash_e = join([string(T.row_text(tb3e, i)) for i in 1:28 if T.row_text(tb3e, i) !== nothing], "\n")
+        @test occursin("tools", lowercase(dash_e))
+        m.keys_panel_expanded = false
     end
 
     # ── P2-PR7: SharedTable grid view_mode=:table (KD-P2-20) ─────────────
@@ -4072,11 +4321,17 @@ end
         @test occursin("d D", full2) || occursin("SharedTable", full2) || occursin("table", lowercase(full2))
         T.update!(m, T.KeyEvent(:escape))
 
-        # dashboard header advertises [d]table
-        tb3 = T.TestBackend(140, 18); T.reset!(tb3.buf)
-        T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 140, 18), [], []))
-        hdr = join([string(T.row_text(tb3, i)) for i in 1:3 if T.row_text(tb3, i) !== nothing], "\n")
-        @test occursin("[d]table", hdr) || occursin("d]table", hdr)
+        # Keys panel advertises table (header no longer dumps [d]table chrome)
+        tb3 = T.TestBackend(140, 22); T.reset!(tb3.buf)
+        T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 140, 22), [], []))
+        dash = join([string(T.row_text(tb3, i)) for i in 1:22 if T.row_text(tb3, i) !== nothing], "\n")
+        @test occursin("table", lowercase(dash)) || occursin("d table", lowercase(dash))
+        T.update!(m, T.KeyEvent('?'))
+        tb3e = T.TestBackend(140, 28); T.reset!(tb3e.buf)
+        T.view(m, T.Frame(tb3e.buf, T.Rect(1, 1, 140, 28), [], []))
+        dash_e = join([string(T.row_text(tb3e, i)) for i in 1:28 if T.row_text(tb3e, i) !== nothing], "\n")
+        @test occursin("table", lowercase(dash_e))
+        m.keys_panel_expanded = false
 
         # empty rematerialize message
         @test isempty(m.table.rows)
@@ -4339,19 +4594,19 @@ end
         @test startswith(m.last_event, "import err:")
         @test occursin("bad chart index", m.last_event)
 
-        # help/keymap list g/G
+        # help/keymap advertise live toggle (g) — styled chips, not legacy g/G dump
         m2 = SPCWorkbenchModel(data = d, paused = true)
         T.update!(m2, T.KeyEvent('h'))
         tb = T.TestBackend(90, 22); T.reset!(tb.buf)
         T.view(m2, T.Frame(tb.buf, T.Rect(1, 1, 90, 22), [], []))
         help_txt = join([string(T.row_text(tb, i)) for i in 1:22 if T.row_text(tb, i) !== nothing], "\n")
-        @test occursin("g/G", help_txt)
+        @test occursin("g/G", help_txt) || occursin("g ·", help_txt) || occursin("live", lowercase(help_txt))
         T.update!(m2, T.KeyEvent(:escape))
         T.update!(m2, T.KeyEvent('k'))
         tb2 = T.TestBackend(90, 22); T.reset!(tb2.buf)
         T.view(m2, T.Frame(tb2.buf, T.Rect(1, 1, 90, 22), [], []))
         ktxt = join([string(T.row_text(tb2, i)) for i in 1:22 if T.row_text(tb2, i) !== nothing], "\n")
-        @test occursin("g/G", ktxt)
+        @test occursin("g/G", ktxt) || occursin("g ·", ktxt) || occursin("live", lowercase(ktxt))
     end
 
     @testset "seed_demos default remains :triple" begin

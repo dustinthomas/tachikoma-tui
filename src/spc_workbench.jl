@@ -1774,6 +1774,8 @@ end
     builder_selected::Int = 1
     builder_editing::Bool = false
     builder_buf::String = ""
+    # Bottom Keys panel expand (dashboard chrome; ? toggles)
+    keys_panel_expanded::Bool = false
 end
 
 # ── SharedTable grid helpers (P2-PR7 / KD-P2-20) ─────────────────────────
@@ -1817,11 +1819,11 @@ function _table_set_cell!(m::SPCWorkbenchModel, r::Int, c::Int, val::AbstractStr
     return nothing
 end
 
-"""Rows visible in grid body (title/summary/header/footer chrome ≈ 8 lines)."""
+"""Rows visible in grid body (title/summary/header ≈ 4; footer is mode chrome outside)."""
 function _table_visible_row_capacity(m::SPCWorkbenchModel)::Int
     a = m.table_area
     (a.height <= 0 || a.width <= 0) && return 8
-    return max(1, a.height - 8)
+    return max(1, a.height - 5)
 end
 
 """Columns visible given cell width (row index gutter 5 + separators)."""
@@ -2281,15 +2283,13 @@ end
 
 """Rows available for the tools list (matches `_render_tools_page!` geometry).
 
-Chrome: title row + status row + spacing ≈ 4 top; footer/prompt reserve ≈ 4 bottom
-→ capacity = height − 8 (same reservation as library). Used by key-path
-`_sync_tools_scroll!` and by render when it does not pass an explicit capacity.
+Chrome: title + summary ≈ 4 top. Bottom Message|Keys lives outside `tools_area`
+(content rect only). Capacity = height − 4.
 """
 function _tools_visible_capacity(m::SPCWorkbenchModel)::Int
     a = m.tools_area
     h = (a.height > 0) ? a.height : 20
-    # Must match render: list starts ~y+4, list_bottom = bottom(area)-4 → height-8
-    return max(1, h - 8)
+    return max(1, h - 4)
 end
 
 """Keep `tools_selected` in range and `tools_scroll` so selection is visible."""
@@ -2771,12 +2771,12 @@ end
 """Max tick delta (via re-view) between presses to count as double-click (KD-P2-19)."""
 const LIBRARY_DBLCLICK_TICKS = 8
 
-"""Rows available for the chart list (title/summary/footer reserved)."""
+"""Rows available for the chart list (title/summary reserved; footer is mode chrome)."""
 function _library_visible_capacity(m::SPCWorkbenchModel)::Int
     a = m.library_area
     h = (a.height > 0) ? a.height : 20
-    # title + blank + summary + blank ≈ 4; footer/prompt reserve ≈ 4
-    return max(1, h - 8)
+    # title + blank + summary + blank ≈ 4; Message|Keys chrome is outside library_area
+    return max(1, h - 4)
 end
 
 """
@@ -2795,10 +2795,9 @@ function _library_row_at(m::SPCWorkbenchModel, x::Int, y::Int)::Union{Nothing,In
     (a.width <= 0 || a.height <= 0) && return nothing
     !contains(a, x, y) && return nothing
 
-    # Hardcoded chrome matches _render_library_page! and _library_visible_capacity (h-8).
-    # Prefer library_list_rect if list chrome rows change later (design KD-P2-19).
+    # Matches _render_library_page! list window (content rect only; chrome is separate).
     list_top = a.y + 4
-    list_bottom = bottom(a) - 4
+    list_bottom = bottom(a)
     (y < list_top || y > list_bottom) && return nothing
 
     vis = visible_charts(m)
@@ -3563,7 +3562,12 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.enabled_rules[rid] = !get(m.enabled_rules, rid, false)
             ch.enabled_rules[rid] = m.enabled_rules[rid]
             m.last_event = "toggle $rid"
-        elseif c == '?' || c == 'h' || c == 'H'
+        elseif c == '?'
+            # Toggle bottom Keys panel expand (does not open full-page help)
+            m.keys_panel_expanded = !m.keys_panel_expanded
+            m.last_event = m.keys_panel_expanded ? "keys expanded" : "keys collapsed"
+            return
+        elseif c == 'h' || c == 'H'
             m.view_mode = :help
             m.last_event = "help open"
             return
@@ -3948,6 +3952,402 @@ function _render_series_canvas!(
     return plot_inner
 end
 
+# ── Bottom chrome: Message center (left) + Keys panel (right) ───────────
+
+"""Severity for Message panel coloring: :error | :warning | :success | :accent | :info."""
+function _message_severity(m::SPCWorkbenchModel)::Symbol
+    m.editing !== nothing && return :accent
+    msg = lowercase(m.last_event)
+    isempty(msg) && return :info
+    if occursin("invalid", msg) || occursin("error", msg) || occursin("fail", msg) ||
+       occursin("delete?", msg) || occursin("confirm delete", msg)
+        return :error
+    end
+    if occursin("no charts match", msg) || occursin("warn", msg) ||
+       occursin("empty", msg) || occursin("nothing to", msg) || occursin("no tools", msg)
+        return :warning
+    end
+    if occursin("cleared", msg) || occursin("saved", msg) || occursin("imported", msg) ||
+       occursin("materialized", msg) || msg == "live on" || occursin("success", msg)
+        return :success
+    end
+    return :info
+end
+
+function _message_style(sev::Symbol)
+    sev == :error && return tstyle(:error, bold=true)
+    sev == :warning && return tstyle(:warning, bold=true)
+    sev == :success && return tstyle(:success, bold=true)
+    sev == :accent && return tstyle(:accent, bold=true)
+    return tstyle(:text)
+end
+
+# Key-hint rows: (:section, title) | (:binds, Vector{Tuple{key,label}}) | (:note, text)
+# Pretty render: accent keys + " · " separators + ▸ section headers (shared UI language).
+
+"""Dashboard Keys panel structure. Compact = most-used; expanded = full contextual list."""
+function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
+    if !expanded
+        return [
+            (:binds, [("p", "pause"), ("g", "live"), ("m", "lib"), ("x", "tools")]),
+            (:binds, [("d", "table"), ("q", "quit"), ("?", "more"), ("h", "help")]),
+        ]
+    end
+    return [
+        (:section, "PAGES"),
+        (:binds, [("m", "library"), ("x", "tools"), ("d", "table"), ("b", "builder")]),
+        (:binds, [("f", "filter"), ("F", "clear"), ("h", "help"), ("k", "keymap"),
+                  ("?", "less"), ("q", "quit")]),
+        (:section, "NAV / LIVE"),
+        (:binds, [("[ ]", "chart"), ("p", "pause"), ("g", "live"), ("←→", "pan")]),
+        (:binds, [("r/z", "reset"), ("wheel", "zoom"), ("drag", "pan")]),
+        (:section, "SPECS / WECO / CONFIG"),
+        (:binds, [("u", "USL"), ("t", "Target"), ("l", "LSL"), ("s", "clear")]),
+        (:binds, [("1-8", "WECO"), ("c", "rules"), ("v", "lines"), ("o", "visual")]),
+        (:section, "MOUSE"),
+        (:note, "hover tooltip · click select · drag pan"),
+    ]
+end
+
+"""Per-mode Keys menu entries (library / tools / table / builder / help / keymap)."""
+function _mode_key_entries(mode::Symbol; compact::Bool = true)
+    if mode === :library
+        compact && return [
+            (:binds, [("↑↓", "select"), ("↵", "activate"), ("a", "add"), ("c", "clone")]),
+            (:binds, [("n", "rename"), ("d", "delete"), ("i", "import"), ("e", "export")]),
+            (:binds, [("w", "save"), ("W", "load"), ("f", "filter"), ("Esc", "close")]),
+        ]
+        return [
+            (:section, "NAV"),
+            (:binds, [("↑↓", "select"), ("↵", "activate"), ("click", "select"), ("2×", "activate")]),
+            (:section, "EDIT"),
+            (:binds, [("a", "add"), ("c", "clone"), ("n", "rename"), ("d", "delete")]),
+            (:section, "I/O · FILTER"),
+            (:binds, [("i", "import"), ("e", "export"), ("w", "save"), ("W", "load")]),
+            (:binds, [("f", "filter"), ("F", "clear"), ("Esc", "close"), ("q", "close")]),
+        ]
+    elseif mode === :tools
+        compact && return [
+            (:binds, [("↑↓", "select"), ("↵", "filter"), ("a", "add"), ("n", "edit")]),
+            (:binds, [("d", "delete"), ("Esc", "close"), ("q", "close")]),
+        ]
+        return [
+            (:section, "TOOLS REGISTRY"),
+            (:binds, [("↑↓", "select"), ("↵", "filter+go"), ("a", "add"), ("n", "edit desc")]),
+            (:binds, [("d", "delete"), ("Esc", "close"), ("q", "close")]),
+            (:note, "registry ≠ chart tools — assign via builder"),
+        ]
+    elseif mode === :table
+        compact && return [
+            (:binds, [("←→↑↓", "move"), ("Pg", "page"), ("↵", "edit"), ("r", "materialize")]),
+            (:binds, [("Esc", "close"), ("q", "close")]),
+        ]
+        return [
+            (:section, "SHARED TABLE"),
+            (:binds, [("←→↑↓", "cell"), ("PgUp/Dn", "page"), ("↵", "edit"), ("r", "rematerialize")]),
+            (:binds, [("Esc", "close"), ("q", "close")]),
+            (:note, "edits are table-only until r / builder apply"),
+        ]
+    elseif mode === :builder
+        compact && return [
+            (:binds, [("↑↓", "field"), ("↵", "edit"), ("a", "apply"), ("1-8", "WECO")]),
+            (:binds, [("y", "type"), ("Esc", "close"), ("q", "close")]),
+        ]
+        return [
+            (:section, "BUILDER"),
+            (:binds, [("↑↓", "field"), ("↵", "edit/toggle"), ("a", "apply"), ("y", "chart type")]),
+            (:binds, [("1-8", "WECO"), ("Esc", "close"), ("q", "close")]),
+            (:note, "apply materializes series from table mapping"),
+        ]
+    elseif mode === :help
+        return [
+            (:section, "PAGES"),
+            (:binds, [("m", "library"), ("x", "tools"), ("d", "table"), ("b", "builder")]),
+            (:binds, [("h", "this help"), ("k", "keymap"), ("Esc", "close"), ("q", "close")]),
+            (:section, "DASHBOARD"),
+            (:binds, [("p", "pause"), ("g", "live"), ("[ ]", "chart"), ("←→", "pan")]),
+            (:binds, [("r/z", "reset"), ("u/t/l", "specs"), ("1-8", "WECO"), ("c/v/o", "config")]),
+            (:section, "VISUALS"),
+            (:note, "◆ OOC (yellow) · ✕ OOS (red) · Cpk band colors · dashed σ zones"),
+            (:section, "LIBRARY · TABLE · TOOLS"),
+            (:note, "library: a/c/n/d · i/e/w/W I/O · f/F filters"),
+            (:note, "table: arrows · Enter edit · r rematerialize (never auto)"),
+            (:note, "tools: master ids; assign on charts via builder"),
+        ]
+    elseif mode === :keymap
+        return [
+            (:section, "KEYS"),
+            (:binds, [("m", "library"), ("x", "tools"), ("d", "table"), ("b", "builder")]),
+            (:binds, [("p", "pause"), ("g", "live"), ("f/F", "filter"), ("c/v/o", "config")]),
+            (:binds, [("u/t/l", "specs"), ("1-8", "WECO"), ("h", "help"), ("k", "keymap")]),
+            (:binds, [("[ ]", "chart"), ("←→", "pan"), ("r/z", "reset"), ("q/Esc", "quit/close")]),
+            (:section, "MOUSE"),
+            (:binds, [("move", "hover"), ("drag", "pan"), ("click", "select"), ("wheel", "zoom")]),
+            (:note, "library: click select · double-click activate"),
+        ]
+    else
+        return [(:note, "no keys for mode")]
+    end
+end
+
+function _mode_keys_title(mode::Symbol)::String
+    mode === :library && return "Keys  · Library"
+    mode === :tools && return "Keys  · Tools"
+    mode === :table && return "Keys  · Table"
+    mode === :builder && return "Keys  · Builder"
+    mode === :help && return "Keys  · Help"
+    mode === :keymap && return "Keys  · Map"
+    return "Keys"
+end
+
+"""Pack binds into N-up columns; returns (rows, col_w)."""
+function _pack_bind_rows(pairs, maxw::Int; cols::Int = 2)
+    col_w = max(10, maxw ÷ max(1, cols))
+    rows = Vector{Vector{Tuple{String,String}}}()
+    row = Tuple{String,String}[]
+    for p in pairs
+        push!(row, p)
+        if length(row) >= cols
+            push!(rows, row)
+            row = Tuple{String,String}[]
+        end
+    end
+    !isempty(row) && push!(rows, row)
+    return rows, col_w
+end
+
+function _count_key_entry_rows(entries; grid::Bool = true, cols::Int = 2)::Int
+    n = 0
+    for e in entries
+        if e[1] === :binds && grid
+            n += cld(length(e[2]), cols)
+        else
+            n += 1
+        end
+    end
+    return n
+end
+
+function _key_entry_row_count(m::SPCWorkbenchModel; expanded::Bool)::Int
+    return _count_key_entry_rows(_contextual_key_entries(m; expanded=expanded); grid=expanded, cols=2)
+end
+
+function _gauge_row_height(m::SPCWorkbenchModel, area_h::Int)::Int
+    if m.keys_panel_expanded
+        nlines = _key_entry_row_count(m; expanded=true)
+        want = nlines + 2
+        max_ok = max(3, area_h - 1 - 6)
+        return clamp(want, 8, max_ok)
+    end
+    m.editing !== nothing && return min(5, max(4, area_h ÷ 6))
+    return 4
+end
+
+function _clear_rect!(buf, rect)
+    for yy in rect.y:bottom(rect)
+        for xx in rect.x:right(rect)
+            set_char!(buf, xx, yy, ' ', tstyle(:text))
+        end
+    end
+end
+
+"""
+Split full-page mode area into content + bottom Message|Keys chrome.
+Returns (content, chrome) or (area, nothing) when too short.
+"""
+function _split_mode_chrome(area; chrome_h::Int = 0)
+    if area.height < 12
+        return area, nothing
+    end
+    h = chrome_h > 0 ? chrome_h : clamp(area.height ÷ 5, 5, 7)
+    h = min(h, area.height - 6)
+    h < 4 && return area, nothing
+    rows = split_layout(Layout(Vertical, [Fill(), Fixed(h)]), area)
+    length(rows) < 2 && return area, nothing
+    return rows[1], rows[2]
+end
+
+"""Draw pretty key entries into an already-opened content rect (inner of a Block)."""
+function _render_key_entries_into!(buf, x0::Int, y::Int, bot::Int, max_x::Int, entries;
+                                   grid::Bool = true, cols::Int = 2)
+    maxw = max(1, max_x - x0 + 1)
+    for entry in entries
+        y > bot && break
+        kind = entry[1]
+        if kind === :section
+            set_string!(buf, x0, y, _side_trunc(string("▸ ", entry[2]), maxw), tstyle(:accent, bold=true))
+            y += 1
+        elseif kind === :note
+            set_string!(buf, x0, y, _side_trunc(string(entry[2]), maxw), tstyle(:text_dim))
+            y += 1
+        elseif kind === :binds
+            pairs = entry[2]
+            if grid
+                brows, col_w = _pack_bind_rows(pairs, maxw; cols=cols)
+                for brow in brows
+                    y > bot && break
+                    for (i, (k, lab)) in enumerate(brow)
+                        col_x = x0 + (i - 1) * col_w
+                        col_x > max_x && break
+                        cx = col_x
+                        set_string!(buf, cx, y, string(k), tstyle(:accent, bold=true))
+                        cx += length(k)
+                        if cx + 3 <= max_x
+                            set_string!(buf, cx, y, " · ", tstyle(:text_dim))
+                            cx += 3
+                        end
+                        room = min(max_x - cx + 1, col_w - length(k) - 3)
+                        if room > 0
+                            set_string!(buf, cx, y, _side_trunc(lab, room), tstyle(:text))
+                        end
+                    end
+                    y += 1
+                end
+            else
+                cx = x0
+                for (k, lab) in pairs
+                    cell_len = length(k) + 3 + length(lab)
+                    gap = cx > x0 ? 2 : 0
+                    if cx + gap + cell_len - 1 > max_x
+                        y += 1
+                        y > bot && break
+                        cx = x0
+                        gap = 0
+                    end
+                    if gap > 0
+                        set_string!(buf, cx, y, "  ", tstyle(:text_dim))
+                        cx += 2
+                    end
+                    set_string!(buf, cx, y, string(k), tstyle(:accent, bold=true))
+                    cx += length(k)
+                    if cx + 3 <= max_x
+                        set_string!(buf, cx, y, " · ", tstyle(:text_dim))
+                        cx += 3
+                    end
+                    room = max_x - cx + 1
+                    if room > 0
+                        lab_s = _side_trunc(lab, room)
+                        set_string!(buf, cx, y, lab_s, tstyle(:text))
+                        cx += length(lab_s)
+                    end
+                end
+                y += 1
+            end
+        end
+    end
+    return y
+end
+
+"""Bordered Keys box (shared style for dashboard + every mode page)."""
+function _render_keys_box!(buf, rect; title::AbstractString, entries, grid::Bool = true, cols::Int = 2)
+    _clear_rect!(buf, rect)
+    inner = render(Block(title=String(title), border_style=tstyle(:border),
+                         title_style=tstyle(:accent, bold=true)), rect, buf)
+    inner.width < 4 && return
+    max_x = inner.x + max(1, inner.width - 1) - 1
+    _render_key_entries_into!(buf, inner.x, inner.y, bottom(inner), max_x, entries;
+                              grid=grid, cols=cols)
+end
+
+function _render_message_panel!(buf, rect, m::SPCWorkbenchModel)
+    _clear_rect!(buf, rect)
+    title = "Message"
+    g1i = render(Block(title=title, border_style=tstyle(:border), title_style=tstyle(:text_dim)), rect, buf)
+    g1i.width < 4 && return
+    y = g1i.y
+    bot = bottom(g1i)
+    maxw = max(1, g1i.width - 1)
+
+    # Priority: pending delete → prompt → field edits → last_event
+    if m.pending_delete
+        msg = isempty(m.last_event) ? "confirm delete? y/N" : m.last_event
+        set_string!(buf, g1i.x, y, _side_trunc(msg, maxw), tstyle(:error, bold=true))
+        y += 1
+        if y <= bot
+            set_string!(buf, g1i.x, y, _side_trunc("y confirm · any other cancel", maxw), tstyle(:text_dim))
+        end
+    elseif m.prompt_kind !== nothing
+        kind = string(m.prompt_kind)
+        set_string!(buf, g1i.x, y,
+            _side_trunc("PROMPT [$kind]: $(m.prompt_buf)_", maxw), tstyle(:accent, bold=true))
+        y += 1
+        if y <= bot
+            set_string!(buf, g1i.x, y,
+                _side_trunc("Enter apply · Esc cancel · q types", maxw), tstyle(:text_dim))
+        end
+    elseif m.editing !== nothing
+        field = uppercase(string(m.editing))
+        set_string!(buf, g1i.x, y,
+            _side_trunc("EDITING $field [$(m.edit_buf)]_", maxw), tstyle(:accent, bold=true))
+        y += 1
+        if y <= bot
+            set_string!(buf, g1i.x, y,
+                _side_trunc("Enter apply · Esc cancel · q quit", maxw), tstyle(:text_dim))
+        end
+    elseif m.table_editing
+        set_string!(buf, g1i.x, y,
+            _side_trunc("EDIT cell r=$(m.table_row) c=$(m.table_col) [$(m.table_buf)]_", maxw),
+            tstyle(:accent, bold=true))
+        y += 1
+        if y <= bot
+            set_string!(buf, g1i.x, y,
+                _side_trunc("Enter commit · Esc cancel", maxw), tstyle(:text_dim))
+        end
+    elseif m.builder_editing
+        set_string!(buf, g1i.x, y,
+            _side_trunc("EDIT field [$(m.builder_buf)]_", maxw), tstyle(:accent, bold=true))
+        y += 1
+        if y <= bot
+            set_string!(buf, g1i.x, y,
+                _side_trunc("Enter set · Esc cancel", maxw), tstyle(:text_dim))
+        end
+    else
+        sev = _message_severity(m)
+        sty = _message_style(sev)
+        msg = isempty(m.last_event) ? "(ready)" : m.last_event
+        set_string!(buf, g1i.x, y, _side_trunc(msg, maxw), sty)
+    end
+end
+
+function _render_keys_panel!(buf, rect, m::SPCWorkbenchModel)
+    title = m.keys_panel_expanded ? "Keys  (? collapse)" : "Keys  (? expand)"
+    entries = _contextual_key_entries(m; expanded=m.keys_panel_expanded)
+    grid = m.keys_panel_expanded
+    _render_keys_box!(buf, rect; title=title, entries=entries, grid=grid, cols=2)
+end
+
+"""Bottom Message|Keys chrome shared by library/tools/table/builder overlays."""
+function _render_mode_chrome!(buf, chrome, m::SPCWorkbenchModel; mode::Symbol)
+    gcols = split_layout(Layout(Horizontal, [Fill(), Fill()]), chrome)
+    length(gcols) < 2 && return
+    _render_message_panel!(buf, gcols[1], m)
+    # 2-up chip grid when chrome has room; otherwise pack left→right
+    grid = chrome.height >= 5
+    entries = _mode_key_entries(mode; compact=true)
+    _render_keys_box!(buf, gcols[2]; title=_mode_keys_title(mode), entries=entries,
+                      grid=grid, cols=2)
+end
+
+"""Full-page styled help/keymap: title strip + Keys-style body (no dual chrome)."""
+function _render_styled_doc_page!(buf, area, m; title::AbstractString, mode::Symbol)
+    _clear_rect!(buf, area)
+    set_string!(buf, area.x + 1, area.y, String(title), tstyle(:title, bold=true))
+    # Body in a bordered Keys-like panel under the title
+    body = Rect(area.x, area.y + 1, area.width, max(3, area.height - 1))
+    entries = _mode_key_entries(mode; compact=false)
+    # Message strip on the left when wide enough; else full keys doc
+    if area.width >= 60
+        cols = split_layout(Layout(Horizontal, [Fixed(max(22, area.width ÷ 3)), Fill()]), body)
+        if length(cols) >= 2
+            _render_message_panel!(buf, cols[1], m)
+            _render_keys_box!(buf, cols[2]; title=_mode_keys_title(mode), entries=entries,
+                              grid=true, cols=2)
+            return
+        end
+    end
+    _render_keys_box!(buf, body; title=_mode_keys_title(mode), entries=entries, grid=true, cols=2)
+end
+
 # ── View (full, with slices) ────────────────────────────────────────────
 
 function view(m::SPCWorkbenchModel, f::Frame)
@@ -3996,18 +4396,17 @@ function view(m::SPCWorkbenchModel, f::Frame)
     elseif m.view_mode == :table
         _render_table_page!(buf, area, m)
         return
-        return
     end
 
-    # layout
-    rows = split_layout(Layout(Vertical, [Fixed(1), Fill(), Fixed(3), Fixed(1)]), area)
-    if length(rows) < 4
+    # layout — header + main + bottom panels (no status footer; Message owns events)
+    gauge_h = _gauge_row_height(m, area.height)
+    rows = split_layout(Layout(Vertical, [Fixed(1), Fill(), Fixed(gauge_h)]), area)
+    if length(rows) < 3
         return
     end
     header = rows[1]
     main = rows[2]
     gauge_row = rows[3]
-    footer = rows[4]
 
     cols = split_layout(Layout(Horizontal, [Fill(), Fixed(28)]), main)
     if length(cols) < 2
@@ -4056,11 +4455,12 @@ function view(m::SPCWorkbenchModel, f::Frame)
     dual_split = dual_eligible ? _split_dual_plot_rects(active_plot_rect) : nothing
     show_dual = dual_split !== nothing
 
-    # header
-    hdr = "SPC Workbench [dashboard]  [p]pause [g]live [r]reset [c]config [m]library [x]tools [d]table [f]filter [u/t/l/s]specs [1-8]rules [h]help [k]keys [[]]chart [q]quit"
+    # header — short title only; key bindings live in bottom Keys panel
+    nch_hdr = length(m.charts)
+    hdr = "SPC Workbench [dashboard]  chart $(m.active)/$(max(1, nch_hdr))"
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
 
-    # A6: empty filter match — plot message + side list (Charts: 0/N) + footer (no full early return)
+    # A6: empty filter match — plot message + side list (Charts: 0/N) + bottom panels
     if npanes == 0 && _any_filter_active(m)
         set_string!(buf, plot_rect.x + 2, plot_rect.y + max(1, plot_rect.height ÷ 2),
             "No charts match filters", tstyle(:warning, bold=true))
@@ -4076,8 +4476,11 @@ function view(m::SPCWorkbenchModel, f::Frame)
         if side_inner.y + 1 <= bottom(side_inner)
             set_string!(buf, side_inner.x, side_inner.y + 1, " (no match)", tstyle(:warning))
         end
-        left = " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
-        render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m x d f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
+        gcols = split_layout(Layout(Horizontal, [Fill(), Fill()]), gauge_row)
+        if length(gcols) >= 2
+            _render_message_panel!(buf, gcols[1], m)
+            _render_keys_panel!(buf, gcols[2], m)
+        end
         return
     end
 
@@ -4560,46 +4963,12 @@ function view(m::SPCWorkbenchModel, f::Frame)
         set_string!(buf, x, y, "n=0", tstyle(:text))
     end
 
-    # gauges (slice 6)
+    # Bottom panels: Message center (left) + Keys (right) — no status footer strip
     gcols = split_layout(Layout(Horizontal, [Fill(), Fill()]), gauge_row)
     if length(gcols) >= 2
-        # Current gauge (simplified arc)
-        g1 = gcols[1]
-        g1i = render(Block(border_style=tstyle(:border)), g1, buf)
-        if g1i.width > 4 && g1i.height > 3 && n > 0
-            gc = create_canvas(g1i.width, g1i.height; style=tstyle(:primary))
-            cx, cy = g1i.width ÷ 2, g1i.height - 1
-            r = min(g1i.width, g1i.height) ÷ 2 - 1
-            arc!(gc, cx, cy, r, 0.0, 180.0)
-            lastv = m.data.values[end]
-            lo = m.lsl !== nothing ? m.lsl : lz.lcl
-            hi = m.usl !== nothing ? m.usl : lz.ucl
-            norm = clamp((lastv - lo) / (hi - lo + 1e-9), 0.0, 1.0)
-            ang = deg2rad(180 - norm * 180)
-            nx = round(Int, cx + r * 0.8 * cos(ang))
-            ny = round(Int, cy - r * 0.8 * sin(ang))
-            line!(gc, cx, cy, nx, ny)
-            set_point!(gc, cx, cy)
-            render_canvas(gc, g1i, f)
-        end
-        set_string!(buf, g1.x + 1, g1.y, "Current", tstyle(:text_dim))
-
-        # Cpk gauge
-        g2 = gcols[2]
-        g2i = render(Block(border_style=tstyle(:border)), g2, buf)
-        cr = compute_capability(m.data.values, m.data.cl, m.data.sigma; lsl=m.lsl, usl=m.usl)
-        if g2i.width > 4 && g2i.height > 3
-            set_string!(buf, g2i.x + 1, g2i.y, cr.cpk === nothing ? "Cpk=—" : "Cpk=$(_fmt(cr.cpk))", tstyle(:text_dim))
-        end
+        _render_message_panel!(buf, gcols[1], m)
+        _render_keys_panel!(buf, gcols[2], m)
     end
-
-    # Make editing state obvious in bottom info (addresses "press u, nothing changes on screen")
-    left = if m.editing !== nothing
-        " EDITING $(uppercase(string(m.editing))): [$(m.edit_buf)]  (Enter=apply  Esc=cancel  q=quit) "
-    else
-        " paused=$(m.paused) last=$(m.last_event) mode=$(m.view_mode) "
-    end
-    render(StatusBar(left=[Span(left, tstyle(:text_dim))], right=[Span("[p g r c v o u t l s m x d f] [h k []] [q]", tstyle(:text_dim))]), footer, buf)
 end
 
 # small helper for fmt
@@ -4645,9 +5014,11 @@ end
 
 # ── Chart Library page (GC-PR2 / A5) — list uses visible_charts (GC-PR4) ─
 function _render_library_page!(buf, area, m)
-    m.library_area = area
-    set_string!(buf, area.x + 1, area.y, "CHART LIBRARY  (Esc/q close → dashboard)", tstyle(:title, bold=true))
-    y = area.y + 2
+    content, chrome = _split_mode_chrome(area)
+    m.library_area = content
+    set_string!(buf, content.x + 1, content.y,
+        "CHART LIBRARY  ·  Esc/q → dashboard", tstyle(:title, bold=true))
+    y = content.y + 2
     nch = length(m.charts)
     if nch >= 1
         m.library_selected = clamp(m.library_selected, 1, nch)
@@ -4659,23 +5030,21 @@ function _render_library_page!(buf, area, m)
     !isempty(m.filter_type) && push!(filt_bits, "type=$(m.filter_type)")
     !isempty(m.filter_owner) && push!(filt_bits, "owner=$(m.filter_owner)")
     filt_lbl = isempty(filt_bits) ? "none" : join(filt_bits, " ")
-    set_string!(buf, area.x + 2, y,
+    set_string!(buf, content.x + 2, y,
         "Charts: $nvis/$nch   active=$(m.active)   selected=$(m.library_selected)   filters: $filt_lbl",
         tstyle(:text_dim))
     y += 2
-    # Visible window over filtered list; library_selected remains absolute into m.charts
-    list_bottom = bottom(area) - 4
+    list_bottom = bottom(content)
     capacity = max(1, list_bottom - y + 1)
     _sync_library_scroll_vis!(m, vis_charts, capacity)
     if nvis == 0
         msg = _any_filter_active(m) ? "No charts match filters" : "No charts"
-        set_string!(buf, area.x + 2, y, msg, tstyle(:warning, bold=true))
+        set_string!(buf, content.x + 2, y, msg, tstyle(:warning, bold=true))
         y += 1
         if _any_filter_active(m)
-            set_string!(buf, area.x + 2, y,
-                "  [f] edit filter  [F] clear  (demo tools may be empty)",
+            set_string!(buf, content.x + 2, y,
+                "  f · filter   F · clear   (demo tools may be empty)",
                 tstyle(:text_dim))
-            y += 1
         end
     else
         first_i = m.library_scroll + 1
@@ -4690,65 +5059,39 @@ function _render_library_page!(buf, area, m)
             live = c.live_enabled ? "live" : "off"
             line = "$marker$act $abs_i. $(c.name)  [$(c.chart_type)] n=$nvals live=$live"
             sty = abs_i == m.library_selected ? tstyle(:accent, bold=true) : tstyle(:text)
-            set_string!(buf, area.x + 2, y, line, sty)
+            set_string!(buf, content.x + 2, y, line, sty)
             y += 1
         end
     end
-    y = min(y + 1, bottom(area) - 3)
-    # Prompt / pending delete status
-    if m.pending_delete && nch >= 1
-        nm = m.charts[m.library_selected].name
-        set_string!(buf, area.x + 2, y,
-            "DELETE \"$nm\"?  press y to confirm, any other key cancel",
-            tstyle(:error, bold=true))
-        y += 1
-    elseif m.prompt_kind !== nothing
-        kind_lbl = string(m.prompt_kind)
-        set_string!(buf, area.x + 2, y,
-            "PROMPT [$kind_lbl]: $(m.prompt_buf)_",
-            tstyle(:accent, bold=true))
-        y += 1
-        set_string!(buf, area.x + 2, y,
-            "  Enter=apply  Esc=cancel  (q types into buffer)",
-            tstyle(:text_dim))
-        y += 1
-    end
-    # Footer keys — I/O wired (GC-PR3) + filters (GC-PR4)
-    if y <= bottom(area) - 1
-        set_string!(buf, area.x + 2, bottom(area) - 1,
-            "↑↓/click select  Enter/dblclick activate  a add  c clone  d+y delete  n rename  i/e/w/W  f/F  Esc/q",
-            tstyle(:text_dim))
-    end
-    if y <= bottom(area)
-        set_string!(buf, area.x + 2, bottom(area),
-            " last=$(m.last_event)",
-            tstyle(:text_dim))
+    # Prompts / last_event live in Message chrome (shared style with dashboard)
+    if chrome !== nothing
+        _render_mode_chrome!(buf, chrome, m; mode=:library)
     end
 end
 
 # ── Tools registry page (P2-PR4) — master list m.tools; assign via builder ─
 function _render_tools_page!(buf, area, m)
-    m.tools_area = area
-    set_string!(buf, area.x + 1, area.y, "TOOLS REGISTRY  (Esc/q close → dashboard)", tstyle(:title, bold=true))
-    y = area.y + 2
+    content, chrome = _split_mode_chrome(area)
+    m.tools_area = content
+    set_string!(buf, content.x + 1, content.y,
+        "TOOLS REGISTRY  ·  Esc/q → dashboard", tstyle(:title, bold=true))
+    y = content.y + 2
     ntools = length(m.tools)
     if ntools >= 1
         m.tools_selected = clamp(m.tools_selected, 1, ntools)
     end
-    set_string!(buf, area.x + 2, y,
-        "Tools: $ntools   selected=$(m.tools_selected)   (registry ≠ chart tools filter list)",
+    set_string!(buf, content.x + 2, y,
+        "Tools: $ntools   selected=$(m.tools_selected)   (registry ≠ chart tools list)",
         tstyle(:text_dim))
     y += 2
-    # Shared capacity helper (height−8 chrome) — same as key-path scroll sync
     capacity = _tools_visible_capacity(m)
     _sync_tools_scroll!(m, ntools, capacity)
     if ntools == 0
-        set_string!(buf, area.x + 2, y, "No tools — press [a] to add", tstyle(:warning, bold=true))
+        set_string!(buf, content.x + 2, y, "No tools — a · add", tstyle(:warning, bold=true))
         y += 1
-        set_string!(buf, area.x + 2, y,
-            "  Master ids only; assign tools to charts via builder field Tools (csv).",
+        set_string!(buf, content.x + 2, y,
+            "  Master ids only; assign tools to charts via builder field Tools.",
             tstyle(:text_dim))
-        y += 1
     else
         first_i = m.tools_scroll + 1
         last_i = min(ntools, m.tools_scroll + capacity)
@@ -4758,155 +5101,37 @@ function _render_tools_page!(buf, area, m)
             desc = isempty(t.description) ? "—" : t.description
             line = "$marker $i. $(t.id)  $desc"
             sty = i == m.tools_selected ? tstyle(:accent, bold=true) : tstyle(:text)
-            set_string!(buf, area.x + 2, y, line, sty)
+            set_string!(buf, content.x + 2, y, line, sty)
             y += 1
         end
     end
-    y = min(y + 1, bottom(area) - 3)
-    if m.pending_delete && ntools >= 1
-        tid = m.tools[m.tools_selected].id
-        set_string!(buf, area.x + 2, y,
-            "DELETE tool \"$tid\"?  press y to confirm, any other key cancel",
-            tstyle(:error, bold=true))
-        y += 1
-    elseif m.prompt_kind !== nothing
-        kind_lbl = string(m.prompt_kind)
-        set_string!(buf, area.x + 2, y,
-            "PROMPT [$kind_lbl]: $(m.prompt_buf)_",
-            tstyle(:accent, bold=true))
-        y += 1
-        set_string!(buf, area.x + 2, y,
-            "  Enter=apply  Esc=cancel  (q types into buffer)",
-            tstyle(:text_dim))
-        y += 1
-    end
-    if y <= bottom(area) - 1
-        set_string!(buf, area.x + 2, bottom(area) - 1,
-            "↑↓ select  Enter filter+close  a add  n edit desc  d+y delete  Esc/q close",
-            tstyle(:text_dim))
-    end
-    if y <= bottom(area)
-        set_string!(buf, area.x + 2, bottom(area),
-            " last=$(m.last_event)",
-            tstyle(:text_dim))
+    if chrome !== nothing
+        _render_mode_chrome!(buf, chrome, m; mode=:tools)
     end
 end
 
-# ── Dedicated Help page (adapted from HTML quickstart + WECO defs + workflow) ──
+# ── Dedicated Help page — Keys-style chip sections ──────────────────────
 function _render_help_page!(buf, area, m)
-    # simple full area text page
-    set_string!(buf, area.x+1, area.y, "SPC WORKBENCH — HELP  (Esc/h to close)", tstyle(:title, bold=true))
-    y = area.y + 2
-    lines = [
-        "QUICK START (TUI):",
-        "  p/P     toggle pause / live append",
-        "  g/G     toggle live append on active chart (live on/off)",
-        "  r/R/z/Z reset viewport to full data",
-        "  c/C     open/close WECO rule config (1-8 toggle; Tab→Lines→Visual)",
-        "  v/V     open chart-line visibility config (CL/±σ/specs)",
-        "  o/O     open Visual Preferences (solid series line, …)",
-        "  m/M     open chart library (list / add / clone / delete / rename)",
-        "  x/X     open tools registry (master tool ids; assign to charts via builder)",
-        "  d/D     open SharedTable grid (inspect / light cell edit; not Excel)",
-        "  f       cycle filter prompt (tool → type → owner); Enter apply; Esc cancel",
-        "  F       clear all filters (tool/type/owner); rehomes active if needed",
-        "  b/B     open chart builder (name, cols, tools, manual limits, WECO)",
-        "  u/U t/T l/L  edit USL / Target / LSL (enter to set, esc cancel)",
-        "  s/S     clear all spec limits",
-        "  1..8    toggle WECO rule directly (or 1-5 line keys in Lines tab)",
-        "  ← →     pan viewport",
-        "  wheel / scroll mouse : zoom around point",
-        "  drag LMB : pan; click release : select (thick ┃ )",
-        "  hover   : tooltip + crosshair",
-        "  [ ]     switch active chart (multi-dashboard)",
-        "  h/?     this help",
-        "  k       keyboard map page",
-        "  q/esc   quit (close library/tools/builder/table/help first)",
-        "",
-        "LIBRARY (m): ↑↓/click select · Enter/dblclick activate · a add · c clone · d+y delete · n rename",
-        "  i import CSV · e export CSV · w save JSON · W load JSON (path prompts)",
-        "  f/F filters same as dashboard (list shows visible_charts only)",
-        "  Note: seed demos often have empty tools — tool filter may hide all until assigned.",
-        "  Mode-gate: library d = delete chart; dashboard d = table grid (KD-P2-20).",
-        "",
-        "TABLE (d): arrows move cell · PgUp/PgDn page · Enter edit cell · r rematerialize active",
-        "  Esc/q close → dashboard (never quit). Empty table shows a warn message.",
-        "  Edits write strings into SharedTable only; r rebuilds active chart series explicitly.",
-        "",
-        "TOOLS REGISTRY (x): master m.tools ids + descriptions (JSON tools array).",
-        "  ↑↓ select · a add (id then desc) · n edit desc · d+y delete · Enter set filter_tool",
-        "  Registry ≠ chart filter lists (ch.tools); assign tools on charts via builder.",
-        "",
-        "RICH VISUALS:",
-        "  ◆ = OOC (WECO violation, yellow/warning)",
-        "  ✕ = OOS (outside USL/LSL when set, red/danger)",
-        "  Cpk colored by band: ≥1.67 green, ≥1.33 navy, ≥1.00 amber, <1 red",
-        "  Dashed: zone lines (±1/2/3σ), specs (USL/LSL red)",
-        "",
-        "DASHBOARD: multiple charts visible (switch with []); each has own viewport/specs/rules.",
-        "DUAL CANVAS: I-MR/Xbar show MR/R/s under active plot when Visual pref Secondary canvas is ON.",
-        "  Multi-pane may temporarily hide neighbors so dual fits (not permanent focused mode).",
-        "SIDE STATS: Rbar/sbar (Xbar) and MRbar (I-MR) always; secondary canvas toggle in Visual (o).",
-        "HTML archive: load_html_archive / load_html_archive! (#spc-state); strips admins/passcodes.",
-        "WECO RULES (defaults 1-5 ON): 1=beyond3σ, 2=2of3@2σ, 3=4of5@1σ, 4=8sameCL, 5=6trend, 6=14alt, 7=15in1σ, 8=8out1σ",
-        "See original HTML for full defs + workflow. This TUI ports core I-MR + WECO + Cpk fidelity.",
-    ]
-    for (i, ln) in enumerate(lines)
-        if y + i - 1 > bottom(area) - 1; break; end
-        set_string!(buf, area.x + 2, y + i - 1, ln, tstyle(:text))
-    end
+    _render_styled_doc_page!(buf, area, m;
+        title = "SPC WORKBENCH — HELP  ·  Esc/h close",
+        mode = :help)
 end
 
-# ── Keyboard map page (viewable list of all bindings + mouse) ───────────
+# ── Keyboard map page — same visual language as Keys panel ──────────────
 function _render_keymap_page!(buf, area, m)
-    set_string!(buf, area.x+1, area.y, "KEYBOARD MAP + MOUSE  (Esc/k close) — SPC Workbench", tstyle(:title, bold=true))
-    y = area.y + 2
-    kbd = [
-        "KEYS:",
-        "  m M / x X   Library (↑↓ a c d n i/e/w/W) / Tools registry (↑↓ a n d+y Enter)",
-        "  f F         Filters (cycle tool→type→owner; F clear)",
-        "  d D         SharedTable grid (arrows · Enter edit · r rematerialize · Esc close)",
-        "  p/P         Pause/Resume live mode",
-        "  g/G         Toggle live_enabled on active chart",
-        "  r R z Z     Reset view (full range + auto y)  [table mode: r rematerialize]",
-        "  c C / v V / o O  Config WECO / Lines / Visual prefs",
-        "  b B         Chart builder (manual limits, cols, tools assign)",
-        "  u t l / s   Edit USL/Target/LSL / clear specs",
-        "  1-8         Toggle WECO-N (or 1-5 in Lines tab)",
-        "  [ ] < >     Prev / Next chart (dashboard)",
-        "  ← →         Pan left/right (table: move cell)",
-        "  h ? / k     Help / This keymap",
-        "  q Esc       Quit (library/tools/builder/table: close mode, not quit)",
-        "",
-        "MOUSE:",
-        "  Move        Hover + vertical follow │ + tooltip",
-        "  Left press  Start drag / select",
-        "  Left drag   Pan the viewport",
-        "  Left release Snap ┃ to nearest point + select",
-        "  Wheel up    Zoom in (around cursor)",
-        "  Wheel down  Zoom out",
-        "  Library     Click select; double-click activate (≤8 ticks)",
-        "",
-        "Config: Tab WECO↔Lines↔Visual; ↑↓/digits/space; Esc/c/v/o close. Lines ●=draw on chart.",
-        "Visual: solid/stroke/braille + Secondary canvas (MR/R/s under active; may hide neighbors).",
-        "Builder: ↑↓ fields; Enter edit/toggle; a apply/materialize; 1-8 WECO; y type.",
-        "Library i/e/w/W + f/F filters (session-only; demo tools may be empty).",
-        "Tools registry: master m.tools; chart ch.tools assigned via builder (not registry alone).",
-        "Table (d): full-page SharedTable; no auto-rematerialize on load; r explicit.",
-    ]
-    for (i, ln) in enumerate(kbd)
-        if y + i - 1 > bottom(area); break; end
-        set_string!(buf, area.x + 2, y + i - 1, ln, tstyle(i==1 || startswith(ln,"MOUSE") ? :accent : :text))
-    end
+    _render_styled_doc_page!(buf, area, m;
+        title = "KEYBOARD MAP + MOUSE  ·  Esc/k close",
+        mode = :keymap)
 end
 
-# ── SharedTable grid page (P2-PR7 / KD-P2-20) — full page; no dashboard chrome ─
+# ── SharedTable grid page (P2-PR7 / KD-P2-20) — full page + mode chrome ─
 function _render_table_page!(buf, area, m)
-    m.table_area = area
-    set_string!(buf, area.x + 1, area.y,
-        "SHARED TABLE  (Esc/q close · arrows · Enter edit · r rematerialize active)",
+    content, chrome = _split_mode_chrome(area)
+    m.table_area = content
+    set_string!(buf, content.x + 1, content.y,
+        "SHARED TABLE  ·  Esc/q close",
         tstyle(:title, bold = true))
-    y = area.y + 2
+    y = content.y + 2
     nr = length(m.table.rows)
     nc_all = length(m.table.columns)
     nc = _table_n_cols(m)
@@ -4915,23 +5140,21 @@ function _render_table_page!(buf, area, m)
     col_cap = _table_visible_col_capacity(m; cell_w = cell_w)
     _sync_table_scroll!(m; row_cap = row_cap, col_cap = col_cap)
 
-    set_string!(buf, area.x + 2, y,
+    set_string!(buf, content.x + 2, y,
         "rows=$nr cols=$nc_all  cursor=($(_table_n_rows(m) > 0 ? m.table_row : 0),$(nc > 0 ? m.table_col : 0))  scroll=($(m.table_scroll_row),$(m.table_scroll_col))" *
         (nc_all > TABLE_MAX_RENDER_COLS ? "  (showing first $TABLE_MAX_RENDER_COLS cols)" : ""),
         tstyle(:text_dim))
     y += 1
 
     if nr == 0 || nc_all == 0
-        set_string!(buf, area.x + 2, y + 1,
+        set_string!(buf, content.x + 2, y + 1,
             "Empty table — import CSV (library i) or load session (library W)",
             tstyle(:warning, bold = true))
         y += 3
-        set_string!(buf, area.x + 2, y,
-            "  SharedTable is session data; chart series rematerialize only via [r] or builder apply.",
+        set_string!(buf, content.x + 2, y,
+            "  SharedTable is session data; rematerialize only via r · or builder apply.",
             tstyle(:text_dim))
-        y += 2
     else
-        # Header row of column names (windowed)
         c0 = m.table_scroll_col + 1
         c1 = min(nc, m.table_scroll_col + col_cap)
         hdr_parts = String["#"]
@@ -4940,13 +5163,13 @@ function _render_table_page!(buf, area, m)
             mark = c == m.table_col ? "▶" : " "
             push!(hdr_parts, mark * _table_cell_display(name, cell_w - 1))
         end
-        set_string!(buf, area.x + 2, y, join(hdr_parts, " "), tstyle(:accent, bold = true))
+        set_string!(buf, content.x + 2, y, join(hdr_parts, " "), tstyle(:accent, bold = true))
         y += 1
 
         r0 = m.table_scroll_row + 1
         r1 = min(nr, m.table_scroll_row + row_cap)
         for r in r0:r1
-            y > bottom(area) - 3 && break
+            y > bottom(content) && break
             row_mark = r == m.table_row ? "▶" : " "
             parts = String[row_mark * lpad(string(r), 3)]
             for c in c0:c1
@@ -4956,48 +5179,31 @@ function _render_table_page!(buf, area, m)
                 end
                 cell = _table_cell_display(val, cell_w)
                 if r == m.table_row && c == m.table_col && !m.table_editing
-                    # highlight selected cell with brackets when not editing
                     cell = _table_cell_display("[" * _table_cell_value(m, r, c) * "]", cell_w)
                 end
                 push!(parts, cell)
             end
             sty = r == m.table_row ? tstyle(:accent, bold = true) : tstyle(:text)
-            set_string!(buf, area.x + 2, y, join(parts, " "), sty)
+            set_string!(buf, content.x + 2, y, join(parts, " "), sty)
             y += 1
         end
     end
-
-    # Edit / status strip near bottom
-    y = min(max(y + 1, bottom(area) - 2), bottom(area) - 1)
-    if m.table_editing
-        colname = (nc >= 1 && m.table_col <= length(m.table.columns)) ?
-            m.table.columns[clamp(m.table_col, 1, length(m.table.columns))] : "?"
-        set_string!(buf, area.x + 2, y,
-            "EDIT [$colname r=$(m.table_row)]: $(m.table_buf)_  Enter=commit  Esc=cancel",
-            tstyle(:accent, bold = true))
-    else
-        set_string!(buf, area.x + 2, y,
-            "↑↓←→ move  PgUp/PgDn page  Enter edit  r rematerialize active  Esc/q close",
-            tstyle(:text_dim))
-    end
-    if y + 1 <= bottom(area)
-        set_string!(buf, area.x + 2, bottom(area),
-            " last=$(m.last_event)",
-            tstyle(:text_dim))
+    if chrome !== nothing
+        _render_mode_chrome!(buf, chrome, m; mode=:table)
     end
 end
 
-# ── Builder page (PR6) — keyboard form; no dashboard chrome ─────────────
+# ── Builder page (PR6) — form + shared Message|Keys chrome ──────────────
 function _render_builder_page!(buf, area, m)
     _ensure_charts!(m)
+    content, chrome = _split_mode_chrome(area)
     ch = current_chart(m)
-    set_string!(buf, area.x + 1, area.y,
-        "BUILDER — $(ch.name)  (Esc/q close · ↑↓ · Enter edit · a apply · 1-8 WECO · y type)",
+    set_string!(buf, content.x + 1, content.y,
+        "BUILDER — $(ch.name)  ·  Esc/q close",
         tstyle(:title, bold = true))
-    y = area.y + 2
-    nfields = length(BUILDER_FIELDS)
+    y = content.y + 2
     for (i, field) in enumerate(BUILDER_FIELDS)
-        y > bottom(area) - 2 && break
+        y > bottom(content) - 2 && break
         sel = i == m.builder_selected ? "▶ " : "  "
         lbl = get(BUILDER_FIELD_LABELS, field, string(field))
         val = if m.builder_editing && i == m.builder_selected
@@ -5007,32 +5213,29 @@ function _render_builder_page!(buf, area, m)
             isempty(v) ? "—" : v
         end
         sty = i == m.builder_selected ? tstyle(:accent, bold = true) : tstyle(:text)
-        set_string!(buf, area.x + 2, y, "$sel$i $lbl: $val", sty)
+        set_string!(buf, content.x + 2, y, "$sel$i $lbl: $val", sty)
         y += 1
     end
     y += 1
-    if y <= bottom(area) - 1
+    if y <= bottom(content)
         weco_parts = String[]
         for i in 1:8
             rid = "WECO-$i"
             on = get(ch.enabled_rules, rid, false)
             push!(weco_parts, on ? "$(i)●" : "$(i)○")
         end
-        set_string!(buf, area.x + 2, y, "WECO: " * join(weco_parts, " "), tstyle(:text))
+        set_string!(buf, content.x + 2, y, "WECO: " * join(weco_parts, " "), tstyle(:text))
         y += 1
     end
-    if y <= bottom(area) - 1
+    if y <= bottom(content)
         nrows = length(m.table.rows)
         ncols = length(m.table.columns)
-        set_string!(buf, area.x + 2, y,
+        set_string!(buf, content.x + 2, y,
             "Table: $nrows rows · $ncols cols · source=$(ch.source) · live=$(ch.live_enabled)",
             tstyle(:text_dim))
-        y += 1
     end
-    if y <= bottom(area) - 1
-        set_string!(buf, area.x + 2, y,
-            "last=$(m.last_event)",
-            tstyle(:text_dim))
+    if chrome !== nothing
+        _render_mode_chrome!(buf, chrome, m; mode=:builder)
     end
 end
 
