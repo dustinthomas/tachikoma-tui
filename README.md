@@ -81,6 +81,14 @@ repo in a feature PR.
 
 ## Documentation
 
+| Doc | Audience |
+|-----|----------|
+| [`docs/user/`](docs/user/README.md) | **Operators** — getting started, workbench, CSV/JSON (rough) |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Shipped vs in flux vs backlog |
+| [`docs/APP_WALKTHROUGH.md`](docs/APP_WALKTHROUGH.md) | Dev-oriented functionality walkthrough |
+| `docs/src/spc-workbench.md` | Authoritative keys + CSV + JSON schema v1 |
+| `README.md` (this file) | Quick start and verification gates |
+
 Documenter lives under `docs/` (separate env, not a runtime dep):
 
 ```bash
@@ -88,9 +96,11 @@ julia --project=docs -e 'using Pkg; Pkg.instantiate()'
 julia --project=docs docs/make.jl   # must exit 0
 ```
 
-Pages: `docs/src/index.md` (home), `docs/src/spc-workbench.md` (keys, CSV,
-JSON schema v1), `docs/src/api.md` (`@autodocs`). Path dep for TachikomaTUI is
-declared in `docs/Project.toml` (`[sources]`).
+Documenter pages today: `docs/src/index.md` (home), `docs/src/spc-workbench.md`
+(keys, CSV, JSON schema v1), `docs/src/api.md` (`@autodocs`). Rough user guides
+and the roadmap live as markdown under `docs/` / `docs/user/` (not yet all wired
+into Documenter). Path dep for TachikomaTUI is declared in `docs/Project.toml`
+(`[sources]`).
 
 ## Grok Agentic Workflow (2026-07)
 
