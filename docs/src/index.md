@@ -33,6 +33,9 @@ m = load_workbench("session.json")
 - [SPC Workbench](@ref) — runners, keys, live toggle, CSV format, JSON schema v1
 - [API Reference](@ref) — public exports via Documenter `@autodocs`
 - Repository `README.md` — verification gates, formatting, agent workflow
+- Repository `docs/user/` — rough **operator** guides (getting started, workbench, I/O)
+- Repository `docs/ROADMAP.md` — shipped vs in flux vs backlog
+- Repository `docs/APP_WALKTHROUGH.md` — developer functionality walkthrough
 
 ## Conventions (locks)
 
