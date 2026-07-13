@@ -3293,6 +3293,7 @@ end
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 24), [], []))
         full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
         @test occursin("Chart Lines", full)
+        @test occursin("←/→ style", full)  # cycle hints live in Block title only
         @test occursin("solid", full)
         @test occursin("dotted", full)
         @test occursin("long dash", full) || occursin("long_dash", full)
@@ -3313,11 +3314,13 @@ end
         @test m.chart_line_styles["cl"] == "solid"
         # left/right must not pan while config open
         @test m.viewport.x0 == x0_before
-        # re-render shows updated style labels
+        # re-render: CL still labeled solid after cycle-back; visibility [OFF]
         tb2 = T.TestBackend(90, 24); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 90, 24), [], []))
         full2 = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
         @test occursin("[OFF]", full2)
+        @test occursin("solid", full2)  # style label remains after cycle-back
+        @test occursin("←/→ style", full2)
         T.update!(m, T.KeyEvent(:escape))
         @test m.config_open == false
     end
@@ -3364,45 +3367,117 @@ end
         @test filled_solid >= max(3, filled_dotted + 1)
     end
 
-    @testset "chart line styles: multi-site smoke (secondary sigma3 + neighbor helpers)" begin
-        # Secondary maps ucl/lcl → sigma3 style; primary/neighbor use shared helpers.
-        # Unit-level: style key mapping + draw params for site 2.
-        m = SPCWorkbenchModel(data = generate_spc_workbench_data(20; seed = 7), paused = true)
-        m.chart_line_styles["sigma3"] = "solid"
-        m.chart_line_styles["cl"] = "dotted"
-        @test _line_style(m, "sigma3") == "solid"   # dual secondary UCL/LCL key
-        @test _line_style(m, "cl") == "dotted"
-        dash_s, step_s, _ = _style_draw_params(_line_style(m, "sigma3"))
-        @test dash_s === nothing && step_s == 1
-        dash_d, step_d, _ = _style_draw_params(_line_style(m, "cl"))
-        @test dash_d == 2 && step_d == 2
-
-        # Neighbor path: tall triple dashboard renders Chart 2/3 without crash
-        # (sites use draw_limit_hline_* helpers; dashed_line! only inside helper)
-        _ensure_charts!(m)
-        m.visual_prefs["secondary_canvas"] = false
-        for k in CHART_LINE_KEYS
-            m.show_chart_lines[k] = true
-        end
-        m.chart_line_styles["sigma3"] = "long_dash"
-        tb = T.TestBackend(90, 40); T.reset!(tb.buf)
-        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 40), [], []))
-        full = join([string(T.row_text(tb, i)) for i in 1:40 if T.row_text(tb, i) !== nothing], "\n")
-        @test occursin("Chart 2:", full)
-        @test occursin("Dashboard", full)
-
-        # Dual secondary also renders with style keys (no visibility gate)
-        m.visual_prefs["secondary_canvas"] = true
-        m.seed_demos = :single
-        m2 = SPCWorkbenchModel(data = generate_spc_workbench_data(20; seed = 7),
+    @testset "chart line styles: multi-site density (secondary site2 + neighbor site3)" begin
+        # Site 2: dual-secondary branch of _render_series_canvas! (draw_sigma_zones=false).
+        # UCL/LCL use _line_style(m,"sigma3"); no _line_on gate. char_at density solid ≫ dotted.
+        vals_sec = fill(5.0, 10)
+        m_sec = SPCWorkbenchModel(data = WorkbenchData(values = fill(10.0, 11), cl = 10.0, sigma = 1.0),
             paused = true, seed_demos = :single)
-        _ensure_charts!(m2)
-        m2.visual_prefs["secondary_canvas"] = true
-        m2.chart_line_styles["sigma3"] = "dotted"
-        tb2 = T.TestBackend(90, 24); T.reset!(tb2.buf)
-        T.view(m2, T.Frame(tb2.buf, T.Rect(1, 1, 90, 24), [], []))
-        full2 = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
-        @test occursin("MR (secondary)", full2) || occursin("(secondary)", full2)
+        m_sec.visual_prefs["solid_series"] = false
+        m_sec.visual_prefs["solid_stroke"] = false
+        m_sec.visual_prefs["braille_series"] = false
+        m_sec.chart_line_styles["sigma3"] = "solid"
+        m_sec.chart_line_styles["cl"] = "dotted"  # leave CL sparse so UCL row is cleaner
+        @test _line_style(m_sec, "sigma3") == "solid"
+
+        function _count_ucl_row(m, style::String)
+            m.chart_line_styles["sigma3"] = style
+            tb = T.TestBackend(70, 16); T.reset!(tb.buf)
+            outer = T.Rect(1, 1, 70, 16)
+            f = T.Frame(tb.buf, outer, [], [])
+            vp = Viewport(x0 = 1, x1 = 10, ylo = 0.0, yhi = 12.0)
+            ucl, lcl, cl = 10.0, 0.0, 5.0
+            inner = _render_series_canvas!(
+                tb.buf, outer, m, f;
+                title = "MR (secondary)",
+                values = vals_sec,
+                viewport = vp,
+                cl = cl, ucl = ucl, lcl = lcl,
+                bind_mouse = false,
+                draw_weco_markers = false,
+                draw_specs = false,
+                draw_sigma_zones = false,  # site 2 simplified branch
+                draw_hover = false,
+            )
+            # Re-fit viewport as the helper does so yy matches painted row
+            extras = Float64[cl, ucl, lcl]
+            fit_viewport_y!(vp, vals_sec; extras = extras)
+            yy = data_val_to_cell_row(ucl, inner, vp)
+            nfill = count(xx -> begin
+                c = T.char_at(tb, xx, yy)
+                c != ' ' && c != '\0'
+            end, inner.x:T.right(inner))
+            return (nfill, inner, yy)
+        end
+
+        filled_solid, _, _ = _count_ucl_row(m_sec, "solid")
+        filled_dotted, _, _ = _count_ucl_row(m_sec, "dotted")
+        @test filled_solid > filled_dotted
+        @test filled_solid >= max(3, filled_dotted + 1)
+
+        # Site 3: neighbor pane Chart 2 buffer density via full dashboard layout.
+        # Only CL on; connectors off; compare solid vs dotted on reconstructed inn2 CL row.
+        d = generate_spc_workbench_data(16; seed = 11)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        @test length(m.charts) >= 2
+        m.visual_prefs["secondary_canvas"] = false  # keep multi-pane neighbors visible
+        m.visual_prefs["solid_series"] = false
+        m.visual_prefs["solid_stroke"] = false
+        m.visual_prefs["braille_series"] = false
+        for k in keys(m.show_chart_lines)
+            m.show_chart_lines[k] = false
+        end
+        m.show_chart_lines["cl"] = true
+
+        W, H = 90, 40
+        function _neighbor_cl_density(m, style::String)
+            m.chart_line_styles["cl"] = style
+            tb = T.TestBackend(W, H); T.reset!(tb.buf)
+            area = T.Rect(1, 1, W, H)
+            T.view(m, T.Frame(tb.buf, area, [], []))
+            @test T.find_text(tb, "Chart 2:") !== nothing
+            # Reconstruct second_plot_rect / inn2 from view layout (must match spc_workbench.jl)
+            gauge_h = _gauge_row_height(m, area.height)
+            rows = T.split_layout(T.Layout(T.Vertical, [T.Fixed(1), T.Fill(), T.Fixed(gauge_h)]), area)
+            main = rows[2]
+            cols = T.split_layout(T.Layout(T.Horizontal, [T.Fill(), T.Fixed(28)]), main)
+            plot_rect = cols[1]
+            panes = dashboard_pane_charts(m; k = 3)
+            nc = min(3, length(panes))
+            @test nc >= 2
+            if nc == 3
+                h1 = max(8, (plot_rect.height * 5) ÷ 10)
+                h2 = max(5, (plot_rect.height - h1 - 2) * 5 ÷ 10)
+                second_plot_rect = T.Rect(plot_rect.x, plot_rect.y + h1 + 1, plot_rect.width, h2)
+            else
+                h1 = max(6, (plot_rect.height * 6) ÷ 10)
+                second_plot_rect = T.Rect(plot_rect.x, plot_rect.y + h1 + 1, plot_rect.width,
+                    max(3, plot_rect.height - h1 - 1))
+            end
+            # Block border inset (1 cell each side) → plot_inner for Chart 2
+            inn2 = T.Rect(second_plot_rect.x + 1, second_plot_rect.y + 1,
+                max(1, second_plot_rect.width - 2), max(1, second_plot_rect.height - 2))
+            ch2 = panes[2]
+            ctx2 = resolve_chart_render_context(ch2; sigma_method = :mr)
+            plot2 = ctx2.primary_values
+            n2 = length(plot2)
+            vp2 = ch2.viewport
+            n2 > 0 && clamp_viewport!(vp2, n2)
+            n2 > 0 && auto_fit_viewport_y!(vp2, plot2, ctx2.lz;
+                usl = ch2.usl, lsl = ch2.lsl, show_lines = m.show_chart_lines)
+            yy = data_val_to_cell_row(ctx2.lz.cl, inn2, vp2)
+            nfill = count(xx -> begin
+                c = T.char_at(tb, xx, yy)
+                c != ' ' && c != '\0'
+            end, inn2.x:T.right(inn2))
+            return nfill
+        end
+
+        n_solid = _neighbor_cl_density(m, "solid")
+        n_dotted = _neighbor_cl_density(m, "dotted")
+        @test n_solid > n_dotted
+        @test n_solid >= max(3, n_dotted + 1)
     end
 
     # ── GC-PR2: Chart library mode UI + prompt SM (A5 / KD21) ─────────────
