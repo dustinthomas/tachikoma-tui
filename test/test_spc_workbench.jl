@@ -1724,6 +1724,87 @@ end
         end
     end
 
+    @testset "plot axis labels + labeled USL/LSL (and UCL/LCL/CL) lines" begin
+        # HTML parity: Y tick numbers on left; X range on bottom; limit-line labels on right.
+        # Side panel uses "USL="; plot labels must be distinct ("USL" / "USL …") and inside plot_area.
+        function _plot_text(tb, pa)
+            rows = String[]
+            for y in pa.y:T.bottom(pa)
+                chars = Char[]
+                for x in pa.x:T.right(pa)
+                    ch = T.char_at(tb, x, y)
+                    push!(chars, (ch === nothing || ch == '\0') ? ' ' : ch)
+                end
+                push!(rows, String(chars))
+            end
+            return join(rows, "\n")
+        end
+        function _row_has(tb, pa, y, needle::AbstractString)
+            chars = Char[]
+            for x in pa.x:T.right(pa)
+                ch = T.char_at(tb, x, y)
+                push!(chars, (ch === nothing || ch == '\0') ? ' ' : ch)
+            end
+            return occursin(needle, String(chars))
+        end
+
+        d = generate_spc_workbench_data(20; seed=55, μ=100.0, σ=2.0)
+        n = length(d.values)
+        m = SPCWorkbenchModel(
+            data = d,
+            viewport = Viewport(x0 = 1, x1 = n, ylo = 0.0, yhi = 1.0),
+            paused = true,
+            usl = 110.0,
+            lsl = 90.0,
+            seed_demos = :single,
+        )
+        tb = T.TestBackend(100, 28)
+        T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 28), [], []))
+        pa = m.plot_area
+        @test pa.width > 10 && pa.height > 5
+        plot_txt = _plot_text(tb, pa)
+
+        # X-axis range labels (viewport indices) on plot
+        @test occursin(string(m.viewport.x0), plot_txt)
+        @test occursin(string(m.viewport.x1), plot_txt)
+
+        # Y-axis tick values (min / max of fitted viewport) appear in plot region
+        ylo_s = string(round(m.viewport.ylo; digits = 1))
+        yhi_s = string(round(m.viewport.yhi; digits = 1))
+        @test occursin(ylo_s, plot_txt)
+        @test occursin(yhi_s, plot_txt)
+        # Top/bottom rows of plot should carry the corresponding Y ticks
+        @test _row_has(tb, pa, pa.y, yhi_s) || _row_has(tb, pa, pa.y + 1, yhi_s)
+        @test _row_has(tb, pa, T.bottom(pa), ylo_s) || _row_has(tb, pa, T.bottom(pa) - 1, ylo_s)
+
+        # Spec lines labeled inside plot (not only side "USL=")
+        @test occursin("USL", plot_txt)
+        @test occursin("LSL", plot_txt)
+        usl_y = data_val_to_cell_row(110.0, pa, m.viewport)
+        lsl_y = data_val_to_cell_row(90.0, pa, m.viewport)
+        @test _row_has(tb, pa, usl_y, "USL")
+        @test _row_has(tb, pa, lsl_y, "LSL")
+
+        # Control limit labels when ±3σ / CL lines are on
+        lz = compute_limits_and_zones(d.values; sigma_method = :mr)
+        ucl_y = data_val_to_cell_row(lz.ucl, pa, m.viewport)
+        lcl_y = data_val_to_cell_row(lz.lcl, pa, m.viewport)
+        cl_y = data_val_to_cell_row(lz.cl, pa, m.viewport)
+        @test _row_has(tb, pa, ucl_y, "UCL")
+        @test _row_has(tb, pa, lcl_y, "LCL")
+        @test _row_has(tb, pa, cl_y, "CL")
+
+        # Specs off → plot loses USL/LSL line labels (side may still show USL=)
+        m.show_chart_lines["specs"] = false
+        tb2 = T.TestBackend(100, 28)
+        T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 28), [], []))
+        pa2 = m.plot_area
+        @test !_row_has(tb2, pa2, data_val_to_cell_row(110.0, pa2, m.viewport), "USL")
+        @test !_row_has(tb2, pa2, data_val_to_cell_row(90.0, pa2, m.viewport), "LSL")
+    end
+
     @testset "context-driven consistency (hover status == point_status, list cpk == main cpk)" begin
         d = generate_spc_workbench_data(12; seed=42)
         m = SPCWorkbenchModel(data=d, paused=true)
