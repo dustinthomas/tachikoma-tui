@@ -3731,6 +3731,48 @@ function _ephemeral_secondary_viewport(sec::SecondarySeries)::Viewport
     return vp
 end
 
+"""Compact number for axis ticks / line tags (1 decimal — matches HTML-ish TUI density)."""
+function _fmt_axis(v::Real)::String
+    string(round(Float64(v); digits = 1))
+end
+
+"""Right-align `text` on the plot row corresponding to `val` (HTML limit-line tags)."""
+function _draw_hline_label!(buf, plot_inner::Rect, viewport::Viewport, val, text::AbstractString, sty)
+    isempty(text) && return
+    tw = length(text)
+    tw > plot_inner.width && return
+    yy = data_val_to_cell_row(Float64(val), plot_inner, viewport)
+    lx = right(plot_inner) - tw + 1
+    lx = max(plot_inner.x, lx)
+    set_string!(buf, lx, yy, String(text), sty)
+end
+
+"""
+Y-axis min/mid/max ticks on the left + X-range indices on the bottom row.
+Y min sits one row above the X row when height allows so they do not clobber.
+"""
+function _draw_axis_labels!(buf, plot_inner::Rect, viewport::Viewport)
+    chh = plot_inner.height
+    (chh <= 0 || plot_inner.width <= 0) && return
+    bot = bottom(plot_inner)
+    # Y ticks
+    set_string!(buf, plot_inner.x, plot_inner.y, _fmt_axis(viewport.yhi), tstyle(:text_dim))
+    if chh >= 3
+        set_string!(buf, plot_inner.x, bot - 1, _fmt_axis(viewport.ylo), tstyle(:text_dim))
+    else
+        set_string!(buf, plot_inner.x, bot, _fmt_axis(viewport.ylo), tstyle(:text_dim))
+    end
+    if chh >= 5
+        midv = (Float64(viewport.ylo) + Float64(viewport.yhi)) / 2
+        midy = data_val_to_cell_row(midv, plot_inner, viewport)
+        set_string!(buf, plot_inner.x, midy, _fmt_axis(midv), tstyle(:text_dim))
+    end
+    # X-range indices on bottom
+    set_string!(buf, plot_inner.x, bot, string(viewport.x0), tstyle(:text_dim))
+    x1s = string(viewport.x1)
+    set_string!(buf, max(plot_inner.x, right(plot_inner) - length(x1s) + 1), bot, x1s, tstyle(:text_dim))
+end
+
 """
     _render_series_canvas!(buf, outer, m, f; title, values, viewport, …) -> plot_inner
 
@@ -3916,6 +3958,10 @@ function _render_series_canvas!(
 
     draw_series_connectors!(buf, plot_inner, values, viewport, m)
 
+    # Y/X ticks after connectors (solid stroke would wipe digits) but before markers
+    # so a left-edge OOC ◆ is not replaced by a Y tick digit.
+    _draw_axis_labels!(buf, plot_inner, viewport)
+
     # Point markers
     for i in viewport.x0:viewport.x1
         if i < 1 || i > n_plot
@@ -3938,16 +3984,42 @@ function _render_series_canvas!(
         set_char!(buf, dx, dy, sym, sty)
     end
 
+    # Limit-line tags AFTER markers: last sample often sits on the right edge at CL y
+    # and would otherwise erase "CL"/"USL"/…. Right-edge tags win over a single point.
+    if draw_sigma_zones && lz !== nothing
+        if draw_specs && _line_on(m, "specs")
+            if usl !== nothing
+                _draw_hline_label!(buf, plot_inner, viewport, usl, "USL", tstyle(:error, bold = true))
+            end
+            if lsl !== nothing
+                _draw_hline_label!(buf, plot_inner, viewport, lsl, "LSL", tstyle(:error, bold = true))
+            end
+        end
+        if _line_on(m, "sigma3")
+            _draw_hline_label!(buf, plot_inner, viewport, lz.ucl, "UCL", tstyle(:warning, bold = true))
+            _draw_hline_label!(buf, plot_inner, viewport, lz.lcl, "LCL", tstyle(:warning, bold = true))
+        end
+        if _line_on(m, "cl")
+            _draw_hline_label!(buf, plot_inner, viewport, lz.cl, "CL", tstyle(:accent, bold = true))
+        end
+    else
+        if ucl !== nothing
+            _draw_hline_label!(buf, plot_inner, viewport, ucl, "UCL", tstyle(:warning, bold = true))
+        end
+        if lcl !== nothing
+            _draw_hline_label!(buf, plot_inner, viewport, lcl, "LCL", tstyle(:warning, bold = true))
+        end
+        if cl !== nothing
+            _draw_hline_label!(buf, plot_inner, viewport, cl, "CL", tstyle(:accent, bold = true))
+        end
+    end
+
     if draw_hover && ctx !== nothing
         if (hi = m.hovered) !== nothing && 1 <= hi <= n_plot && hi >= viewport.x0 && hi <= viewport.x1 && m.drag_start === nothing
             draw_hover_tooltip!(buf, plot_inner, hi, Float64(values[hi]), hi in viol_set, viewport;
                 usl = usl, target = m.target, lsl = lsl)
         end
     end
-
-    # X-range labels
-    set_string!(buf, plot_inner.x, plot_inner.y + chh - 1, string(viewport.x0), tstyle(:text_dim))
-    set_string!(buf, right(plot_inner) - 3, plot_inner.y + chh - 1, string(viewport.x1), tstyle(:text_dim))
 
     return plot_inner
 end
