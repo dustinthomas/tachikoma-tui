@@ -30,6 +30,8 @@ export SS_FACTORS, subgroup_means_and_ranges, subgroup_means_and_s
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 export LINE_STYLE_KEYS, LINE_STYLE_LABELS, DEFAULT_CHART_LINE_STYLES
 export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS
+export GraphPreset, capture_graph_preset, apply_graph_preset!
+export save_named_graph_preset!, apply_named_graph_preset!
 export is_attribute_chart
 export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_type, chart_type_to_string
 export I_MR, Xbar_R, Xbar_S, p_chart, np_chart, c_chart, u_chart
@@ -40,6 +42,7 @@ export visible_charts, dashboard_pane_charts
 export workbench_to_dict, workbench_from_dict, workbench_from_dict!
 export export_csv_series, chart_for_export
 export save_workbench, load_workbench, load_workbench!
+export graph_preset_to_dict, graph_preset_from_dict, save_graph_preset, load_graph_preset
 export extract_html_spc_state, extract_html_spc_state_file
 export html_state_to_workbench, html_state_to_workbench!
 export load_html_archive, load_html_archive!

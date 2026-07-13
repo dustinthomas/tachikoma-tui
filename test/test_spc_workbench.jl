@@ -41,6 +41,106 @@ include("../src/spc_workbench.jl")
         @test _cycle_line_style!(m, "cl"; dir = -1) == "solid"
     end
 
+    @testset "graph presets: capture/apply whole graph set (lines+styles+visual+rules)" begin
+        @test GraphPreset <: Any
+        p0 = GraphPreset()
+        @test p0.name == "default"
+        for k in CHART_LINE_KEYS
+            @test p0.show_chart_lines[k] == DEFAULT_CHART_LINES[k]
+            @test p0.chart_line_styles[k] == DEFAULT_CHART_LINE_STYLES[k]
+        end
+        for k in VISUAL_PREF_KEYS
+            @test p0.visual_prefs[k] == DEFAULT_VISUAL_PREFS[k]
+        end
+        @test p0.enabled_rules["WECO-1"] == DEFAULT_WECO_RULES["WECO-1"]
+        @test p0.enabled_rules["WECO-6"] == DEFAULT_WECO_RULES["WECO-6"]
+
+        d = generate_spc_workbench_data(10; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        # Mutate the full graph set: visibility, styles/coloring, visual prefs, WECO calc rules
+        m.show_chart_lines["specs"] = false
+        m.show_chart_lines["sigma1"] = false
+        m.chart_line_styles["cl"] = "dashed"
+        m.chart_line_styles["sigma3"] = "dotted"
+        m.visual_prefs["solid_series"] = false
+        m.visual_prefs["secondary_canvas"] = false
+        m.enabled_rules["WECO-6"] = true
+        m.enabled_rules["WECO-1"] = false
+        _sync_active_back!(m)
+
+        p = capture_graph_preset(m; name = "fab-dense")
+        @test p isa GraphPreset
+        @test p.name == "fab-dense"
+        @test p.show_chart_lines["specs"] === false
+        @test p.show_chart_lines["sigma1"] === false
+        @test p.chart_line_styles["cl"] == "dashed"
+        @test p.chart_line_styles["sigma3"] == "dotted"
+        @test p.visual_prefs["solid_series"] === false
+        @test p.visual_prefs["secondary_canvas"] === false
+        @test p.enabled_rules["WECO-6"] === true
+        @test p.enabled_rules["WECO-1"] === false
+        # Deep copy: mutating model must not alias into preset
+        m.show_chart_lines["specs"] = true
+        m.chart_line_styles["cl"] = "solid"
+        @test p.show_chart_lines["specs"] === false
+        @test p.chart_line_styles["cl"] == "dashed"
+
+        # Apply onto a fresh model restores the whole set (active chart rules + session)
+        m2 = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        @test m2.show_chart_lines["specs"] === true
+        @test m2.chart_line_styles["cl"] == "solid"
+        apply_graph_preset!(m2, p)
+        @test m2.show_chart_lines["specs"] === false
+        @test m2.show_chart_lines["sigma1"] === false
+        @test m2.chart_line_styles["cl"] == "dashed"
+        @test m2.chart_line_styles["sigma3"] == "dotted"
+        @test m2.visual_prefs["solid_series"] === false
+        @test m2.visual_prefs["secondary_canvas"] === false
+        @test m2.enabled_rules["WECO-6"] === true
+        @test m2.enabled_rules["WECO-1"] === false
+        @test m2.default_rules["WECO-6"] === true
+        @test m2.default_rules["WECO-1"] === false
+        @test current_chart(m2).enabled_rules["WECO-6"] === true
+        @test current_chart(m2).enabled_rules["WECO-1"] === false
+        @test occursin("preset applied", m2.last_event)
+        # Apply deep-copies — mutating preset after apply leaves model alone
+        p.chart_line_styles["cl"] = "long_dash"
+        @test m2.chart_line_styles["cl"] == "dashed"
+
+        # Named session presets: save (upsert) + apply by name
+        m3 = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        m3.show_chart_lines["cl"] = false
+        m3.chart_line_styles["specs"] = "long_dash"
+        m3.visual_prefs["braille_series"] = false
+        m3.enabled_rules["WECO-8"] = true
+        _sync_active_back!(m3)
+        @test save_named_graph_preset!(m3, "no-cl") === nothing
+        @test length(m3.graph_presets) == 1
+        @test m3.graph_presets[1].name == "no-cl"
+        @test occursin("preset saved", m3.last_event)
+        # empty name rejected
+        @test save_named_graph_preset!(m3, "  ") isa AbstractString
+        @test length(m3.graph_presets) == 1
+        # mutate away then re-apply by name
+        m3.show_chart_lines["cl"] = true
+        m3.chart_line_styles["specs"] = "dotted"
+        m3.visual_prefs["braille_series"] = true
+        m3.enabled_rules["WECO-8"] = false
+        _sync_active_back!(m3)
+        @test apply_named_graph_preset!(m3, "no-cl") === nothing
+        @test m3.show_chart_lines["cl"] === false
+        @test m3.chart_line_styles["specs"] == "long_dash"
+        @test m3.visual_prefs["braille_series"] === false
+        @test m3.enabled_rules["WECO-8"] === true
+        @test apply_named_graph_preset!(m3, "missing") isa AbstractString
+        # upsert same name replaces
+        m3.show_chart_lines["sigma2"] = false
+        @test save_named_graph_preset!(m3, "no-cl") === nothing
+        @test length(m3.graph_presets) == 1
+        @test m3.graph_presets[1].show_chart_lines["sigma2"] === false
+        @test occursin("preset updated", m3.last_event)
+    end
+
     @testset "weco_detect guards (empty, zero sigma)" begin
         @test isempty(weco_detect(Float64[], 0.0, 1.0))
         @test isempty(weco_detect([10.0, 20.0], 15.0, 0.0))
@@ -3325,6 +3425,126 @@ end
         @test m.config_open == false
     end
 
+    @testset "graph presets: unified menu open + save popup + load selected" begin
+        d = generate_spc_workbench_data(16; seed = 42)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+
+        # Dashboard e opens unified Graph Presets menu (no dashboard bleed)
+        T.update!(m, T.KeyEvent('e'))
+        @test m.view_mode === :presets
+        @test m.config_open == false
+        tb = T.TestBackend(100, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("GRAPH PRESETS", full) || occursin("Graph Presets", full)
+        @test occursin("No presets", full) || occursin("no presets", full) ||
+              occursin("s · save", full) || occursin("s save", full)
+        @test !occursin("Side Stats", full)  # dedicated page, no dashboard bleed
+        # Esc closes without quit
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
+        @test m.quit == false
+
+        # Config S/A also open the unified menu (not freeform apply-name prompts)
+        T.update!(m, T.KeyEvent('v'))
+        @test m.config_open == true
+        tb2 = T.TestBackend(100, 24); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 24), [], []))
+        full_cfg = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("e presets", full_cfg) || occursin("presets menu", full_cfg) ||
+              occursin("S presets", full_cfg) || occursin("preset menu", full_cfg)
+        T.update!(m, T.KeyEvent('S'))
+        @test m.config_open == false
+        @test m.view_mode === :presets
+
+        # Mutate live graph set, then save via popup (s → name prompt)
+        m.show_chart_lines["specs"] = false
+        m.chart_line_styles["cl"] = "long_dash"
+        m.visual_prefs["secondary_canvas"] = false
+        m.enabled_rules["WECO-6"] = true
+        _sync_active_back!(m)
+
+        T.update!(m, T.KeyEvent('s'))
+        @test m.view_mode === :presets  # stay in menu while popup is open
+        @test m.prompt_kind === :save_graph_preset
+        # Message chrome shows the name popup
+        tb3 = T.TestBackend(100, 24); T.reset!(tb3.buf)
+        T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 100, 24), [], []))
+        full_p = join([string(T.row_text(tb3, i)) for i in 1:24 if T.row_text(tb3, i) !== nothing], "\n")
+        @test occursin("PROMPT", full_p)
+        @test occursin("save_graph_preset", full_p) || occursin("save", full_p)
+        for c in collect("my-preset")
+            T.update!(m, T.KeyEvent(c))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === nothing
+        @test m.view_mode === :presets  # after save, remain in unified menu
+        @test length(m.graph_presets) == 1
+        @test m.graph_presets[1].name == "my-preset"
+        @test m.graph_presets[1].show_chart_lines["specs"] === false
+        @test m.graph_presets[1].chart_line_styles["cl"] == "long_dash"
+        @test m.graph_presets[1].visual_prefs["secondary_canvas"] === false
+        @test m.graph_presets[1].enabled_rules["WECO-6"] === true
+        @test occursin("preset saved", m.last_event) || occursin("preset updated", m.last_event)
+        # List shows the saved name
+        tb4 = T.TestBackend(100, 24); T.reset!(tb4.buf)
+        T.view(m, T.Frame(tb4.buf, T.Rect(1, 1, 100, 24), [], []))
+        full_list = join([string(T.row_text(tb4, i)) for i in 1:24 if T.row_text(tb4, i) !== nothing], "\n")
+        @test occursin("my-preset", full_list)
+
+        # empty save name → no extra preset
+        T.update!(m, T.KeyEvent('s'))
+        @test m.prompt_kind === :save_graph_preset
+        T.update!(m, T.KeyEvent(:enter))
+        @test length(m.graph_presets) == 1
+        @test occursin("empty", m.last_event)
+
+        # Mutate away, then load selected via Enter
+        m.show_chart_lines["specs"] = true
+        m.chart_line_styles["cl"] = "solid"
+        m.visual_prefs["secondary_canvas"] = true
+        m.enabled_rules["WECO-6"] = false
+        _sync_active_back!(m)
+        m.presets_selected = 1
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.show_chart_lines["specs"] === false
+        @test m.chart_line_styles["cl"] == "long_dash"
+        @test m.visual_prefs["secondary_canvas"] === false
+        @test m.enabled_rules["WECO-6"] === true
+        @test current_chart(m).enabled_rules["WECO-6"] === true
+        @test occursin("preset applied", m.last_event)
+        # load returns to dashboard so the graph is visible
+        @test m.view_mode === :dashboard
+
+        # Second preset + load via l key with ↑↓ selection
+        T.update!(m, T.KeyEvent('e'))
+        @test m.view_mode === :presets
+        m.show_chart_lines["cl"] = false
+        m.chart_line_styles["specs"] = "dashed"
+        _sync_active_back!(m)
+        T.update!(m, T.KeyEvent('s'))
+        for c in collect("second")
+            T.update!(m, T.KeyEvent(c))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test length(m.graph_presets) == 2
+        # select first, load with l
+        m.presets_selected = 1
+        # restore non-preset state then load
+        m.show_chart_lines["specs"] = true
+        m.chart_line_styles["cl"] = "solid"
+        T.update!(m, T.KeyEvent('l'))
+        @test m.show_chart_lines["specs"] === false
+        @test m.chart_line_styles["cl"] == "long_dash"
+        @test m.view_mode === :dashboard
+
+        # q closes presets without quit
+        T.update!(m, T.KeyEvent('e'))
+        T.update!(m, T.KeyEvent('q'))
+        @test m.view_mode === :dashboard
+        @test m.quit == false
+    end
+
     @testset "chart line styles: primary buffer density solid ≫ dotted" begin
         # Horizontal limit row density: solid step-1 continuous ─ vs dotted step-2 -
         vals = fill(10.0, 12)
@@ -5349,6 +5569,7 @@ using Random
 using TachikomaTUI
 # private bootstrap used by workbench itself (not exported)
 const _ensure_charts! = TachikomaTUI._ensure_charts!
+const _sync_active_back! = TachikomaTUI._sync_active_back!
 
 @testset "SPC Workbench JSON session persistence (schema v1)" begin
 
@@ -6050,6 +6271,129 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
         @test m3.chart_line_styles["cl"] == "long_dash"
         @test m3.chart_line_styles["sigma1"] == DEFAULT_CHART_LINE_STYLES["sigma1"]
         @test !haskey(m3.chart_line_styles, "bogus_key")
+    end
+
+    @testset "graph_presets JSON: omit empty, round-trip named set, fail-closed" begin
+        m = _make_session()
+        # Empty list omitted from session dict (keep fixtures small)
+        d0 = workbench_to_dict(m)
+        @test !haskey(d0, "graph_presets") || isempty(d0["graph_presets"])
+
+        m.show_chart_lines["specs"] = false
+        m.chart_line_styles["cl"] = "dashed"
+        m.visual_prefs["solid_series"] = false
+        m.enabled_rules["WECO-6"] = true
+        _sync_active_back!(m)  # capture reads active chart rules after _ensure_charts!
+        # capture via public API if available through module; use model field path
+        err = save_named_graph_preset!(m, "dense")
+        @test err === nothing
+        @test length(m.graph_presets) == 1
+
+        d = workbench_to_dict(m)
+        @test haskey(d, "graph_presets")
+        @test length(d["graph_presets"]) == 1
+        gp = d["graph_presets"][1]
+        @test gp["name"] == "dense"
+        @test gp["show_chart_lines"]["specs"] === false
+        @test gp["chart_line_styles"]["cl"] == "dashed"
+        @test gp["visual_prefs"]["solid_series"] === false
+        @test gp["enabled_rules"]["WECO-6"] === true
+
+        # Standalone dict helpers
+        p = m.graph_presets[1]
+        pd = graph_preset_to_dict(p)
+        @test pd["name"] == "dense"
+        p2 = graph_preset_from_dict(pd)
+        @test p2 isa GraphPreset
+        @test p2.name == "dense"
+        @test p2.chart_line_styles["cl"] == "dashed"
+
+        # Full session round-trip
+        path = joinpath(tempdir(), "spc_wb_preset_$(rand(UInt32)).json")
+        try
+            @test save_workbench(m, path) === nothing
+            loaded = load_workbench(path)
+            @test loaded isa SPCWorkbenchModel
+            @test length(loaded.graph_presets) == 1
+            @test loaded.graph_presets[1].name == "dense"
+            @test loaded.graph_presets[1].show_chart_lines["specs"] === false
+            @test loaded.graph_presets[1].chart_line_styles["cl"] == "dashed"
+            @test loaded.graph_presets[1].visual_prefs["solid_series"] === false
+            @test loaded.graph_presets[1].enabled_rules["WECO-6"] === true
+            # apply restored preset after mutating live state
+            loaded.show_chart_lines["specs"] = true
+            @test apply_named_graph_preset!(loaded, "dense") === nothing
+            @test loaded.show_chart_lines["specs"] === false
+        finally
+            isfile(path) && rm(path; force = true)
+        end
+
+        # Missing graph_presets → empty
+        bare = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [
+                Dict{String,Any}(
+                    "id" => "CHT-p",
+                    "name" => "P",
+                    "chart_type" => "I-MR",
+                    "values" => [1.0, 2.0, 3.0],
+                ),
+            ],
+        )
+        m_bare = workbench_from_dict(bare)
+        @test m_bare isa SPCWorkbenchModel
+        @test isempty(m_bare.graph_presets)
+
+        # Fail-closed: wrong type
+        bad = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0])],
+            "graph_presets" => "not-an-array",
+        )
+        errb = workbench_from_dict(bad)
+        @test errb isa AbstractString
+        @test occursin("graph_presets", errb)
+
+        # Fail-closed: unknown style inside a preset
+        bad_style = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0])],
+            "graph_presets" => [
+                Dict{String,Any}(
+                    "name" => "bad",
+                    "chart_line_styles" => Dict{String,Any}("cl" => "wiggly"),
+                ),
+            ],
+        )
+        errs = workbench_from_dict(bad_style)
+        @test errs isa AbstractString
+        @test occursin("unknown style", errs) || occursin("wiggly", errs)
+
+        # Standalone file save/load
+        pfile = GraphPreset(
+            name = "file-p",
+            show_chart_lines = Dict{String,Bool}("cl" => false, "sigma1" => true, "sigma2" => true, "sigma3" => true, "specs" => true),
+            chart_line_styles = Dict{String,String}("cl" => "dotted", "sigma1" => "solid", "sigma2" => "dashed", "sigma3" => "long_dash", "specs" => "dotted"),
+            visual_prefs = Dict{String,Bool}("solid_series" => false, "solid_stroke" => true, "braille_series" => true, "secondary_canvas" => false),
+            enabled_rules = copy(DEFAULT_WECO_RULES),
+        )
+        pfile.enabled_rules["WECO-7"] = true
+        fpath = joinpath(tempdir(), "spc_graph_preset_$(rand(UInt32)).json")
+        try
+            @test save_graph_preset(pfile, fpath) === nothing
+            loaded_p = load_graph_preset(fpath)
+            @test loaded_p isa GraphPreset
+            @test loaded_p.name == "file-p"
+            @test loaded_p.show_chart_lines["cl"] === false
+            @test loaded_p.chart_line_styles["sigma1"] == "solid"
+            @test loaded_p.visual_prefs["secondary_canvas"] === false
+            @test loaded_p.enabled_rules["WECO-7"] === true
+        finally
+            isfile(fpath) && rm(fpath; force = true)
+        end
     end
 
 end

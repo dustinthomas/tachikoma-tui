@@ -589,6 +589,19 @@ const DUAL_PRIMARY_FRAC = 0.62
 
 _pref_on(m, key::AbstractString) = get(m.visual_prefs, key, get(DEFAULT_VISUAL_PREFS, key, false))
 
+# ── Graph presets (named snapshot of the full graph config set) ─────────
+# Whole set: what is on the graph (line visibility), coloring/styles,
+# series/layout visual prefs, and what WECO rules are calculated.
+
+"""Named snapshot of graph presentation + calculation settings (no series data)."""
+@kwdef mutable struct GraphPreset
+    name::String = "default"
+    show_chart_lines::Dict{String,Bool} = copy(DEFAULT_CHART_LINES)
+    chart_line_styles::Dict{String,String} = copy(DEFAULT_CHART_LINE_STYLES)
+    visual_prefs::Dict{String,Bool} = copy(DEFAULT_VISUAL_PREFS)
+    enabled_rules::Dict{String,Bool} = copy(DEFAULT_WECO_RULES)
+end
+
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 function _beyond(v::Real, bound::Real, op::Function)
@@ -1454,6 +1467,7 @@ export group_values_by_keys, subgroup_means_and_ranges_from_groups, subgroup_mea
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 export LINE_STYLE_KEYS, LINE_STYLE_LABELS, DEFAULT_CHART_LINE_STYLES
 export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS
+export GraphPreset
 export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_type, chart_type_to_string
 export I_MR, Xbar_R, Xbar_S, p_chart, np_chart, c_chart, u_chart
 export SharedTable, mean_or_0, std_or_0, compute_chart_series, materialize_chart_from_table!
@@ -1799,6 +1813,8 @@ end
     chart_line_styles::Dict{String, String} = copy(DEFAULT_CHART_LINE_STYLES)
     # Graph visual preferences (extensible panel; start with solid series line)
     visual_prefs::Dict{String, Bool} = copy(DEFAULT_VISUAL_PREFS)
+    # Named graph presets (lines + styles + visual + WECO) — session-scoped; JSON optional
+    graph_presets::Vector{GraphPreset} = GraphPreset[]
     # Dashboard multi-chart (AC2/AC3)
     charts::Vector{ChartSpec} = ChartSpec[]
     active::Int = 1
@@ -1806,12 +1822,13 @@ end
     library_scroll::Int = 0
     library_area::Rect = Rect(0, 0, 0, 0)
     library_last_click::Union{Nothing, NamedTuple{(:idx, :tick), Tuple{Int, Int}}} = nothing
-    view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder, :tools, :table
+    view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder, :tools, :table, :presets
     # Library / prompt SM (GC-PR2 / KD21)
     prompt_kind::Union{Nothing,Symbol} = nothing
     # :import_csv | :export_csv | :save_workbench | :load_workbench | :rename_chart
     # :filter_tool | :filter_type | :filter_owner  (GC-PR4)
     # :tool_add_id | :tool_add_desc | :tool_edit_desc  (P2-PR4 tools registry)
+    # :save_graph_preset | :apply_graph_preset  (named graph config presets)
     prompt_buf::String = ""
     pending_delete::Bool = false
     # Prefill only for export prompts — never silent write to default path
@@ -1824,6 +1841,10 @@ end
     tools_scroll::Int = 0
     tools_area::Rect = Rect(0, 0, 0, 0)
     tool_pending_id::String = ""   # staged id between :tool_add_id → :tool_add_desc
+    # Unified graph presets menu UI (view_mode=:presets)
+    presets_selected::Int = 1
+    presets_scroll::Int = 0
+    presets_area::Rect = Rect(0, 0, 0, 0)
     # Prefill only for save/load prompts — never silent write to default path
     last_workbench_path::String = ""
     # Session-ephemeral dashboard/library filters (GC-PR4) — NOT in JSON schema
@@ -2157,6 +2178,97 @@ function _sync_active_back!(m::SPCWorkbenchModel)
     end
 end
 
+# ── Graph preset capture / apply / named session store ──────────────────
+
+"""
+    capture_graph_preset(m; name="default") -> GraphPreset
+
+Deep-copy snapshot of the whole graph config set: line visibility, line styles
+(coloring/dash), visual prefs, and WECO rules from the active chart (or model
+mirror when no charts).
+"""
+function capture_graph_preset(m::SPCWorkbenchModel; name::AbstractString = "default")::GraphPreset
+    _ensure_charts!(m)
+    rules = if !isempty(m.charts)
+        copy(current_chart(m).enabled_rules)
+    else
+        copy(m.enabled_rules)
+    end
+    return GraphPreset(
+        name = String(name),
+        show_chart_lines = copy(m.show_chart_lines),
+        chart_line_styles = copy(m.chart_line_styles),
+        visual_prefs = copy(m.visual_prefs),
+        enabled_rules = rules,
+    )
+end
+
+"""
+    apply_graph_preset!(m, preset) -> nothing
+
+Apply a GraphPreset to the session: lines, styles, visual prefs, session
+`default_rules`, active-chart WECO rules, and the legacy `enabled_rules` mirror.
+Does not touch series data or chart metadata.
+"""
+function apply_graph_preset!(m::SPCWorkbenchModel, p::GraphPreset)
+    _ensure_charts!(m)
+    m.show_chart_lines = copy(p.show_chart_lines)
+    m.chart_line_styles = copy(p.chart_line_styles)
+    m.visual_prefs = copy(p.visual_prefs)
+    rules = copy(p.enabled_rules)
+    m.default_rules = copy(rules)
+    m.enabled_rules = copy(rules)
+    if !isempty(m.charts)
+        ch = current_chart(m)
+        ch.enabled_rules = copy(rules)
+        # Keep mirror identity with active chart after seed (same as toggle path)
+        m.enabled_rules = ch.enabled_rules
+    end
+    m.last_event = "preset applied: $(p.name)"
+    return nothing
+end
+
+"""
+    save_named_graph_preset!(m, name) -> nothing | String
+
+Capture current graph set under `name` into `m.graph_presets` (upsert by name).
+Empty/whitespace name → error string; model unchanged.
+"""
+function save_named_graph_preset!(m::SPCWorkbenchModel, name::AbstractString)::Union{Nothing,String}
+    n = strip(String(name))
+    isempty(n) && return "empty preset name"
+    p = capture_graph_preset(m; name = n)
+    for i in eachindex(m.graph_presets)
+        if m.graph_presets[i].name == n
+            m.graph_presets[i] = p
+            m.last_event = "preset updated: $n"
+            return nothing
+        end
+    end
+    push!(m.graph_presets, p)
+    m.last_event = "preset saved: $n"
+    return nothing
+end
+
+"""
+    apply_named_graph_preset!(m, name) -> nothing | String
+
+Find a session preset by exact name and apply it. Missing → error string.
+"""
+function apply_named_graph_preset!(m::SPCWorkbenchModel, name::AbstractString)::Union{Nothing,String}
+    n = strip(String(name))
+    isempty(n) && return "empty preset name"
+    for p in m.graph_presets
+        if p.name == n
+            apply_graph_preset!(m, p)
+            return nothing
+        end
+    end
+    return "preset not found: $n"
+end
+
+export capture_graph_preset, apply_graph_preset!, save_named_graph_preset!, apply_named_graph_preset!
+
 # ── Pure chart library CRUD ─────────────────────────────────────────────
 
 """
@@ -2378,6 +2490,60 @@ function _sync_tools_scroll!(m::SPCWorkbenchModel, ntools::Int = length(m.tools)
     end
     m.tools_scroll = clamp(scroll, 0, max_scroll)
     return nothing
+end
+
+# ── Graph presets menu scroll helpers ───────────────────────────────────
+
+function _presets_visible_capacity(m::SPCWorkbenchModel)::Int
+    a = m.presets_area
+    h = (a.height > 0) ? a.height : 20
+    return max(1, h - 4)
+end
+
+function _sync_presets_scroll!(m::SPCWorkbenchModel, n::Int = length(m.graph_presets),
+                              vis::Int = _presets_visible_capacity(m))
+    n <= 0 && (m.presets_selected = 1; m.presets_scroll = 0; return)
+    m.presets_selected = clamp(m.presets_selected, 1, n)
+    sel = m.presets_selected
+    max_scroll = max(0, n - vis)
+    scroll = clamp(m.presets_scroll, 0, max_scroll)
+    if sel <= scroll
+        scroll = sel - 1
+    elseif sel > scroll + vis
+        scroll = sel - vis
+    end
+    m.presets_scroll = clamp(scroll, 0, max_scroll)
+    return nothing
+end
+
+"""Open unified Graph Presets menu (from dashboard or config)."""
+function _open_presets_menu!(m::SPCWorkbenchModel)
+    m.view_mode = :presets
+    m.config_open = false
+    m.pending_delete = false
+    m.prompt_kind = nothing
+    m.prompt_buf = ""
+    n = length(m.graph_presets)
+    m.presets_selected = n >= 1 ? clamp(m.presets_selected, 1, n) : 1
+    _sync_presets_scroll!(m)
+    m.last_event = "presets open"
+    return nothing
+end
+
+"""Apply selected session preset and return to dashboard (visible graph)."""
+function _load_selected_preset!(m::SPCWorkbenchModel)::Bool
+    n = length(m.graph_presets)
+    if n < 1
+        m.last_event = "no presets to load"
+        return false
+    end
+    m.presets_selected = clamp(m.presets_selected, 1, n)
+    p = m.graph_presets[m.presets_selected]
+    apply_graph_preset!(m, p)
+    m.view_mode = :dashboard
+    m.prompt_kind = nothing
+    m.prompt_buf = ""
+    return true
 end
 
 # ── Multi-plot pane selection + filters (GC-PR1 / GC-PR4) ───────────────
@@ -3037,6 +3203,40 @@ function _apply_prompt!(m::SPCWorkbenchModel)
             # prompt_buf already kept by io
         end
         return
+    elseif kind === :save_graph_preset
+        name = strip(buf)
+        err = save_named_graph_preset!(m, name)
+        if err === nothing
+            # Point selection at the saved/upserted name when in unified menu
+            n = strip(String(name))
+            idx = findfirst(p -> p.name == n, m.graph_presets)
+            if idx !== nothing
+                m.presets_selected = idx
+                _sync_presets_scroll!(m)
+            end
+            m.prompt_kind = nothing
+            m.prompt_buf = ""
+        else
+            m.last_event = err
+            m.prompt_kind = nothing
+            m.prompt_buf = ""
+        end
+        return
+    elseif kind === :apply_graph_preset
+        # Legacy name-typed apply (kept for API/tests); prefer menu Enter/l load
+        name = strip(buf)
+        err = apply_named_graph_preset!(m, name)
+        if err === nothing
+            m.prompt_kind = nothing
+            m.prompt_buf = ""
+            if m.view_mode === :presets
+                m.view_mode = :dashboard
+            end
+        else
+            m.last_event = err
+            # keep prompt open so operator can retype name
+        end
+        return
     elseif kind === :filter_tool
         set_filter_tool!(m, buf)
         m.prompt_kind = nothing
@@ -3240,6 +3440,12 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                 m.last_event = "toggle $rid"
             end
             return
+        elseif evt.key == :char && (evt.char == 'S' || evt.char == 's' ||
+                evt.char == 'A' || evt.char == 'a' ||
+                evt.char == 'e' || evt.char == 'E')
+            # Unified presets menu (save popup + load list live there)
+            _open_presets_menu!(m)
+            return
         end
         return
     end
@@ -3330,7 +3536,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     end
 
     # pending_delete: y confirms; any other key (incl Esc) clears — never quit
-    # Mode-local: tools mode deletes tool; library (or other) deletes chart.
+    # Mode-local: tools → tool; presets → graph preset; library (or other) → chart.
     if m.pending_delete
         if evt.key == :char && (evt.char == 'y' || evt.char == 'Y')
             if m.view_mode == :tools
@@ -3342,6 +3548,20 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                 m.pending_delete = false
                 _sync_tools_scroll!(m)
                 m.last_event = ok ? "deleted tool" : "delete tool refused"
+                return
+            elseif m.view_mode == :presets
+                npre = length(m.graph_presets)
+                if npre >= 1
+                    m.presets_selected = clamp(m.presets_selected, 1, npre)
+                    deleteat!(m.graph_presets, m.presets_selected)
+                    n2 = length(m.graph_presets)
+                    m.presets_selected = n2 >= 1 ? clamp(m.presets_selected, 1, n2) : 1
+                    _sync_presets_scroll!(m)
+                    m.last_event = "deleted preset"
+                else
+                    m.last_event = "no presets to delete"
+                end
+                m.pending_delete = false
                 return
             else
                 nch = length(m.charts)
@@ -3524,6 +3744,56 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return  # absorb other keys — no fall-through
     end
 
+    # Unified Graph Presets menu — Esc/q close without quit
+    if m.view_mode == :presets
+        npre = length(m.graph_presets)
+        if npre >= 1
+            m.presets_selected = clamp(m.presets_selected, 1, npre)
+        end
+        if evt.key == :escape || (evt.key == :char && evt.char == 'q')
+            m.view_mode = :dashboard
+            m.pending_delete = false
+            m.last_event = "presets closed"
+            return
+        elseif evt.key == :up
+            if npre >= 1
+                m.presets_selected = max(1, m.presets_selected - 1)
+            end
+            _sync_presets_scroll!(m)
+            m.last_event = "presets sel $(m.presets_selected)"
+            return
+        elseif evt.key == :down
+            if npre >= 1
+                m.presets_selected = min(npre, m.presets_selected + 1)
+            end
+            _sync_presets_scroll!(m)
+            m.last_event = "presets sel $(m.presets_selected)"
+            return
+        elseif evt.key == :enter
+            _load_selected_preset!(m)
+            return
+        elseif evt.key == :char
+            c = evt.char
+            if c == 's' || c == 'S'
+                # Popup: name entry for saving current graph set
+                _open_prompt!(m, :save_graph_preset; seed = "")
+                return
+            elseif c == 'l' || c == 'L' || c == 'a' || c == 'A'
+                _load_selected_preset!(m)
+                return
+            elseif c == 'd' || c == 'D'
+                if npre < 1
+                    m.last_event = "no presets to delete"
+                else
+                    m.pending_delete = true
+                    m.last_event = "confirm delete preset? y/N"
+                end
+                return
+            end
+        end
+        return  # absorb other keys — no fall-through
+    end
+
     # Global quit (dashboard only — modes already returned above)
     if evt.key == :escape || (evt.key == :char && evt.char == 'q')
         m.quit = true
@@ -3552,6 +3822,10 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.tool_pending_id = ""
             _sync_tools_scroll!(m)
             m.last_event = "tools open"
+            return
+        elseif c == 'e' || c == 'E'
+            # Unified graph presets menu (save popup + load selected)
+            _open_presets_menu!(m)
             return
         elseif c == 'd' || c == 'D'
             # SharedTable grid (P2-PR7 / KD-P2-20) — dashboard only; library/tools keep d=delete
@@ -3694,13 +3968,13 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         _update_library_mouse!(m, evt)
         return
     end
-    # Modal / tools / table / prompt / pending_delete: keyboard-only (KD16)
+    # Modal / tools / table / presets / prompt / pending_delete: keyboard-only (KD16)
     if m.config_open || m.editing !== nothing ||
        m.view_mode == :help || m.view_mode == :keymap ||
        m.view_mode == :builder ||
        m.view_mode == :tools ||
        m.view_mode == :table ||
-       m.prompt_kind !== nothing || m.pending_delete
+       m.view_mode == :presets ||
        m.prompt_kind !== nothing || m.pending_delete
         m.last_event = string(evt.action, " ", evt.button, " (modal)")
         m.hover_x = nothing
@@ -4141,8 +4415,8 @@ function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
     return [
         (:section, "PAGES"),
         (:binds, [("m", "library"), ("x", "tools"), ("d", "table"), ("b", "builder")]),
-        (:binds, [("f", "filter"), ("F", "clear"), ("h", "help"), ("k", "keymap"),
-                  ("?", "less"), ("q", "quit")]),
+        (:binds, [("e", "presets"), ("f", "filter"), ("F", "clear"), ("h", "help")]),
+        (:binds, [("k", "keymap"), ("?", "less"), ("q", "quit")]),
         (:section, "NAV / LIVE"),
         (:binds, [("[ ]", "chart"), ("p", "pause"), ("g", "live"), ("←→", "pan")]),
         (:binds, [("r/z", "reset"), ("wheel", "zoom"), ("drag", "pan")]),
@@ -4181,6 +4455,17 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:binds, [("↑↓", "select"), ("↵", "filter+go"), ("a", "add"), ("n", "edit desc")]),
             (:binds, [("d", "delete"), ("Esc", "close"), ("q", "close")]),
             (:note, "registry ≠ chart tools — assign via builder"),
+        ]
+    elseif mode === :presets
+        compact && return [
+            (:binds, [("↑↓", "select"), ("↵", "load"), ("l", "load"), ("s", "save")]),
+            (:binds, [("d", "delete"), ("Esc", "close"), ("q", "close")]),
+        ]
+        return [
+            (:section, "GRAPH PRESETS"),
+            (:binds, [("↑↓", "select"), ("↵/l", "load selected"), ("s", "save current")]),
+            (:binds, [("d", "delete"), ("Esc", "close"), ("q", "close")]),
+            (:note, "whole set: lines · styles · visual · WECO rules"),
         ]
     elseif mode === :table
         compact && return [
@@ -4238,6 +4523,7 @@ end
 function _mode_keys_title(mode::Symbol)::String
     mode === :library && return "Keys  · Library"
     mode === :tools && return "Keys  · Tools"
+    mode === :presets && return "Keys  · Presets"
     mode === :table && return "Keys  · Table"
     mode === :builder && return "Keys  · Builder"
     mode === :help && return "Keys  · Help"
@@ -4538,6 +4824,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
     elseif m.view_mode == :tools
         _render_tools_page!(buf, area, m)
         return
+    elseif m.view_mode == :presets
+        _render_presets_page!(buf, area, m)
+        return
     elseif m.view_mode == :table
         _render_table_page!(buf, area, m)
         return
@@ -4636,9 +4925,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
         ov_rect = Rect(ov.x + 2, ov.y + 1, ov.width - 4, ov_h)
         tab_lbl = m.config_tab == :lines ? "Chart Lines" : (m.config_tab == :visual ? "Visual Preferences" : "WECO Rules")
         title_hints = if m.config_tab == :lines
-            "Tab · ↑↓ · 1-N toggle · ←/→ style · Esc/v close"
+            "Tab · ↑↓ · 1-N toggle · ←/→ style · e/S presets menu · Esc/v close"
         else
-            "Tab switch · ↑↓ · 1-N space/enter · Esc/c/v/o close"
+            "Tab · ↑↓ · 1-N · e/S presets menu · Esc/c/v/o close"
         end
         cfg = Block(title="Config: $tab_lbl ($title_hints)", border_style=tstyle(:accent, bold=true))
         inner = render(cfg, ov_rect, buf)
@@ -5271,6 +5560,49 @@ function _render_tools_page!(buf, area, m)
     end
     if chrome !== nothing
         _render_mode_chrome!(buf, chrome, m; mode=:tools)
+    end
+end
+
+# ── Unified Graph Presets page — save popup + load selected ─────────────
+function _render_presets_page!(buf, area, m)
+    content, chrome = _split_mode_chrome(area)
+    m.presets_area = content
+    set_string!(buf, content.x + 1, content.y,
+        "GRAPH PRESETS  ·  Esc/q → dashboard", tstyle(:title, bold=true))
+    y = content.y + 2
+    npre = length(m.graph_presets)
+    if npre >= 1
+        m.presets_selected = clamp(m.presets_selected, 1, npre)
+    end
+    set_string!(buf, content.x + 2, y,
+        "Presets: $npre   selected=$(m.presets_selected)   (whole set: lines · styles · visual · WECO)",
+        tstyle(:text_dim))
+    y += 2
+    capacity = _presets_visible_capacity(m)
+    _sync_presets_scroll!(m, npre, capacity)
+    if npre == 0
+        set_string!(buf, content.x + 2, y, "No presets — s · save current graph set", tstyle(:warning, bold=true))
+        y += 1
+        set_string!(buf, content.x + 2, y,
+            "  Capture lines on/off, styles, visual prefs, and WECO rules under a name.",
+            tstyle(:text_dim))
+    else
+        first_i = m.presets_scroll + 1
+        last_i = min(npre, m.presets_scroll + capacity)
+        for i in first_i:last_i
+            p = m.graph_presets[i]
+            marker = i == m.presets_selected ? "▶" : " "
+            # Compact summary of what the preset holds
+            n_off = count(!, values(p.show_chart_lines))
+            n_rules = count(values(p.enabled_rules))
+            line = "$marker $i. $(p.name)  (lines-off=$n_off · WECO-on=$n_rules)"
+            sty = i == m.presets_selected ? tstyle(:accent, bold=true) : tstyle(:text)
+            set_string!(buf, content.x + 2, y, line, sty)
+            y += 1
+        end
+    end
+    if chrome !== nothing
+        _render_mode_chrome!(buf, chrome, m; mode=:presets)
     end
 end
 

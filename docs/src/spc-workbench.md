@@ -32,6 +32,8 @@ change that default. Use `:single` or `:none` only in explicit constructs.
 | **`g` / `G`** | Toggle active chart `live_enabled` (**not `L`**) |
 | `r` / `z` | Reset viewport (full range + auto Y) |
 | `c` / `v` / `o` | Config WECO / Lines / Visual prefs |
+| **`e` / `E`** | Open **Graph Presets** menu (unified save/load) |
+| Config `e`/`S`/`A` | Also open Graph Presets menu from config overlay |
 | `u` / `t` / `l` | Edit USL / Target / **LSL** (`L` is LSL, not live) |
 | `s` | Clear all spec limits |
 | `1`…`8` | Toggle WECO rule N |
@@ -279,9 +281,39 @@ load_workbench!(m, "session.json")       # in-session replace (library W)
 | `tools` | no | Array of `{id, description}` |
 | `default_rules` | no | Session WECO enable map for **new** charts (`add_chart!` seed). Distinct from per-chart `enabled_rules`. Omitted → module `DEFAULT_WECO_RULES`. |
 | `show_chart_lines` | no | CL / σ / specs visibility |
+| `chart_line_styles` | no | Per-line style ids (`solid` / `dotted` / `dashed` / `long_dash`); omitted → defaults |
 | `visual_prefs` | no | Series connectors + `secondary_canvas` (dual MR/R/s under active) |
+| `graph_presets` | no | Array of named graph presets (whole graph set); **omitted on save when empty** |
 | `paused` | no | Bool; default false if omitted |
 | `table` | no | SharedTable `{columns, rows}`; **omitted on save when empty**; missing/null → empty on load |
+
+### Graph preset object (`graph_presets[]`)
+
+Named snapshot of the **whole graph config set** (no series data): what is drawn,
+line styles, visual prefs, and WECO rules to calculate.
+
+**Unified menu** (`e` from dashboard, or `e`/`S`/`A` from config):
+
+| Key | Action |
+|-----|--------|
+| `s` | **Popup** name prompt — save/upsert current graph set |
+| `↑`/`↓` | Select a saved preset |
+| `Enter` / `l` | **Load** selected preset → dashboard |
+| `d` then `y` | Delete selected preset |
+| Esc / `q` | Close menu (no quit) |
+
+Load applies to active-chart WECO rules + session `default_rules`.
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `name` | **yes** | Non-empty string (upsert key) |
+| `show_chart_lines` | no | Bool map; defaults if omitted |
+| `chart_line_styles` | no | Style map; unknown style string → fail-closed |
+| `visual_prefs` | no | Bool map; defaults if omitted |
+| `enabled_rules` | no | WECO map captured from active chart at save time |
+
+Standalone file helpers: `save_graph_preset(p, path)` / `load_graph_preset(path)`
+write `{kind: "graph_preset", version: 1, …fields}`.
 
 ### Per-chart object
 

@@ -67,8 +67,18 @@ Seeded demos usually start with live enabled on charts. Successful **CSV import*
 | `s` | Clear all spec limits on the active chart |
 | `1` … `8` | Toggle WECO rule 1–8 on the active chart |
 | `c` | WECO config overlay |
-| `v` | Chart line visibility (CL, σ zones, specs) |
+| `v` | Chart line visibility + styles (CL, σ zones, specs) |
 | `o` | Visual preferences (including secondary canvas) |
+| **`e`** | **Graph Presets** menu — save the whole setup under a name (popup), load any saved preset |
+
+### Graph presets menu (`e`)
+
+| Key | Action |
+|-----|--------|
+| `s` | Popup to name + save current lines / styles / visual / WECO |
+| `↑` `↓` | Select a preset |
+| Enter / `l` | Load selected → back to dashboard |
+| Esc / `q` | Close |
 
 ### Open other pages
 

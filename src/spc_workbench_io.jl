@@ -435,6 +435,108 @@ function _style_dict_from_json(v, defaults::Dict{String,String})::Union{Dict{Str
     return out
 end
 
+"""
+    graph_preset_to_dict(p) -> Dict
+
+Serialize one GraphPreset (no series data). Used for session `graph_presets`
+array and standalone preset files.
+"""
+function graph_preset_to_dict(p::GraphPreset)::Dict{String,Any}
+    return Dict{String,Any}(
+        "name" => p.name,
+        "show_chart_lines" => Dict{String,Any}(k => v for (k, v) in p.show_chart_lines),
+        "chart_line_styles" => Dict{String,Any}(k => v for (k, v) in p.chart_line_styles),
+        "visual_prefs" => Dict{String,Any}(k => v for (k, v) in p.visual_prefs),
+        "enabled_rules" => Dict{String,Any}(k => v for (k, v) in p.enabled_rules),
+    )
+end
+
+"""
+    graph_preset_from_dict(d) -> GraphPreset | String
+
+Parse one GraphPreset. Fail-closed on bad types / unknown line styles.
+Missing optional fields use module defaults.
+"""
+function graph_preset_from_dict(d)::Union{GraphPreset,String}
+    d isa AbstractDict || return "graph preset must be an object"
+    name = get(d, "name", nothing)
+    name isa AbstractString || return "graph preset name required"
+    n = strip(String(name))
+    isempty(n) && return "graph preset name empty"
+
+    lines = _bool_dict_from_json(get(d, "show_chart_lines", nothing), DEFAULT_CHART_LINES)
+    lines isa String && return lines
+    styles = _style_dict_from_json(get(d, "chart_line_styles", nothing), DEFAULT_CHART_LINE_STYLES)
+    styles isa String && return styles
+    vis = _bool_dict_from_json(get(d, "visual_prefs", nothing), DEFAULT_VISUAL_PREFS)
+    vis isa String && return vis
+    rules = _rules_from_json(get(d, "enabled_rules", nothing))
+    rules isa String && return rules
+
+    return GraphPreset(
+        name = n,
+        show_chart_lines = lines,
+        chart_line_styles = styles,
+        visual_prefs = vis,
+        enabled_rules = rules,
+    )
+end
+
+function _graph_presets_from_json(v)::Union{Vector{GraphPreset},String}
+    v === nothing && return GraphPreset[]
+    v isa AbstractVector || return "graph_presets must be an array"
+    out = GraphPreset[]
+    for (i, item) in enumerate(v)
+        p = graph_preset_from_dict(item)
+        p isa String && return "graph_presets[$i]: $p"
+        push!(out, p)
+    end
+    return out
+end
+
+"""
+    save_graph_preset(p, path) -> nothing | String
+
+Write a standalone graph-preset JSON file (`kind=graph_preset`, `version=1`).
+"""
+function save_graph_preset(p::GraphPreset, path::AbstractString)::Union{Nothing,String}
+    try
+        d = graph_preset_to_dict(p)
+        d["kind"] = "graph_preset"
+        d["version"] = 1
+        open(path, "w") do io
+            JSON.print(io, d)
+        end
+        return nothing
+    catch e
+        return "save err: $(sprint(showerror, e))"
+    end
+end
+
+"""
+    load_graph_preset(path) -> GraphPreset | String
+
+Load a standalone graph-preset JSON file. Accepts `kind=graph_preset` or a
+bare object with the preset fields. Fail-closed on unreadable / invalid.
+"""
+function load_graph_preset(path::AbstractString)::Union{GraphPreset,String}
+    local d
+    try
+        text = read(path, String)
+        d = JSON.parse(text)
+    catch e
+        return "load err: unreadable ($(sprint(showerror, e)))"
+    end
+    d isa AbstractDict || return "load err: graph preset must be an object"
+    kind = get(d, "kind", nothing)
+    if kind !== nothing && String(kind) != "graph_preset"
+        return "load err: not a graph_preset (kind=$(kind))"
+    end
+    p = graph_preset_from_dict(d)
+    p isa String && return "load err: $p"
+    return p
+end
+
 function _tools_registry_from_json(v)::Union{Vector{ToolEntry},String}
     v === nothing && return ToolEntry[]
     v isa AbstractVector || return "tools must be an array"
@@ -746,6 +848,9 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
     visual_prefs = _bool_dict_from_json(get(d, "visual_prefs", nothing), DEFAULT_VISUAL_PREFS)
     visual_prefs isa String && return visual_prefs
 
+    graph_presets = _graph_presets_from_json(get(d, "graph_presets", nothing))
+    graph_presets isa String && return graph_presets
+
     paused = _json_bool(get(d, "paused", nothing), false)
 
     # Optional SharedTable (P2-PR3); missing/null → empty; bad type → whole parse fails
@@ -760,6 +865,7 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
         show_chart_lines = show_lines,
         chart_line_styles = chart_line_styles,
         visual_prefs = visual_prefs,
+        graph_presets = graph_presets,
         paused = paused,
         table = table,
     )
@@ -802,6 +908,7 @@ function _apply_parsed!(m::SPCWorkbenchModel, parsed::NamedTuple)
     m.show_chart_lines = parsed.show_chart_lines
     m.chart_line_styles = parsed.chart_line_styles
     m.visual_prefs = parsed.visual_prefs
+    m.graph_presets = parsed.graph_presets
     m.paused = parsed.paused
     m.table = parsed.table  # mirror HTML apply; do NOT auto-rematerialize (KD-P2-18)
     m.library_selected = clamp(parsed.active, 1, length(parsed.charts))
@@ -842,6 +949,10 @@ function workbench_to_dict(m::SPCWorkbenchModel)::Dict
         "visual_prefs" => Dict{String,Any}(k => v for (k, v) in m.visual_prefs),
         "paused" => m.paused,
     )
+    # Omit empty presets (keep fixtures small; same policy as table)
+    if !isempty(m.graph_presets)
+        d["graph_presets"] = [graph_preset_to_dict(p) for p in m.graph_presets]
+    end
     # Omit empty table (KD-P2-18)
     if !isempty(m.table.columns) || !isempty(m.table.rows)
         d["table"] = _table_to_dict(m.table)
@@ -1363,6 +1474,7 @@ end
 
 export workbench_to_dict, workbench_from_dict, workbench_from_dict!
 export save_workbench, load_workbench, load_workbench!
+export graph_preset_to_dict, graph_preset_from_dict, save_graph_preset, load_graph_preset
 export extract_html_spc_state, extract_html_spc_state_file
 export html_state_to_workbench, html_state_to_workbench!
 export load_html_archive, load_html_archive!
