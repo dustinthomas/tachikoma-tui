@@ -16,6 +16,31 @@ include("../src/spc_workbench.jl")
         @test d.values[1] == 1.0
     end
 
+    @testset "chart line styles: defaults + draw params preserve dash/step" begin
+        @test LINE_STYLE_KEYS == ["solid", "dotted", "dashed", "long_dash"]
+        @test DEFAULT_CHART_LINE_STYLES["cl"] == "solid"
+        @test DEFAULT_CHART_LINE_STYLES["sigma1"] == "dotted"
+        @test DEFAULT_CHART_LINE_STYLES["sigma2"] == "dashed"
+        @test DEFAULT_CHART_LINE_STYLES["sigma3"] == "long_dash"
+        @test DEFAULT_CHART_LINE_STYLES["specs"] == "dotted"
+        # Canvas dash / buffer step match prior hardcoded look
+        @test _style_draw_params("solid") == (nothing, 1, '─')
+        @test _style_draw_params("dotted") == (2, 2, '-')
+        @test _style_draw_params("dashed") == (3, 3, '-')
+        @test _style_draw_params("long_dash") == (4, 4, '-')
+        m = SPCWorkbenchModel(data = WorkbenchData(values=[1.0], cl=1.0, sigma=0.1))
+        for k in CHART_LINE_KEYS
+            @test haskey(m.chart_line_styles, k)
+            @test m.chart_line_styles[k] == DEFAULT_CHART_LINE_STYLES[k]
+            @test _line_style(m, k) == DEFAULT_CHART_LINE_STYLES[k]
+        end
+        # cycle helper
+        @test _cycle_line_style!(m, "cl"; dir = 1) == "dotted"
+        @test m.chart_line_styles["cl"] == "dotted"
+        @test occursin("style cl=dotted", m.last_event)
+        @test _cycle_line_style!(m, "cl"; dir = -1) == "solid"
+    end
+
     @testset "weco_detect guards (empty, zero sigma)" begin
         @test isempty(weco_detect(Float64[], 0.0, 1.0))
         @test isempty(weco_detect([10.0, 20.0], 15.0, 0.0))
@@ -3256,6 +3281,130 @@ end
         @test sec_row > pa_bottom
     end
 
+    # ── PR1: per-line chart styles (solid/dotted/dashed/long_dash) ────────
+    @testset "chart line styles: Lines tab UI short rows + left/right cycle" begin
+        d = generate_spc_workbench_data(16; seed = 42)
+        m = SPCWorkbenchModel(data = d, paused = true)
+        x0_before = m.viewport.x0
+        T.update!(m, T.KeyEvent('v'))
+        @test m.config_open == true
+        @test m.config_tab == :lines
+        tb = T.TestBackend(90, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 24), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("Chart Lines", full)
+        @test occursin("solid", full)
+        @test occursin("dotted", full)
+        @test occursin("long dash", full) || occursin("long_dash", full)
+        @test !occursin("style:", full)  # no long "style:" prefix per row
+        @test !occursin("(draw on chart)", full)
+        # CL selected by default (item 1): right cycles solid → dotted
+        @test m.config_selected == 1
+        @test _line_style(m, "cl") == "solid"
+        T.update!(m, T.KeyEvent(:right))
+        @test m.chart_line_styles["cl"] == "dotted"
+        @test occursin("style cl=", m.last_event)
+        # left cycles back
+        T.update!(m, T.KeyEvent(:left))
+        @test m.chart_line_styles["cl"] == "solid"
+        # space still toggles visibility only
+        T.update!(m, T.KeyEvent(' '))
+        @test m.show_chart_lines["cl"] == false
+        @test m.chart_line_styles["cl"] == "solid"
+        # left/right must not pan while config open
+        @test m.viewport.x0 == x0_before
+        # re-render shows updated style labels
+        tb2 = T.TestBackend(90, 24); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 90, 24), [], []))
+        full2 = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("[OFF]", full2)
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.config_open == false
+    end
+
+    @testset "chart line styles: primary buffer density solid ≫ dotted" begin
+        # Horizontal limit row density: solid step-1 continuous ─ vs dotted step-2 -
+        vals = fill(10.0, 12)
+        d = WorkbenchData(values = vals, cl = 10.0, sigma = 1.0)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single,
+            viewport = Viewport(x0 = 1, x1 = 12, ylo = 5.0, yhi = 15.0))
+        _ensure_charts!(m)
+        for k in keys(m.show_chart_lines)
+            m.show_chart_lines[k] = false
+        end
+        m.show_chart_lines["cl"] = true
+        m.visual_prefs["solid_series"] = false
+        m.visual_prefs["solid_stroke"] = false
+        m.visual_prefs["braille_series"] = false
+        m.visual_prefs["secondary_canvas"] = false
+
+        m.chart_line_styles["cl"] = "solid"
+        tb_s = T.TestBackend(80, 22); T.reset!(tb_s.buf)
+        T.view(m, T.Frame(tb_s.buf, T.Rect(1, 1, 80, 22), [], []))
+        pa = m.plot_area
+        @test pa.width > 4 && pa.height > 3
+        ch = current_chart(m)
+        ctx = resolve_chart_render_context(ch; sigma_method = :mr)
+        yy = data_val_to_cell_row(ctx.lz.cl, pa, m.viewport)
+        filled_solid = count(xx -> begin
+            c = T.char_at(tb_s, xx, yy)
+            c != ' ' && c != '\0'
+        end, pa.x:T.right(pa))
+
+        m.chart_line_styles["cl"] = "dotted"
+        tb_d = T.TestBackend(80, 22); T.reset!(tb_d.buf)
+        T.view(m, T.Frame(tb_d.buf, T.Rect(1, 1, 80, 22), [], []))
+        yy2 = data_val_to_cell_row(ctx.lz.cl, m.plot_area, m.viewport)
+        filled_dotted = count(xx -> begin
+            c = T.char_at(tb_d, xx, yy2)
+            c != ' ' && c != '\0'
+        end, m.plot_area.x:T.right(m.plot_area))
+
+        @test filled_solid > filled_dotted
+        @test filled_solid >= max(3, filled_dotted + 1)
+    end
+
+    @testset "chart line styles: multi-site smoke (secondary sigma3 + neighbor helpers)" begin
+        # Secondary maps ucl/lcl → sigma3 style; primary/neighbor use shared helpers.
+        # Unit-level: style key mapping + draw params for site 2.
+        m = SPCWorkbenchModel(data = generate_spc_workbench_data(20; seed = 7), paused = true)
+        m.chart_line_styles["sigma3"] = "solid"
+        m.chart_line_styles["cl"] = "dotted"
+        @test _line_style(m, "sigma3") == "solid"   # dual secondary UCL/LCL key
+        @test _line_style(m, "cl") == "dotted"
+        dash_s, step_s, _ = _style_draw_params(_line_style(m, "sigma3"))
+        @test dash_s === nothing && step_s == 1
+        dash_d, step_d, _ = _style_draw_params(_line_style(m, "cl"))
+        @test dash_d == 2 && step_d == 2
+
+        # Neighbor path: tall triple dashboard renders Chart 2/3 without crash
+        # (sites use draw_limit_hline_* helpers; dashed_line! only inside helper)
+        _ensure_charts!(m)
+        m.visual_prefs["secondary_canvas"] = false
+        for k in CHART_LINE_KEYS
+            m.show_chart_lines[k] = true
+        end
+        m.chart_line_styles["sigma3"] = "long_dash"
+        tb = T.TestBackend(90, 40); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 40), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:40 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("Chart 2:", full)
+        @test occursin("Dashboard", full)
+
+        # Dual secondary also renders with style keys (no visibility gate)
+        m.visual_prefs["secondary_canvas"] = true
+        m.seed_demos = :single
+        m2 = SPCWorkbenchModel(data = generate_spc_workbench_data(20; seed = 7),
+            paused = true, seed_demos = :single)
+        _ensure_charts!(m2)
+        m2.visual_prefs["secondary_canvas"] = true
+        m2.chart_line_styles["sigma3"] = "dotted"
+        tb2 = T.TestBackend(90, 24); T.reset!(tb2.buf)
+        T.view(m2, T.Frame(tb2.buf, T.Rect(1, 1, 90, 24), [], []))
+        full2 = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("MR (secondary)", full2) || occursin("(secondary)", full2)
+    end
+
     # ── GC-PR2: Chart library mode UI + prompt SM (A5 / KD21) ─────────────
     @testset "library mode: open (m), CHART LIBRARY title, no dashboard bleed" begin
         m = SPCWorkbenchModel(data = generate_spc_workbench_data(12; seed = 7), paused = true)
@@ -5738,6 +5887,94 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
         @test m3.table.rows[2]["Value"] == "2.5"
         # chart series still from values field (no rematerialize)
         @test m3.charts[1].data.values == m.charts[1].data.values
+    end
+
+    @testset "chart_line_styles JSON: missing defaults, round-trip, fail-closed" begin
+        # Missing key → defaults
+        bare = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [
+                Dict{String,Any}(
+                    "id" => "CHT-sty",
+                    "name" => "Styles",
+                    "chart_type" => "I-MR",
+                    "values" => [1.0, 2.0, 3.0],
+                ),
+            ],
+        )
+        m_bare = workbench_from_dict(bare)
+        @test m_bare isa SPCWorkbenchModel
+        for k in CHART_LINE_KEYS
+            @test m_bare.chart_line_styles[k] == DEFAULT_CHART_LINE_STYLES[k]
+        end
+
+        # Round-trip mutate style
+        m = _make_session()
+        m.chart_line_styles["cl"] = "dashed"
+        m.chart_line_styles["sigma3"] = "dotted"
+        d = workbench_to_dict(m)
+        @test haskey(d, "chart_line_styles")
+        @test d["chart_line_styles"]["cl"] == "dashed"
+        @test d["chart_line_styles"]["sigma3"] == "dotted"
+        # full key set written
+        for k in CHART_LINE_KEYS
+            @test haskey(d["chart_line_styles"], k)
+        end
+        m2 = workbench_from_dict(d)
+        @test m2 isa SPCWorkbenchModel
+        @test m2.chart_line_styles["cl"] == "dashed"
+        @test m2.chart_line_styles["sigma3"] == "dotted"
+        @test m2.chart_line_styles["specs"] == DEFAULT_CHART_LINE_STYLES["specs"]
+
+        # Invalid top-level type (array) → error
+        bad_type = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0])],
+            "chart_line_styles" => ["solid"],
+        )
+        err = workbench_from_dict(bad_type)
+        @test err isa AbstractString
+        @test occursin("chart_line_styles", err)
+
+        # Unknown style string → fail-closed
+        bad_style = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0])],
+            "chart_line_styles" => Dict{String,Any}("cl" => "wiggly"),
+        )
+        err2 = workbench_from_dict(bad_style)
+        @test err2 isa AbstractString
+        @test occursin("unknown style", err2) || occursin("wiggly", err2)
+
+        # Non-string value → error
+        bad_val = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0])],
+            "chart_line_styles" => Dict{String,Any}("cl" => 3),
+        )
+        err3 = workbench_from_dict(bad_val)
+        @test err3 isa AbstractString
+        @test occursin("must be a string", err3)
+
+        # Extra unknown key ignored; known keys apply; partial merge onto defaults
+        partial = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [Dict("id" => "x", "name" => "y", "chart_type" => "I-MR", "values" => [1.0])],
+            "chart_line_styles" => Dict{String,Any}(
+                "cl" => "long_dash",
+                "bogus_key" => "solid",
+            ),
+        )
+        m3 = workbench_from_dict(partial)
+        @test m3 isa SPCWorkbenchModel
+        @test m3.chart_line_styles["cl"] == "long_dash"
+        @test m3.chart_line_styles["sigma1"] == DEFAULT_CHART_LINE_STYLES["sigma1"]
+        @test !haskey(m3.chart_line_styles, "bogus_key")
     end
 
 end

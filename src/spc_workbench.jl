@@ -499,6 +499,74 @@ const DEFAULT_CHART_LINES = Dict{String,Bool}(
 
 _line_on(m, key::AbstractString) = get(m.show_chart_lines, key, true)
 
+# Per-line limit styles (solid / dotted / dashed / long_dash). Defaults match prior hardcoded look.
+const LINE_STYLE_KEYS = ["solid", "dotted", "dashed", "long_dash"]
+const LINE_STYLE_LABELS = Dict(
+    "solid"     => "solid",
+    "dotted"    => "dotted",
+    "dashed"    => "dashed",
+    "long_dash" => "long dash",
+)
+# Canvas dash / buffer step today: CL solid; σ1=2; σ2=3; σ3=4; specs=2.
+const DEFAULT_CHART_LINE_STYLES = Dict{String,String}(
+    "cl"     => "solid",
+    "sigma1" => "dotted",     # dash/step 2
+    "sigma2" => "dashed",     # dash/step 3
+    "sigma3" => "long_dash",  # dash/step 4
+    "specs"  => "dotted",     # dash/step 2 — MUST match current hardcoded specs
+)
+
+_line_style(m, key::AbstractString)::String =
+    get(m.chart_line_styles, key, get(DEFAULT_CHART_LINE_STYLES, key, "dashed"))
+
+"""Map style id → (canvas_dash::Union{Nothing,Int}, buffer_step::Int, buffer_ch::Char).
+`canvas_dash === nothing` means solid `line!`.
+Helpers own dash/step/char only; call sites keep existing tstyle(...) color mappings."""
+function _style_draw_params(style::AbstractString)
+    s = String(style)
+    s == "solid"     && return (nothing, 1, '─')
+    s == "dotted"    && return (2, 2, '-')   # legacy buffer glyph; NOT '·'
+    s == "dashed"    && return (3, 3, '-')
+    s == "long_dash" && return (4, 4, '-')
+    return (3, 3, '-')  # defensive fallback for internal misuse only
+end
+
+function draw_limit_hline_canvas!(c, y::Int, dw::Int, style::AbstractString)
+    dash, _, _ = _style_draw_params(style)
+    if dash === nothing
+        line!(c, 0, y, dw - 1, y)
+    else
+        dashed_line!(c, 0, y, dw - 1, y; dash = dash)
+    end
+end
+
+function draw_limit_hline_buf!(buf, rect, val, viewport, style::AbstractString, sty)
+    _, step, ch = _style_draw_params(style)
+    yy = data_val_to_cell_row(Float64(val), rect, viewport)
+    if step <= 1
+        for xx in rect.x:right(rect)
+            set_char!(buf, xx, yy, ch, sty)
+        end
+    else
+        for xx in rect.x:right(rect)
+            if (xx % step) == 0
+                set_char!(buf, xx, yy, ch, sty)
+            end
+        end
+    end
+end
+
+function _cycle_line_style!(m, key::AbstractString; dir::Int = 1)
+    cur = _line_style(m, key)
+    idxs = findfirst(==(cur), LINE_STYLE_KEYS)
+    i = idxs === nothing ? 1 : idxs
+    n = length(LINE_STYLE_KEYS)
+    j = mod1(i + dir, n)
+    m.chart_line_styles[key] = LINE_STYLE_KEYS[j]
+    m.last_event = "style $key=$(LINE_STYLE_KEYS[j])"
+    return LINE_STYLE_KEYS[j]
+end
+
 # Extensible graph visual preferences (add keys over time; panel lists VISUAL_PREF_KEYS)
 const VISUAL_PREF_KEYS = ["solid_series", "solid_stroke", "braille_series", "secondary_canvas"]
 const VISUAL_PREF_LABELS = Dict{String,String}(
@@ -1384,6 +1452,7 @@ export SecondarySeries, secondary_series_for, empty_secondary_series
 export SS_FACTORS, subgroup_means_and_ranges, subgroup_means_and_s, is_attribute_chart
 export group_values_by_keys, subgroup_means_and_ranges_from_groups, subgroup_means_and_s_from_groups
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
+export LINE_STYLE_KEYS, LINE_STYLE_LABELS, DEFAULT_CHART_LINE_STYLES
 export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS
 export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_type, chart_type_to_string
 export I_MR, Xbar_R, Xbar_S, p_chart, np_chart, c_chart, u_chart
@@ -1726,6 +1795,8 @@ end
     default_rules::Dict{String, Bool} = copy(DEFAULT_WECO_RULES)
     # Chart line visibility (CL / ±1σ / ±2σ / ±3σ / Specs)
     show_chart_lines::Dict{String, Bool} = copy(DEFAULT_CHART_LINES)
+    # Per-line limit styles (solid / dotted / dashed / long_dash)
+    chart_line_styles::Dict{String, String} = copy(DEFAULT_CHART_LINE_STYLES)
     # Graph visual preferences (extensible panel; start with solid series line)
     visual_prefs::Dict{String, Bool} = copy(DEFAULT_VISUAL_PREFS)
     # Dashboard multi-chart (AC2/AC3)
@@ -3138,6 +3209,13 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                 m.last_event = "toggle $rid"
             end
             return
+        elseif evt.key == :left || evt.key == :right
+            # Lines tab: cycle style; other tabs no-op (still consume — no pan while config open)
+            if m.config_tab == :lines
+                key = CHART_LINE_KEYS[clamp(m.config_selected, 1, length(CHART_LINE_KEYS))]
+                _cycle_line_style!(m, key; dir = evt.key == :right ? 1 : -1)
+            end
+            return
         elseif evt.key == :char && isdigit(evt.char)
             idx = parse(Int, string(evt.char))
             if m.config_tab == :lines
@@ -3847,92 +3925,87 @@ function _render_series_canvas!(
         prev = (dx, dy)
     end
 
-    # Limit / zone lines on canvas
+    # Limit / zone lines on canvas (styles via draw_limit_hline_canvas!)
     if draw_sigma_zones && lz !== nothing
         if _line_on(m, "sigma1")
-            for (z, dash) in [(lz.ucl1, 2), (lz.lcl1, 2)]
-                zy = map_to_dot_y(z, viewport, dh)
-                dashed_line!(c, 0, zy, dw - 1, zy; dash = dash)
+            st = _line_style(m, "sigma1")
+            for z in (lz.ucl1, lz.lcl1)
+                draw_limit_hline_canvas!(c, map_to_dot_y(z, viewport, dh), dw, st)
             end
         end
         if _line_on(m, "sigma2")
-            for (z, dash) in [(lz.ucl2, 3), (lz.lcl2, 3)]
-                zy = map_to_dot_y(z, viewport, dh)
-                dashed_line!(c, 0, zy, dw - 1, zy; dash = dash)
+            st = _line_style(m, "sigma2")
+            for z in (lz.ucl2, lz.lcl2)
+                draw_limit_hline_canvas!(c, map_to_dot_y(z, viewport, dh), dw, st)
             end
         end
         if _line_on(m, "sigma3")
-            dashed_line!(c, 0, map_to_dot_y(lz.ucl, viewport, dh), dw - 1, map_to_dot_y(lz.ucl, viewport, dh); dash = 4)
-            dashed_line!(c, 0, map_to_dot_y(lz.lcl, viewport, dh), dw - 1, map_to_dot_y(lz.lcl, viewport, dh); dash = 4)
+            st = _line_style(m, "sigma3")
+            draw_limit_hline_canvas!(c, map_to_dot_y(lz.ucl, viewport, dh), dw, st)
+            draw_limit_hline_canvas!(c, map_to_dot_y(lz.lcl, viewport, dh), dw, st)
         end
         if _line_on(m, "cl")
-            line!(c, 0, map_to_dot_y(lz.cl, viewport, dh), dw - 1, map_to_dot_y(lz.cl, viewport, dh))
+            draw_limit_hline_canvas!(c, map_to_dot_y(lz.cl, viewport, dh), dw, _line_style(m, "cl"))
         end
         if draw_specs && _line_on(m, "specs")
+            st = _line_style(m, "specs")
             if usl !== nothing
-                sy = map_to_dot_y(Float64(usl), viewport, dh)
-                dashed_line!(c, 0, sy, dw - 1, sy; dash = 2)
+                draw_limit_hline_canvas!(c, map_to_dot_y(Float64(usl), viewport, dh), dw, st)
             end
             if lsl !== nothing
-                sy = map_to_dot_y(Float64(lsl), viewport, dh)
-                dashed_line!(c, 0, sy, dw - 1, sy; dash = 2)
+                draw_limit_hline_canvas!(c, map_to_dot_y(Float64(lsl), viewport, dh), dw, st)
             end
         end
     else
-        # Secondary (or simplified): CL / UCL / LCL only when provided
+        # Dual secondary (or simplified): CL / UCL / LCL only when provided — no _line_on
         if ucl !== nothing
-            dashed_line!(c, 0, map_to_dot_y(Float64(ucl), viewport, dh), dw - 1, map_to_dot_y(Float64(ucl), viewport, dh); dash = 4)
+            draw_limit_hline_canvas!(c, map_to_dot_y(Float64(ucl), viewport, dh), dw, _line_style(m, "sigma3"))
         end
         if lcl !== nothing
-            dashed_line!(c, 0, map_to_dot_y(Float64(lcl), viewport, dh), dw - 1, map_to_dot_y(Float64(lcl), viewport, dh); dash = 4)
+            draw_limit_hline_canvas!(c, map_to_dot_y(Float64(lcl), viewport, dh), dw, _line_style(m, "sigma3"))
         end
         if cl !== nothing
-            line!(c, 0, map_to_dot_y(Float64(cl), viewport, dh), dw - 1, map_to_dot_y(Float64(cl), viewport, dh))
+            draw_limit_hline_canvas!(c, map_to_dot_y(Float64(cl), viewport, dh), dw, _line_style(m, "cl"))
         end
     end
 
     render_canvas(c, plot_inner, f)
 
-    # Colorized limit overlays on buffer cells
-    function _draw_lim_line!(rect, val, sty, step = 3)
-        yy = data_val_to_cell_row(Float64(val), rect, viewport)
-        for xx in rect.x:right(rect)
-            if (xx % step) == 0
-                set_char!(buf, xx, yy, '-', sty)
-            end
-        end
-    end
+    # Colorized limit overlays on buffer cells (styles via draw_limit_hline_buf!)
     if draw_sigma_zones && lz !== nothing
         if draw_specs && _line_on(m, "specs")
-            if usl !== nothing; _draw_lim_line!(plot_inner, usl, tstyle(:error, bold = true), 2); end
-            if lsl !== nothing; _draw_lim_line!(plot_inner, lsl, tstyle(:error, bold = true), 2); end
+            st = _line_style(m, "specs")
+            if usl !== nothing; draw_limit_hline_buf!(buf, plot_inner, usl, viewport, st, tstyle(:error, bold = true)); end
+            if lsl !== nothing; draw_limit_hline_buf!(buf, plot_inner, lsl, viewport, st, tstyle(:error, bold = true)); end
         end
         if _line_on(m, "sigma3")
-            _draw_lim_line!(plot_inner, lz.ucl, tstyle(:warning, bold = true), 4)
-            _draw_lim_line!(plot_inner, lz.lcl, tstyle(:warning, bold = true), 4)
+            st = _line_style(m, "sigma3")
+            draw_limit_hline_buf!(buf, plot_inner, lz.ucl, viewport, st, tstyle(:warning, bold = true))
+            draw_limit_hline_buf!(buf, plot_inner, lz.lcl, viewport, st, tstyle(:warning, bold = true))
         end
         if _line_on(m, "sigma2")
-            _draw_lim_line!(plot_inner, lz.ucl2, tstyle(:secondary), 3)
-            _draw_lim_line!(plot_inner, lz.lcl2, tstyle(:secondary), 3)
+            st = _line_style(m, "sigma2")
+            draw_limit_hline_buf!(buf, plot_inner, lz.ucl2, viewport, st, tstyle(:secondary))
+            draw_limit_hline_buf!(buf, plot_inner, lz.lcl2, viewport, st, tstyle(:secondary))
         end
         if _line_on(m, "sigma1")
-            _draw_lim_line!(plot_inner, lz.ucl1, tstyle(:text_dim), 2)
-            _draw_lim_line!(plot_inner, lz.lcl1, tstyle(:text_dim), 2)
+            st = _line_style(m, "sigma1")
+            draw_limit_hline_buf!(buf, plot_inner, lz.ucl1, viewport, st, tstyle(:text_dim))
+            draw_limit_hline_buf!(buf, plot_inner, lz.lcl1, viewport, st, tstyle(:text_dim))
         end
         if _line_on(m, "cl")
-            cly = data_val_to_cell_row(lz.cl, plot_inner, viewport)
-            for xx in plot_inner.x:right(plot_inner); set_char!(buf, xx, cly, '─', tstyle(:accent)); end
+            draw_limit_hline_buf!(buf, plot_inner, lz.cl, viewport, _line_style(m, "cl"), tstyle(:accent))
         end
     else
+        # Dual secondary buffer overlays — style only; no _line_on
         if ucl !== nothing
-            _draw_lim_line!(plot_inner, ucl, tstyle(:warning, bold = true), 4)
+            draw_limit_hline_buf!(buf, plot_inner, ucl, viewport, _line_style(m, "sigma3"), tstyle(:warning, bold = true))
         end
         if lcl !== nothing
-            _draw_lim_line!(plot_inner, lcl, tstyle(:warning, bold = true), 4)
+            draw_limit_hline_buf!(buf, plot_inner, lcl, viewport, _line_style(m, "sigma3"), tstyle(:warning, bold = true))
         end
         if cl !== nothing
-            cly = data_val_to_cell_row(Float64(cl), plot_inner, viewport)
-            for xx in plot_inner.x:right(plot_inner); set_char!(buf, xx, cly, '─', tstyle(:accent)); end
+            draw_limit_hline_buf!(buf, plot_inner, cl, viewport, _line_style(m, "cl"), tstyle(:accent))
         end
     end
 
@@ -4562,7 +4635,12 @@ function view(m::SPCWorkbenchModel, f::Frame)
         ov_h = max(6, min(ov.height - 2, 14))
         ov_rect = Rect(ov.x + 2, ov.y + 1, ov.width - 4, ov_h)
         tab_lbl = m.config_tab == :lines ? "Chart Lines" : (m.config_tab == :visual ? "Visual Preferences" : "WECO Rules")
-        cfg = Block(title="Config: $tab_lbl (Tab switch · ↑↓ · 1-N space/enter · Esc/c/v/o close)", border_style=tstyle(:accent, bold=true))
+        title_hints = if m.config_tab == :lines
+            "Tab · ↑↓ · 1-N toggle · ←/→ style · Esc/v close"
+        else
+            "Tab switch · ↑↓ · 1-N space/enter · Esc/c/v/o close"
+        end
+        cfg = Block(title="Config: $tab_lbl ($title_hints)", border_style=tstyle(:accent, bold=true))
         inner = render(cfg, ov_rect, buf)
         # clear
         for yy in inner.y:bottom(inner)
@@ -4580,7 +4658,8 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 on = get(m.show_chart_lines, key, true)
                 bub = on ? "●" : "○"
                 lbl = get(CHART_LINE_LABELS, key, key)
-                set_string!(buf, inner.x + 1, y, "$sel$idx $bub $lbl  $(on ? "[ON]" : "[OFF]")  (draw on chart)", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
+                st_lbl = get(LINE_STYLE_LABELS, _line_style(m, key), _line_style(m, key))
+                set_string!(buf, inner.x + 1, y, "$sel$idx $bub $lbl  $(on ? "[ON]" : "[OFF]")  $st_lbl", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
                 y += 1
             end
         elseif m.config_tab == :visual
@@ -4716,59 +4795,58 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 end
                 lz2 = ctx2.lz
                 if _line_on(m, "sigma1")
-                    for (z, dsh) in [(lz2.ucl1,2),(lz2.lcl1,2)]
-                        zy = map_to_dot_y(z, vp2, dh2)
-                        dashed_line!(c2, 0, zy, dw2-1, zy; dash=dsh)
+                    st = _line_style(m, "sigma1")
+                    for z in (lz2.ucl1, lz2.lcl1)
+                        draw_limit_hline_canvas!(c2, map_to_dot_y(z, vp2, dh2), dw2, st)
                     end
                 end
                 if _line_on(m, "sigma2")
-                    for (z, dsh) in [(lz2.ucl2,3),(lz2.lcl2,3)]
-                        zy = map_to_dot_y(z, vp2, dh2)
-                        dashed_line!(c2, 0, zy, dw2-1, zy; dash=dsh)
+                    st = _line_style(m, "sigma2")
+                    for z in (lz2.ucl2, lz2.lcl2)
+                        draw_limit_hline_canvas!(c2, map_to_dot_y(z, vp2, dh2), dw2, st)
                     end
                 end
                 if _line_on(m, "sigma3")
-                    dashed_line!(c2, 0, map_to_dot_y(lz2.ucl, vp2, dh2), dw2-1, map_to_dot_y(lz2.ucl, vp2, dh2); dash=4)
-                    dashed_line!(c2, 0, map_to_dot_y(lz2.lcl, vp2, dh2), dw2-1, map_to_dot_y(lz2.lcl, vp2, dh2); dash=4)
+                    st = _line_style(m, "sigma3")
+                    draw_limit_hline_canvas!(c2, map_to_dot_y(lz2.ucl, vp2, dh2), dw2, st)
+                    draw_limit_hline_canvas!(c2, map_to_dot_y(lz2.lcl, vp2, dh2), dw2, st)
                 end
                 if _line_on(m, "cl")
-                    line!(c2, 0, map_to_dot_y(lz2.cl, vp2, dh2), dw2-1, map_to_dot_y(lz2.cl, vp2, dh2))
+                    draw_limit_hline_canvas!(c2, map_to_dot_y(lz2.cl, vp2, dh2), dw2, _line_style(m, "cl"))
                 end
                 if _line_on(m, "specs")
+                    st = _line_style(m, "specs")
                     if ch2.usl !== nothing
-                        sy = map_to_dot_y(ch2.usl, vp2, dh2); dashed_line!(c2, 0, sy, dw2-1, sy; dash=2)
+                        draw_limit_hline_canvas!(c2, map_to_dot_y(ch2.usl, vp2, dh2), dw2, st)
                     end
                     if ch2.lsl !== nothing
-                        sy = map_to_dot_y(ch2.lsl, vp2, dh2); dashed_line!(c2, 0, sy, dw2-1, sy; dash=2)
+                        draw_limit_hline_canvas!(c2, map_to_dot_y(ch2.lsl, vp2, dh2), dw2, st)
                     end
                 end
                 render_canvas(c2, inn2, f)
-                # Colorized overlays for ch2 (same as active; gated)
-                function _draw_lim2!(r, v, st, stp=3)
-                    yy = data_val_to_cell_row(v, r, vp2)
-                    for xx in r.x:right(r)
-                        if (xx % stp) == 0; set_char!(buf, xx, yy, '-', st); end
-                    end
-                end
+                # Colorized overlays for ch2 (same as active; gated + style-aware)
                 if _line_on(m, "specs")
-                    if ch2.usl !== nothing; _draw_lim2!(inn2, ch2.usl, tstyle(:error, bold=true), 2); end
-                    if ch2.lsl !== nothing; _draw_lim2!(inn2, ch2.lsl, tstyle(:error, bold=true), 2); end
+                    st = _line_style(m, "specs")
+                    if ch2.usl !== nothing; draw_limit_hline_buf!(buf, inn2, ch2.usl, vp2, st, tstyle(:error, bold=true)); end
+                    if ch2.lsl !== nothing; draw_limit_hline_buf!(buf, inn2, ch2.lsl, vp2, st, tstyle(:error, bold=true)); end
                 end
                 if _line_on(m, "sigma3")
-                    _draw_lim2!(inn2, lz2.ucl, tstyle(:warning, bold=true), 4)
-                    _draw_lim2!(inn2, lz2.lcl, tstyle(:warning, bold=true), 4)
+                    st = _line_style(m, "sigma3")
+                    draw_limit_hline_buf!(buf, inn2, lz2.ucl, vp2, st, tstyle(:warning, bold=true))
+                    draw_limit_hline_buf!(buf, inn2, lz2.lcl, vp2, st, tstyle(:warning, bold=true))
                 end
                 if _line_on(m, "sigma2")
-                    _draw_lim2!(inn2, lz2.ucl2, tstyle(:secondary), 3)
-                    _draw_lim2!(inn2, lz2.lcl2, tstyle(:secondary), 3)
+                    st = _line_style(m, "sigma2")
+                    draw_limit_hline_buf!(buf, inn2, lz2.ucl2, vp2, st, tstyle(:secondary))
+                    draw_limit_hline_buf!(buf, inn2, lz2.lcl2, vp2, st, tstyle(:secondary))
                 end
                 if _line_on(m, "sigma1")
-                    _draw_lim2!(inn2, lz2.ucl1, tstyle(:text_dim), 2)
-                    _draw_lim2!(inn2, lz2.lcl1, tstyle(:text_dim), 2)
+                    st = _line_style(m, "sigma1")
+                    draw_limit_hline_buf!(buf, inn2, lz2.ucl1, vp2, st, tstyle(:text_dim))
+                    draw_limit_hline_buf!(buf, inn2, lz2.lcl1, vp2, st, tstyle(:text_dim))
                 end
                 if _line_on(m, "cl")
-                    cly2 = data_val_to_cell_row(lz2.cl, inn2, vp2)
-                    for xx in inn2.x:right(inn2); set_char!(buf, xx, cly2, '─', tstyle(:accent)); end
+                    draw_limit_hline_buf!(buf, inn2, lz2.cl, vp2, _line_style(m, "cl"), tstyle(:accent))
                 end
                 draw_series_connectors!(buf, inn2, plot2, vp2, m)
                 # markers for ch2 (OOC/OOS) on primary series
@@ -4825,44 +4903,58 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 end
                 lz3 = ctx3.lz
                 if _line_on(m, "sigma1")
-                    for (z, dsh) in [(lz3.ucl1,2),(lz3.lcl1,2)]
-                        zy = map_to_dot_y(z, vp3, dh3); dashed_line!(c3, 0, zy, dw3-1, zy; dash=dsh)
+                    st = _line_style(m, "sigma1")
+                    for z in (lz3.ucl1, lz3.lcl1)
+                        draw_limit_hline_canvas!(c3, map_to_dot_y(z, vp3, dh3), dw3, st)
                     end
                 end
                 if _line_on(m, "sigma2")
-                    for (z, dsh) in [(lz3.ucl2,3),(lz3.lcl2,3)]
-                        zy = map_to_dot_y(z, vp3, dh3); dashed_line!(c3, 0, zy, dw3-1, zy; dash=dsh)
+                    st = _line_style(m, "sigma2")
+                    for z in (lz3.ucl2, lz3.lcl2)
+                        draw_limit_hline_canvas!(c3, map_to_dot_y(z, vp3, dh3), dw3, st)
                     end
                 end
                 if _line_on(m, "sigma3")
-                    dashed_line!(c3, 0, map_to_dot_y(lz3.ucl, vp3, dh3), dw3-1, map_to_dot_y(lz3.ucl, vp3, dh3); dash=4)
-                    dashed_line!(c3, 0, map_to_dot_y(lz3.lcl, vp3, dh3), dw3-1, map_to_dot_y(lz3.lcl, vp3, dh3); dash=4)
+                    st = _line_style(m, "sigma3")
+                    draw_limit_hline_canvas!(c3, map_to_dot_y(lz3.ucl, vp3, dh3), dw3, st)
+                    draw_limit_hline_canvas!(c3, map_to_dot_y(lz3.lcl, vp3, dh3), dw3, st)
                 end
                 if _line_on(m, "cl")
-                    line!(c3, 0, map_to_dot_y(lz3.cl, vp3, dh3), dw3-1, map_to_dot_y(lz3.cl, vp3, dh3))
+                    draw_limit_hline_canvas!(c3, map_to_dot_y(lz3.cl, vp3, dh3), dw3, _line_style(m, "cl"))
                 end
                 if _line_on(m, "specs")
-                    if ch3.usl !== nothing; sy=map_to_dot_y(ch3.usl,vp3,dh3); dashed_line!(c3,0,sy,dw3-1,sy;dash=2); end
-                    if ch3.lsl !== nothing; sy=map_to_dot_y(ch3.lsl,vp3,dh3); dashed_line!(c3,0,sy,dw3-1,sy;dash=2); end
+                    st = _line_style(m, "specs")
+                    if ch3.usl !== nothing
+                        draw_limit_hline_canvas!(c3, map_to_dot_y(ch3.usl, vp3, dh3), dw3, st)
+                    end
+                    if ch3.lsl !== nothing
+                        draw_limit_hline_canvas!(c3, map_to_dot_y(ch3.lsl, vp3, dh3), dw3, st)
+                    end
                 end
                 render_canvas(c3, inn3, f)
-                # color overlays + markers for ch3 (gated)
-                function _d3!(r,v,st,stp=3); yy=data_val_to_cell_row(v,r,vp3); for xx in r.x:right(r); if (xx%stp)==0; set_char!(buf,xx,yy,'-',st); end; end; end
+                # color overlays + markers for ch3 (gated + style-aware)
                 if _line_on(m, "specs")
-                    if ch3.usl!==nothing; _d3!(inn3,ch3.usl,tstyle(:error,bold=true),2); end
-                    if ch3.lsl!==nothing; _d3!(inn3,ch3.lsl,tstyle(:error,bold=true),2); end
+                    st = _line_style(m, "specs")
+                    if ch3.usl !== nothing; draw_limit_hline_buf!(buf, inn3, ch3.usl, vp3, st, tstyle(:error, bold=true)); end
+                    if ch3.lsl !== nothing; draw_limit_hline_buf!(buf, inn3, ch3.lsl, vp3, st, tstyle(:error, bold=true)); end
                 end
                 if _line_on(m, "sigma3")
-                    _d3!(inn3,lz3.ucl,tstyle(:warning,bold=true),4); _d3!(inn3,lz3.lcl,tstyle(:warning,bold=true),4)
+                    st = _line_style(m, "sigma3")
+                    draw_limit_hline_buf!(buf, inn3, lz3.ucl, vp3, st, tstyle(:warning, bold=true))
+                    draw_limit_hline_buf!(buf, inn3, lz3.lcl, vp3, st, tstyle(:warning, bold=true))
                 end
                 if _line_on(m, "sigma2")
-                    _d3!(inn3,lz3.ucl2,tstyle(:secondary),3); _d3!(inn3,lz3.lcl2,tstyle(:secondary),3)
+                    st = _line_style(m, "sigma2")
+                    draw_limit_hline_buf!(buf, inn3, lz3.ucl2, vp3, st, tstyle(:secondary))
+                    draw_limit_hline_buf!(buf, inn3, lz3.lcl2, vp3, st, tstyle(:secondary))
                 end
                 if _line_on(m, "sigma1")
-                    _d3!(inn3,lz3.ucl1,tstyle(:text_dim),2); _d3!(inn3,lz3.lcl1,tstyle(:text_dim),2)
+                    st = _line_style(m, "sigma1")
+                    draw_limit_hline_buf!(buf, inn3, lz3.ucl1, vp3, st, tstyle(:text_dim))
+                    draw_limit_hline_buf!(buf, inn3, lz3.lcl1, vp3, st, tstyle(:text_dim))
                 end
                 if _line_on(m, "cl")
-                    cly3 = data_val_to_cell_row(lz3.cl, inn3, vp3); for xx in inn3.x:right(inn3); set_char!(buf,xx,cly3,'─',tstyle(:accent)); end
+                    draw_limit_hline_buf!(buf, inn3, lz3.cl, vp3, _line_style(m, "cl"), tstyle(:accent))
                 end
                 draw_series_connectors!(buf, inn3, plot3, vp3, m)
                 for i in vp3.x0:vp3.x1

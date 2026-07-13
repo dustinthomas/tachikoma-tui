@@ -417,6 +417,24 @@ function _bool_dict_from_json(v, defaults::Dict{String,Bool})::Union{Dict{String
     return out
 end
 
+"""Parse optional chart_line_styles object. Fail-closed on unknown styles / wrong types.
+Missing key → defaults. Unknown keys ignored. Partial known keys merge onto defaults."""
+function _style_dict_from_json(v, defaults::Dict{String,String})::Union{Dict{String,String},String}
+    v === nothing && return copy(defaults)
+    v isa AbstractDict || return "chart_line_styles must be an object"
+    out = copy(defaults)
+    allowed = Set(LINE_STYLE_KEYS)
+    for (k, rv) in v
+        ks = String(k)
+        haskey(out, ks) || continue          # ignore unknown keys
+        rv isa AbstractString || return "chart_line_styles.$ks must be a string"
+        s = String(rv)
+        s in allowed || return "chart_line_styles.$ks unknown style: $s"  # fail-closed
+        out[ks] = s
+    end
+    return out
+end
+
 function _tools_registry_from_json(v)::Union{Vector{ToolEntry},String}
     v === nothing && return ToolEntry[]
     v isa AbstractVector || return "tools must be an array"
@@ -722,6 +740,9 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
     show_lines = _bool_dict_from_json(get(d, "show_chart_lines", nothing), DEFAULT_CHART_LINES)
     show_lines isa String && return show_lines
 
+    chart_line_styles = _style_dict_from_json(get(d, "chart_line_styles", nothing), DEFAULT_CHART_LINE_STYLES)
+    chart_line_styles isa String && return chart_line_styles
+
     visual_prefs = _bool_dict_from_json(get(d, "visual_prefs", nothing), DEFAULT_VISUAL_PREFS)
     visual_prefs isa String && return visual_prefs
 
@@ -737,6 +758,7 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
         tools = tools,
         default_rules = default_rules,
         show_chart_lines = show_lines,
+        chart_line_styles = chart_line_styles,
         visual_prefs = visual_prefs,
         paused = paused,
         table = table,
@@ -778,6 +800,7 @@ function _apply_parsed!(m::SPCWorkbenchModel, parsed::NamedTuple)
     # m.enabled_rules is synced from active chart in _ensure_charts!.
     m.default_rules = parsed.default_rules
     m.show_chart_lines = parsed.show_chart_lines
+    m.chart_line_styles = parsed.chart_line_styles
     m.visual_prefs = parsed.visual_prefs
     m.paused = parsed.paused
     m.table = parsed.table  # mirror HTML apply; do NOT auto-rematerialize (KD-P2-18)
@@ -815,6 +838,7 @@ function workbench_to_dict(m::SPCWorkbenchModel)::Dict
         "tools" => tools,
         "default_rules" => Dict{String,Any}(k => v for (k, v) in m.default_rules),
         "show_chart_lines" => Dict{String,Any}(k => v for (k, v) in m.show_chart_lines),
+        "chart_line_styles" => Dict{String,Any}(k => v for (k, v) in m.chart_line_styles),
         "visual_prefs" => Dict{String,Any}(k => v for (k, v) in m.visual_prefs),
         "paused" => m.paused,
     )
