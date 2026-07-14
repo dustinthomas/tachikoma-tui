@@ -2479,6 +2479,8 @@ end
         @test occursin("sma", small_text)  # truncated " (sma" from " (small)" guard in 18-col width
         @test T.find_text(tb, "config open") === nothing   # tiny guard did not draw full config UI
         T.update!(m, T.KeyEvent('c'))
+        @test m.view_mode === :config
+        @test m.config_open == false
         tb2 = T.TestBackend(50,12); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1,1,50,12),[],[]))
         @test T.find_text(tb2, "WECO-") !== nothing
@@ -3035,7 +3037,8 @@ end
 
         # Configure: open config Lines tab (v or c+Tab), toggle sigma1 off
         T.update!(m, T.KeyEvent('v'))  # open chart-lines config
-        @test m.config_open == true
+        @test m.view_mode === :config
+        @test m.config_open == false
         @test m.config_tab == :lines
         # select ±1σ (item 2) and toggle
         T.update!(m, T.KeyEvent('2'))
@@ -3045,6 +3048,7 @@ end
         T.view(m, T.Frame(tb2.buf, T.Rect(1,1,90,24),[],[]))
         # still in config — close and check side
         T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
         @test m.config_open == false
         tb3 = T.TestBackend(90, 24); T.reset!(tb3.buf)
         T.view(m, T.Frame(tb3.buf, T.Rect(1,1,90,24),[],[]))
@@ -3062,14 +3066,21 @@ end
 
         # Toggle specs off via lines config key 5
         T.update!(m, T.KeyEvent('v'))
+        @test m.view_mode === :config && m.config_tab == :lines
         T.update!(m, T.KeyEvent('5'))
         @test m.show_chart_lines["specs"] == false
-        T.update!(m, T.KeyEvent('c'))  # close
-        @test m.config_open == false
-
-        # Tab switches WECO → Lines → Visual → WECO
+        # c no longer closes: jumps to Rules and stays on Config (KD-UC-14)
         T.update!(m, T.KeyEvent('c'))
-        @test m.config_open && m.config_tab == :weco
+        @test m.view_mode === :config
+        @test m.config_tab == :weco
+        @test m.config_open == false
+        T.update!(m, T.KeyEvent(:escape))  # Esc/q only close
+        @test m.view_mode === :dashboard
+
+        # Tab switches WECO → Lines → Visual → WECO (three tabs only)
+        T.update!(m, T.KeyEvent('c'))
+        @test m.view_mode === :config && m.config_tab == :weco
+        @test m.config_open == false
         T.update!(m, T.KeyEvent(:tab))
         @test m.config_tab == :lines
         T.update!(m, T.KeyEvent(:tab))
@@ -3077,6 +3088,7 @@ end
         T.update!(m, T.KeyEvent(:tab))
         @test m.config_tab == :weco
         T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
     end
 
     @testset "visual prefs panel + solid series line connector" begin
@@ -3092,20 +3104,24 @@ end
 
         # Key o opens Visual Preferences panel
         T.update!(m, T.KeyEvent('o'))
-        @test m.config_open == true
+        @test m.view_mode === :config
+        @test m.config_open == false
         @test m.config_tab == :visual
         tb = T.TestBackend(80, 18); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1,1,80,18),[],[]))
         full = join([string(T.row_text(tb, i)) for i in 1:18 if T.row_text(tb, i) !== nothing], "\n")
         @test occursin("Visual", full)
+        @test occursin("CONFIG", full) || occursin("Config", full)
         @test occursin("Solid", full) || occursin("solid", lowercase(full)) || occursin("series", lowercase(full))
         # no-bleed: normal dashboard header/side not mixed into config path
         @test T.find_text(tb, "Side Stats") === nothing
+        @test T.find_text(tb, "SPC Workbench [dashboard]") === nothing
 
         # Toggle solid_series off via 1
         T.update!(m, T.KeyEvent('1'))
         @test m.visual_prefs["solid_series"] == false
         T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
         @test m.config_open == false
 
         # With solid OFF: re-enable and compare connector density
@@ -3387,13 +3403,15 @@ end
         m = SPCWorkbenchModel(data = d, paused = true)
         x0_before = m.viewport.x0
         T.update!(m, T.KeyEvent('v'))
-        @test m.config_open == true
+        @test m.view_mode === :config
+        @test m.config_open == false
         @test m.config_tab == :lines
         tb = T.TestBackend(90, 24); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 24), [], []))
         full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
         @test occursin("Chart Lines", full)
-        @test occursin("←/→ style", full)  # cycle hints live in Block title only
+        @test occursin("CONFIG", full)
+        @test occursin("←/→ style", full)  # cycle hints in section strip / keys
         @test occursin("solid", full)
         @test occursin("dotted", full)
         @test occursin("long dash", full) || occursin("long_dash", full)
@@ -3422,7 +3440,78 @@ end
         @test occursin("solid", full2)  # style label remains after cycle-back
         @test occursin("←/→ style", full2)
         T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
         @test m.config_open == false
+    end
+
+    @testset "full-page Config: open-only c/v/o, Esc/q close, jumps, presets path" begin
+        d = generate_spc_workbench_data(16; seed = 11)
+        m = SPCWorkbenchModel(data = d, paused = true)
+        _ensure_charts!(m)
+
+        # Dashboard c opens Rules (open only — re-pressing c from dashboard re-opens)
+        T.update!(m, T.KeyEvent('c'))
+        @test m.view_mode === :config
+        @test m.config_tab == :weco
+        @test m.config_open == false
+        tb = T.TestBackend(90, 22); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 22), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:22 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("CONFIG", full)
+        @test occursin("WECO-", full)
+        @test T.find_text(tb, "Side Stats") === nothing
+        @test T.find_text(tb, "SPC Workbench [dashboard]") === nothing
+
+        # In-Config c/v/o jump sections and stay on Config (do NOT close)
+        T.update!(m, T.KeyEvent('v'))
+        @test m.view_mode === :config && m.config_tab == :lines
+        T.update!(m, T.KeyEvent('c'))  # from Lines → Rules; stays :config
+        @test m.view_mode === :config
+        @test m.config_tab == :weco
+        T.update!(m, T.KeyEvent('o'))
+        @test m.view_mode === :config && m.config_tab == :visual
+
+        # q closes without quit
+        T.update!(m, T.KeyEvent('q'))
+        @test m.view_mode === :dashboard
+        @test m.quit == false
+        @test m.config_open == false
+
+        # Esc closes without quit
+        T.update!(m, T.KeyEvent('c'))
+        @test m.view_mode === :config
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
+        @test m.quit == false
+
+        # Config e → :presets (PR2 transitional)
+        T.update!(m, T.KeyEvent('c'))
+        @test m.view_mode === :config
+        T.update!(m, T.KeyEvent('e'))
+        @test m.view_mode === :presets
+        @test m.config_open == false
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
+
+        # Dashboard s still clears specs when not in config
+        m.usl = 100.0
+        m.target = 50.0
+        m.lsl = 0.0
+        current_chart(m).usl = 100.0
+        current_chart(m).target = 50.0
+        current_chart(m).lsl = 0.0
+        T.update!(m, T.KeyEvent('s'))
+        @test m.view_mode === :dashboard
+        @test m.usl === nothing && m.target === nothing && m.lsl === nothing
+        @test occursin("specs cleared", m.last_event)
+
+        # Live gate: :config blocks advance
+        m.paused = false
+        current_chart(m).live_enabled = true
+        m.view_mode = :config
+        @test _live_may_advance(m) === false
+        m.view_mode = :dashboard
+        m.paused = true
     end
 
     @testset "graph presets: unified menu open + save popup + load selected" begin
@@ -3445,14 +3534,16 @@ end
         @test m.view_mode === :dashboard
         @test m.quit == false
 
-        # Config S/A also open the unified menu (not freeform apply-name prompts)
+        # Config S/A/e also open the unified presets menu (PR2 transitional path)
         T.update!(m, T.KeyEvent('v'))
-        @test m.config_open == true
+        @test m.view_mode === :config
+        @test m.config_open == false
         tb2 = T.TestBackend(100, 24); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 24), [], []))
         full_cfg = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
         @test occursin("e presets", full_cfg) || occursin("presets menu", full_cfg) ||
-              occursin("S presets", full_cfg) || occursin("preset menu", full_cfg)
+              occursin("S presets", full_cfg) || occursin("preset menu", full_cfg) ||
+              occursin("presets", lowercase(full_cfg))
         T.update!(m, T.KeyEvent('S'))
         @test m.config_open == false
         @test m.view_mode === :presets
@@ -5073,6 +5164,8 @@ end
         m.view_mode = :builder
         @test _live_may_advance(m) === false
         m.view_mode = :presets
+        @test _live_may_advance(m) === false
+        m.view_mode = :config
         @test _live_may_advance(m) === false
         m.view_mode = :dashboard
         @test _live_may_advance(m) === true

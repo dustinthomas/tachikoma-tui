@@ -1822,7 +1822,7 @@ end
     library_scroll::Int = 0
     library_area::Rect = Rect(0, 0, 0, 0)
     library_last_click::Union{Nothing, NamedTuple{(:idx, :tick), Tuple{Int, Int}}} = nothing
-    view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder, :tools, :table, :presets
+    view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder, :tools, :table, :presets, :config
     # Library / prompt SM (GC-PR2 / KD21)
     prompt_kind::Union{Nothing,Symbol} = nothing
     # :import_csv | :export_csv | :save_workbench | :load_workbench | :rename_chart
@@ -2530,6 +2530,28 @@ function _open_presets_menu!(m::SPCWorkbenchModel)
     return nothing
 end
 
+"""Open full-page Config (Rules / Lines / Visual). Forces config_open=false — no dual UI."""
+function _open_config!(m::SPCWorkbenchModel; tab::Symbol = :weco)
+    m.view_mode = :config
+    m.config_open = false          # always clear; never dual-path (KD-UC-7)
+    m.config_tab = tab
+    m.config_selected = 1
+    m.pending_delete = false
+    m.prompt_kind = nothing
+    m.prompt_buf = ""
+    m.last_event = "config open $(tab)"
+    return nothing
+end
+
+"""Jump section while already on Config (in-page c/v/o or Tab landing)."""
+function _config_set_tab!(m::SPCWorkbenchModel, tab::Symbol)
+    m.config_tab = tab
+    m.config_selected = 1
+    m.pending_delete = false
+    m.last_event = "config tab $(tab)"
+    return nothing
+end
+
 """Apply selected session preset and return to dashboard (visible graph)."""
 function _load_selected_preset!(m::SPCWorkbenchModel)::Bool
     n = length(m.graph_presets)
@@ -2546,19 +2568,31 @@ function _load_selected_preset!(m::SPCWorkbenchModel)::Bool
     return true
 end
 
-"""Config overlay keys — only invoked while `m.config_open` (extract for unified Config menu)."""
+"""Config full-page keys — only invoked while `view_mode == :config` (after prompt + pending_delete)."""
 function _handle_config_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
-    if evt.key == :escape || (evt.key == :char && (evt.char == 'c' || evt.char == 'C' ||
-            evt.char == 'v' || evt.char == 'V' || evt.char == 'o' || evt.char == 'O'))
+    # Close only with Esc/q (KD-UC-14) — never quit from Config
+    if evt.key == :escape || (evt.key == :char && evt.char == 'q')
+        m.view_mode = :dashboard
         m.config_open = false
+        m.pending_delete = false
         m.last_event = "config closed"
         return
     end
-    # Tab cycles WECO → Lines → Visual → WECO
+    # In-Config section jumps: c/v/o stay on Config (do NOT close)
+    if evt.key == :char && (evt.char == 'c' || evt.char == 'C')
+        _config_set_tab!(m, :weco)
+        return
+    elseif evt.key == :char && (evt.char == 'v' || evt.char == 'V')
+        _config_set_tab!(m, :lines)
+        return
+    elseif evt.key == :char && (evt.char == 'o' || evt.char == 'O')
+        _config_set_tab!(m, :visual)
+        return
+    end
+    # Tab cycles WECO → Lines → Visual → WECO (three tabs only in PR2)
     if evt.key == :tab || (evt.key == :char && evt.char == '\t')
-        m.config_tab = m.config_tab == :weco ? :lines : (m.config_tab == :lines ? :visual : :weco)
-        m.config_selected = 1
-        m.last_event = "config tab $(m.config_tab)"
+        next = m.config_tab == :weco ? :lines : (m.config_tab == :lines ? :visual : :weco)
+        _config_set_tab!(m, next)
         return
     end
     n_items = if m.config_tab == :lines
@@ -2593,7 +2627,7 @@ function _handle_config_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
         end
         return
     elseif evt.key == :left || evt.key == :right
-        # Lines tab: cycle style; other tabs no-op (still consume — no pan while config open)
+        # Lines tab: cycle style; other tabs no-op (still consume — no pan while Config open)
         if m.config_tab == :lines
             key = CHART_LINE_KEYS[clamp(m.config_selected, 1, length(CHART_LINE_KEYS))]
             _cycle_line_style!(m, key; dir = evt.key == :right ? 1 : -1)
@@ -2626,7 +2660,7 @@ function _handle_config_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
     elseif evt.key == :char && (evt.char == 'S' || evt.char == 's' ||
             evt.char == 'A' || evt.char == 'a' ||
             evt.char == 'e' || evt.char == 'E')
-        # Unified presets menu (save popup + load list live there)
+        # PR2 transitional: preserve path to presets page (Saved lands in PR3)
         _open_presets_menu!(m)
         return
     end
@@ -3500,11 +3534,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return
     end
 
-    # config / editing handling (slice 4+) — overlay only; still driven by config_open
-    if m.config_open
-        _handle_config_keys!(m, evt)
-        return
-    end
+    # Config is full-page view_mode=:config (after prompt + pending_delete) — no overlay branch
 
     if m.editing !== nothing
         if evt.key == :char && evt.char == 'q'
@@ -3800,7 +3830,13 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return  # absorb other keys — no fall-through
     end
 
-    # Unified Graph Presets menu — Esc/q close without quit
+    # Full-page Config (Rules/Lines/Visual) — after prompt + pending_delete (KD-UC-7/14)
+    if m.view_mode == :config
+        _handle_config_keys!(m, evt)
+        return
+    end
+
+    # Unified Graph Presets menu — Esc/q close without quit (PR2 bridge; folds into Config Saved in PR3)
     if m.view_mode == :presets
         _handle_presets_keys!(m, evt)
         return
@@ -3876,24 +3912,16 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.last_event = "reset"
             _sync_active_back!(m)
         elseif c == 'c' || c == 'C'
-            m.config_open = !m.config_open
-            m.config_tab = :weco
-            m.config_selected = 1
-            m.last_event = m.config_open ? "config open" : "config close"
+            # Open Config → Rules (open only — no toggle-off; KD-UC-14)
+            _open_config!(m; tab = :weco)
             return
         elseif c == 'v' || c == 'V'
-            # Open config directly on chart-lines tab
-            m.config_open = true
-            m.config_tab = :lines
-            m.config_selected = 1
-            m.last_event = "config lines"
+            # Open Config → Lines
+            _open_config!(m; tab = :lines)
             return
         elseif c == 'o' || c == 'O'
-            # Open Visual Preferences panel (extensible graph prefs)
-            m.config_open = true
-            m.config_tab = :visual
-            m.config_selected = 1
-            m.last_event = "config visual"
+            # Open Config → Visual
+            _open_config!(m; tab = :visual)
             return
         elseif c == 'u' || c == 'U'
             m.editing = :usl
@@ -3980,13 +4008,14 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         _update_library_mouse!(m, evt)
         return
     end
-    # Modal / tools / table / presets / prompt / pending_delete: keyboard-only (KD16)
+    # Modal / tools / table / presets / config / prompt / pending_delete: keyboard-only (KD16)
     if m.config_open || m.editing !== nothing ||
        m.view_mode == :help || m.view_mode == :keymap ||
        m.view_mode == :builder ||
        m.view_mode == :tools ||
        m.view_mode == :table ||
        m.view_mode == :presets ||
+       m.view_mode == :config ||
        m.prompt_kind !== nothing || m.pending_delete
         m.last_event = string(evt.action, " ", evt.button, " (modal)")
         m.hover_x = nothing
@@ -4434,7 +4463,7 @@ function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
         (:binds, [("r/z", "reset"), ("wheel", "zoom"), ("drag", "pan")]),
         (:section, "SPECS / WECO / CONFIG"),
         (:binds, [("u", "USL"), ("t", "Target"), ("l", "LSL"), ("s", "clear")]),
-        (:binds, [("1-8", "WECO"), ("c", "rules"), ("v", "lines"), ("o", "visual")]),
+        (:binds, [("1-8", "WECO"), ("c", "config"), ("v", "lines"), ("o", "visual")]),
         (:section, "MOUSE"),
         (:note, "hover tooltip · click select · drag pan"),
     ]
@@ -4467,6 +4496,18 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:binds, [("↑↓", "select"), ("↵", "filter+go"), ("a", "add"), ("n", "edit desc")]),
             (:binds, [("d", "delete"), ("Esc", "close"), ("q", "close")]),
             (:note, "registry ≠ chart tools — assign via builder"),
+        ]
+    elseif mode === :config
+        compact && return [
+            (:binds, [("↑↓", "select"), ("↵/sp", "toggle"), ("Tab", "section"), ("←→", "style")]),
+            (:binds, [("c/v/o", "jump"), ("e", "presets"), ("Esc", "close"), ("q", "close")]),
+        ]
+        return [
+            (:section, "CONFIG"),
+            (:binds, [("↑↓", "select"), ("↵/Space", "toggle"), ("1-N", "jump+toggle"), ("←/→", "style (lines)")]),
+            (:binds, [("Tab", "cycle section"), ("c", "rules"), ("v", "lines"), ("o", "visual")]),
+            (:binds, [("e", "presets menu"), ("s", "presets menu"), ("Esc", "close"), ("q", "close")]),
+            (:note, "toggles apply immediately · Esc/q only closes"),
         ]
     elseif mode === :presets
         compact && return [
@@ -4535,6 +4576,7 @@ end
 function _mode_keys_title(mode::Symbol)::String
     mode === :library && return "Keys  · Library"
     mode === :tools && return "Keys  · Tools"
+    mode === :config && return "Keys  · Config"
     mode === :presets && return "Keys  · Presets"
     mode === :table && return "Keys  · Table"
     mode === :builder && return "Keys  · Builder"
@@ -4816,11 +4858,12 @@ function view(m::SPCWorkbenchModel, f::Frame)
     end
 
     if area.width < 20 || area.height < 6
-        set_string!(buf, area.x, area.y, m.config_open ? "config open [c/Esc]" : "SPC Workbench (small)", tstyle(:text_dim))
+        set_string!(buf, area.x, area.y,
+            m.view_mode === :config ? "config open [Esc/q]" : "SPC Workbench (small)", tstyle(:text_dim))
         return
     end
 
-    # Mode overlays: help / keymap / library / builder / tools / table (dedicated pages; no dashboard bleed)
+    # Mode overlays: help / keymap / library / builder / tools / config / table (dedicated pages; no dashboard bleed)
     if m.view_mode == :help
         _render_help_page!(buf, area, m)
         return
@@ -4835,6 +4878,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
         return
     elseif m.view_mode == :tools
         _render_tools_page!(buf, area, m)
+        return
+    elseif m.view_mode == :config
+        _render_config_page!(buf, area, m)
         return
     elseif m.view_mode == :presets
         _render_presets_page!(buf, area, m)
@@ -4927,12 +4973,6 @@ function view(m::SPCWorkbenchModel, f::Frame)
             _render_message_panel!(buf, gcols[1], m)
             _render_keys_panel!(buf, gcols[2], m)
         end
-        return
-    end
-
-    if m.config_open
-        # overlay (slice 4) — no bleed; Tab cycles WECO → Lines → Visual
-        _render_config_overlay!(buf, plot_rect, m)
         return
     end
 
@@ -5519,65 +5559,74 @@ function _render_tools_page!(buf, area, m)
     end
 end
 
-# ── Config overlay body (plot_rect path while config_open) ───────────────
-"""Draw the config overlay into `plot_rect` (WECO / Lines / Visual tabs)."""
-function _render_config_overlay!(buf, plot_rect, m)
-    ov = plot_rect
-    ov_h = max(6, min(ov.height - 2, 14))
-    ov_rect = Rect(ov.x + 2, ov.y + 1, ov.width - 4, ov_h)
-    tab_lbl = m.config_tab == :lines ? "Chart Lines" : (m.config_tab == :visual ? "Visual Preferences" : "WECO Rules")
-    title_hints = if m.config_tab == :lines
-        "Tab · ↑↓ · 1-N toggle · ←/→ style · e/S presets menu · Esc/v close"
-    else
-        "Tab · ↑↓ · 1-N · e/S presets menu · Esc/c/v/o close"
-    end
-    cfg = Block(title="Config: $tab_lbl ($title_hints)", border_style=tstyle(:accent, bold=true))
-    inner = render(cfg, ov_rect, buf)
-    # clear
-    for yy in inner.y:bottom(inner)
-        for xx in inner.x:right(inner)
-            set_char!(buf, xx, yy, ' ', tstyle(:text))
-        end
-    end
-    y = inner.y + 1
+# ── Config full-page (view_mode=:config; Rules / Lines / Visual) ─────────
+"""Draw section body for Config page into `content` starting at row `y`. Returns next free y."""
+function _render_config_section_body!(buf, content, m; y::Int)
+    bot = bottom(content)
     if m.config_tab == :lines
         for (idx, key) in enumerate(CHART_LINE_KEYS)
-            if y > bottom(inner) - 1
-                break
-            end
+            y > bot && break
             sel = idx == m.config_selected ? "▶ " : "  "
             on = get(m.show_chart_lines, key, true)
             bub = on ? "●" : "○"
             lbl = get(CHART_LINE_LABELS, key, key)
             st_lbl = get(LINE_STYLE_LABELS, _line_style(m, key), _line_style(m, key))
-            set_string!(buf, inner.x + 1, y, "$sel$idx $bub $lbl  $(on ? "[ON]" : "[OFF]")  $st_lbl", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
+            set_string!(buf, content.x + 2, y, "$sel$idx $bub $lbl  $(on ? "[ON]" : "[OFF]")  $st_lbl",
+                idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
             y += 1
         end
     elseif m.config_tab == :visual
-        set_string!(buf, inner.x + 1, y, "Graph visual prefs (add more over time):", tstyle(:text_dim))
+        set_string!(buf, content.x + 2, y, "Graph visual prefs (add more over time):", tstyle(:text_dim))
         y += 1
         for (idx, key) in enumerate(VISUAL_PREF_KEYS)
-            if y > bottom(inner) - 1
-                break
-            end
+            y > bot && break
             sel = idx == m.config_selected ? "▶ " : "  "
             on = _pref_on(m, key)
             bub = on ? "●" : "○"
             lbl = get(VISUAL_PREF_LABELS, key, key)
-            set_string!(buf, inner.x + 1, y, "$sel$idx $bub $lbl  $(on ? "[ON]" : "[OFF]")", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
+            set_string!(buf, content.x + 2, y, "$sel$idx $bub $lbl  $(on ? "[ON]" : "[OFF]")",
+                idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
             y += 1
         end
     else
         for (idx, rid) in enumerate(["WECO-1","WECO-2","WECO-3","WECO-4","WECO-5","WECO-6","WECO-7","WECO-8"])
-            if y > bottom(inner) - 1
-                break
-            end
+            y > bot && break
             sel = idx == m.config_selected ? "▶ " : "  "
             on = get(m.enabled_rules, rid, false) ? "[ON]" : "[OFF]"
             desc = get(WECO_RULE_DESCS, idx, "")
-            set_string!(buf, inner.x + 1, y, "$sel$rid $on $desc", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
+            set_string!(buf, content.x + 2, y, "$sel$rid $on $desc",
+                idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
             y += 1
         end
+    end
+    return y
+end
+
+"""Full-page Config: Rules / Lines / Visual via `_split_mode_chrome` (no plot overlay)."""
+function _render_config_page!(buf, area, m)
+    content, chrome = _split_mode_chrome(area)
+    set_string!(buf, content.x + 1, content.y,
+        "CONFIG  ·  Esc/q → dashboard", tstyle(:title, bold=true))
+    y = content.y + 1
+    # Section strip — current tab bold; PR2 has three tabs only (no Saved)
+    rules_sty = m.config_tab == :weco ? tstyle(:accent, bold=true) : tstyle(:text_dim)
+    lines_sty = m.config_tab == :lines ? tstyle(:accent, bold=true) : tstyle(:text_dim)
+    visual_sty = m.config_tab == :visual ? tstyle(:accent, bold=true) : tstyle(:text_dim)
+    set_string!(buf, content.x + 2, y, "[Rules]", rules_sty)
+    set_string!(buf, content.x + 12, y, "[Lines]", lines_sty)
+    set_string!(buf, content.x + 22, y, "[Visual]", visual_sty)
+    set_string!(buf, content.x + 34, y, "Tab cycle · ←/→ style · e presets menu", tstyle(:text_dim))
+    y += 1
+    tab_lbl = m.config_tab == :lines ? "Chart Lines" :
+              (m.config_tab == :visual ? "Visual Preferences" : "WECO Rules")
+    chname = isempty(m.charts) ? "—" : current_chart(m).name
+    set_string!(buf, content.x + 2, y,
+        "Section: $tab_lbl   ·  Active chart: $chname   ·  toggles apply immediately",
+        tstyle(:text_dim))
+    y += 2
+    _render_config_section_body!(buf, content, m; y = y)
+    if chrome !== nothing
+        _render_mode_chrome!(buf, chrome, m; mode=:config)
     end
     return nothing
 end
@@ -5785,7 +5834,7 @@ function _live_may_advance(m::SPCWorkbenchModel)::Bool
     m.config_open && return false
     m.prompt_kind !== nothing && return false
     m.pending_delete && return false
-    m.view_mode in (:help, :keymap, :library, :builder, :tools, :table, :presets) && return false
+    m.view_mode in (:help, :keymap, :library, :builder, :tools, :table, :presets, :config) && return false
     ch = current_chart(m)
     (isempty(ch.data.values) || !ch.live_enabled) && return false
     return true
