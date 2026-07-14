@@ -1231,6 +1231,9 @@ function _clear_load_ephemerals!(m::SPCWorkbenchModel)
     # Path chrome caches rebuilt on next merge (KD-SE-25)
     empty!(m.preset_path_missing)
     empty!(m.preset_index_summary)
+    # WECO explain popup (KD-WB-11) — session-ephemeral; not in JSON
+    _clear_weco_explain!(m)
+    _clear_plot_click_memory!(m)
     return nothing
 end
 

@@ -839,6 +839,132 @@ function weco_detect(
     out
 end
 
+# ── WECO explain helpers (pure; bubble/popup content assembly) ───────────
+
+const WECO_POPUP_MAX_BODY = 5
+
+# Short names (1-based index) — Config Rules section + side panel + explain
+const WECO_RULE_DESCS = [
+    "1 point beyond 3σ",
+    "2 of 3 consec. zone A (>2σ)",
+    "4 of 5 consec. zone B (>1σ)",
+    "8 in a row same side CL",
+    "6 in a row trending",
+    "14 alternating",
+    "15 inside 1σ",
+    "8 outside 1σ",
+]
+
+"""How: one-liners for WECO-1…8 explain popup (concise calculation copy)."""
+const WECO_EXPLAIN_HOW = Dict{String,String}(
+    "WECO-1" => "Flag if point is beyond CL ± 3σ (control limits).",
+    "WECO-2" => "Flag if ≥2 of 3 points end in zone A (±2σ), same side.",
+    "WECO-3" => "Flag if ≥4 of 5 points end in zone B (±1σ), same side.",
+    "WECO-4" => "Flag if 8 consecutive points sit on one side of CL.",
+    "WECO-5" => "Flag if 6 consecutive points strictly trend up or down.",
+    "WECO-6" => "Flag if 14 consecutive points alternate up/down.",
+    "WECO-7" => "Flag if 15 consecutive points stay inside ±1σ.",
+    "WECO-8" => "Flag if 8 consecutive points stay outside ±1σ.",
+)
+
+"""
+    weco_rules_at_index(viols, index) -> Vector{String}
+
+Unique rule ids (e.g. \"WECO-1\") that list `index` in `viols`, stable
+rule-number order WECO-1…8.
+"""
+function weco_rules_at_index(
+    viols::AbstractVector{WECOViolation},
+    index::Int,
+)::Vector{String}
+    index < 1 && return String[]
+    rules = String[]
+    seen = Set{String}()
+    for v in viols
+        v.index == index || continue
+        v.rule in seen && continue
+        push!(seen, v.rule)
+        push!(rules, v.rule)
+    end
+    sort!(rules; by = r -> something(tryparse(Int, replace(r, "WECO-" => "")), 99))
+    return rules
+end
+
+"""First violation matching `rule` and `index`, or `nothing`."""
+function _first_viol(
+    viols::AbstractVector{WECOViolation},
+    rule::String,
+    index::Int,
+)::Union{Nothing,WECOViolation}
+    for v in viols
+        v.rule == rule && v.index == index && return v
+    end
+    return nothing
+end
+
+"""
+    weco_explain_content(mode; rule, enabled, viols, index, rules_at) -> NamedTuple{(:title,:lines)}
+
+Pure popup content assembly (KD-WB-14).
+
+- `mode === :rule`  — bubble click or single-rule open; title has WECO-N and ON/OFF;
+  body has short desc, `How:`, optional `At:` only if a viol exists at `index` for `rule`.
+- `mode === :point` — multi/single from point open; title `WECO · #i`; ≤4 rule lines;
+  `+N more` if more than 4 rules_at.
+
+`lines` length is capped at `WECO_POPUP_MAX_BODY` (5). No separate State: body line
+(state lives in the title only for `:rule`).
+"""
+function weco_explain_content(
+    mode::Symbol;
+    rule::String = "WECO-1",
+    enabled::Bool = true,
+    viols::AbstractVector{WECOViolation} = WECOViolation[],
+    index::Union{Nothing,Int} = nothing,
+    rules_at::Vector{String} = String[],
+)::NamedTuple{(:title, :lines), Tuple{String, Vector{String}}}
+    state = enabled ? "ON" : "OFF"
+    if mode === :point
+        i = something(index, 0)
+        title = "WECO · #$i"
+        lines = String[]
+        shown = rules_at[1:min(end, 4)]
+        for r in shown
+            ridx = something(tryparse(Int, replace(r, "WECO-" => "")), 1)
+            short = (1 <= ridx <= length(WECO_RULE_DESCS)) ? WECO_RULE_DESCS[ridx] : r
+            v = _first_viol(viols, r, i)
+            if v !== nothing
+                push!(lines, _side_trunc("$r: $(v.msg)", 80))
+            else
+                push!(lines, "$r: $short")
+            end
+        end
+        extra = length(rules_at) - length(shown)
+        extra > 0 && push!(lines, "+$extra more")
+        length(lines) > WECO_POPUP_MAX_BODY && (lines = lines[1:WECO_POPUP_MAX_BODY])
+        return (; title, lines)
+    else
+        # :rule (default for unknown modes)
+        ridx = something(tryparse(Int, replace(rule, "WECO-" => "")), 1)
+        short = (1 <= ridx <= length(WECO_RULE_DESCS)) ? WECO_RULE_DESCS[ridx] : rule
+        title = "$rule · $state"
+        lines = String[
+            short,
+            "How: " * get(WECO_EXPLAIN_HOW, rule, ""),
+        ]
+        v = if index !== nothing
+            _first_viol(viols, rule, index)
+        else
+            nothing
+        end
+        if v !== nothing
+            push!(lines, "At: " * v.msg)
+        end
+        length(lines) > WECO_POPUP_MAX_BODY && (lines = lines[1:WECO_POPUP_MAX_BODY])
+        return (; title, lines)
+    end
+end
+
 """
     compute_limits_and_zones(values; corrected=true, sigma_method=:std)
 
@@ -1546,7 +1672,9 @@ end
 
 # Exports (for direct include in tests; later slices will re-export via TachikomaTUI)
 export WECOViolation, WorkbenchData, LimitsAndZones, CapabilityResult
-export weco_detect, compute_limits_and_zones, compute_capability, generate_spc_workbench_data
+export weco_detect, weco_rules_at_index, weco_explain_content
+export WECO_RULE_DESCS, WECO_EXPLAIN_HOW, WECO_POPUP_MAX_BODY
+export compute_limits_and_zones, compute_capability, generate_spc_workbench_data
 export detect_oos, cpk_band, cpk_color_for_band
 export compute_fit_y_range, y_extras_from_limits, fit_viewport_y!, auto_fit_viewport_y!
 export ChartRenderContext, resolve_chart_render_context, point_status, auto_limits
@@ -1802,6 +1930,28 @@ function data_val_to_cell_row(v::Float64, pa::Rect, vp::Viewport)
     clamp(y, pa.y, bottom(pa))
 end
 
+"""
+    map_sample_to_aligned_dot(i, v, plot_inner, vp) -> (dx, dy)
+
+Braille-dot coords for sample `i` at value `v`, **aligned to the same terminal
+cell** as Unicode markers (`data_index_to_cell` / `data_val_to_cell_row`).
+
+`map_to_dot_x`/`map_to_dot_y` use independent rounding over `(dot_w-1)`/`(dot_h-1)`
+and often land one cell away from the marker, leaving a residual braille speck
+beside ●/◆/✕ after `set_char!` overwrites only the marker cell.
+"""
+function map_sample_to_aligned_dot(i::Int, v::Real, plot_inner::Rect, vp::Viewport)
+    cell_x = data_index_to_cell(i, plot_inner, vp)
+    cell_y = data_val_to_cell_row(Float64(v), plot_inner, vp)
+    # Canvas cell (1-based) under render_canvas: terminal = plot_inner.x + cx - 1
+    cx0 = clamp(cell_x - plot_inner.x, 0, max(0, plot_inner.width - 1))
+    cy0 = clamp(cell_y - plot_inner.y, 0, max(0, plot_inner.height - 1))
+    # Left sub-column + mid braille row so the speck sits under the marker glyph
+    dx = cx0 * 2
+    dy = cy0 * 4 + 1
+    return (dx, dy)
+end
+
 function draw_hover_tooltip!(buf, plot_inner::Rect, i::Int, v::Float64, is_viol::Bool, vp::Viewport; usl=nothing, target=nothing, lsl=nothing)
     # simple version for workbench (extended in later slices)
     hx = data_index_to_cell(i, plot_inner, vp)
@@ -1865,6 +2015,15 @@ end
 
 # ── Model (slice 2+) ────────────────────────────────────────────────────
 
+"""WECO chip row geometry for hit-testing (PR3) and hover paint (PR2)."""
+@kwdef mutable struct WecoBubbleGeom
+    y::Int = 0
+    x0::Int = 0          # first chip left edge
+    step::Int = 1        # 1 bare, 3 boxed
+    n::Int = 8
+    boxed::Bool = false
+end
+
 @kwdef mutable struct SPCWorkbenchModel <: Model
     quit::Bool = false
     tick::Int = 0
@@ -1877,6 +2036,19 @@ end
     paused::Bool = false
     plot_area::Rect = Rect(0, 0, 0, 0)
     side_area::Rect = Rect(0, 0, 0, 0)
+    # Layout side_rect (outer Block); side_area is Block inner. Paint-owned each view.
+    side_outer::Rect = Rect(0, 0, 0, 0)
+    # WECO chip geom (inner coords); cleared each side paint, set when bubbles draw.
+    weco_bubble_geom::Union{Nothing, WecoBubbleGeom} = nothing
+    # WECO explain popup flags (session-ephemeral; PR3a sets flags, PR3b paints)
+    weco_explain_open::Bool = false
+    weco_explain_mode::Symbol = :rule       # :rule | :point
+    weco_explain_rule::Union{Nothing, String} = nothing
+    weco_explain_index::Union{Nothing, Int} = nothing
+    weco_popup_rect::Rect = Rect(0, 0, 0, 0)
+    # Plot dblclick state (PR4 / KD-WB-10): press arm + last completed click-release
+    plot_press::Union{Nothing, NamedTuple{(:idx, :x, :y, :tick, :dragged), Tuple{Int, Int, Int, Int, Bool}}} = nothing
+    plot_last_click::Union{Nothing, NamedTuple{(:idx, :tick), Tuple{Int, Int}}} = nothing
     drag_start::Union{Nothing, NamedTuple{(:x, :y, :vp), Tuple{Int, Int, Viewport}}} = nothing
     last_event::String = ""
     live_max::Int = 200
@@ -3428,6 +3600,8 @@ end
 
 """Open full-page Config (Rules / Lines / Visual / Saved)."""
 function _open_config!(m::SPCWorkbenchModel; tab::Symbol = :weco)
+    _clear_weco_explain!(m)
+    _clear_plot_click_memory!(m)
     m.view_mode = :config
     m.config_tab = tab
     m.config_selected = 1
@@ -4113,6 +4287,12 @@ end
 
 """Max tick delta (via re-view) between presses to count as double-click (KD-P2-19)."""
 const LIBRARY_DBLCLICK_TICKS = 8
+
+"""Max tick delta between click-releases for plot WECO explain dblclick (KD-WB-10)."""
+const WECO_DBLCLICK_TICKS = 8
+
+"""Cell slop: |dx| or |dy| ≥ this marks plot press as dragged (no dblclick)."""
+const WECO_DRAG_SLOP = 1
 
 """Rows available for the chart list (title/summary reserved; footer is mode chrome)."""
 function _library_visible_capacity(m::SPCWorkbenchModel)::Int
@@ -4846,6 +5026,14 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return
     end
 
+    # WECO explain open: Esc / q / Q close popup only (KD-WB-5) — before quit
+    if m.weco_explain_open &&
+       (evt.key == :escape || (evt.key == :char && (evt.char == 'q' || evt.char == 'Q')))
+        _clear_weco_explain!(m)
+        m.last_event = "weco explain closed"
+        return
+    end
+
     # Global quit (dashboard only — modes already returned above)
     if evt.key == :escape || (evt.key == :char && evt.char == 'q')
         m.quit = true
@@ -4856,6 +5044,8 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         c = evt.char
         if c == 'm' || c == 'M'
             # Open chart library (GC-PR2)
+            _clear_weco_explain!(m)
+            _clear_plot_click_memory!(m)
             m.view_mode = :library
             m.library_selected = clamp(m.active, 1, max(1, length(m.charts)))
             m.pending_delete = false
@@ -4866,6 +5056,8 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             return
         elseif c == 'x' || c == 'X'
             # Open tools registry (P2-PR4 / KD-P2-6)
+            _clear_weco_explain!(m)
+            _clear_plot_click_memory!(m)
             m.view_mode = :tools
             ntools = length(m.tools)
             m.tools_selected = ntools >= 1 ? clamp(m.tools_selected, 1, ntools) : 1
@@ -4881,6 +5073,8 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             return
         elseif c == 'd' || c == 'D'
             # SharedTable grid (P2-PR7 / KD-P2-20) — dashboard only; library/tools keep d=delete
+            _clear_weco_explain!(m)
+            _clear_plot_click_memory!(m)
             m.view_mode = :table
             m.table_editing = false
             m.table_buf = ""
@@ -4888,6 +5082,10 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.pending_delete = false
             _sync_table_scroll!(m)
             m.last_event = "table open"
+            return
+        elseif c == 'w' || c == 'W'
+            # WECO explain open/toggle (dashboard only; library/config use w for I/O)
+            _weco_key_toggle!(m)
             return
         elseif _handle_filter_char!(m, c)
             # GC-PR4: f cycles filter prompt; F clears all (dashboard)
@@ -4964,15 +5162,21 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.last_event = m.keys_panel_expanded ? "keys expanded" : "keys collapsed"
             return
         elseif c == 'h' || c == 'H'
+            _clear_weco_explain!(m)
+            _clear_plot_click_memory!(m)
             m.view_mode = :help
             m.last_event = "help open"
             return
         elseif c == 'k' || c == 'K'
+            _clear_weco_explain!(m)
+            _clear_plot_click_memory!(m)
             m.view_mode = :keymap
             m.last_event = "keymap open"
             return
         elseif c == 'b' || c == 'B'
             # PR6: open chart builder for active chart (manual limits + mapping)
+            _clear_weco_explain!(m)
+            _clear_plot_click_memory!(m)
             m.view_mode = :builder
             m.builder_selected = 1
             m.builder_editing = false
@@ -5003,6 +5207,215 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             clamp_viewport!(m.viewport, n)
         end
     end
+end
+
+"""Return 1-based WECO chip index under (x,y), or nothing if miss / no geom."""
+function _weco_bubble_at(m::SPCWorkbenchModel, x::Int, y::Int)::Union{Nothing,Int}
+    g = m.weco_bubble_geom
+    g === nothing && return nothing
+    y != g.y && return nothing
+    for i in 1:g.n
+        x_left = g.x0 + (i - 1) * g.step
+        x_right = x_left + g.step - 1
+        if x_left <= x <= x_right
+            return i
+        end
+    end
+    return nothing
+end
+
+"""Clear WECO explain flags (and popup rect). Paint-owned geom is left alone."""
+function _clear_weco_explain!(m::SPCWorkbenchModel)
+    m.weco_explain_open = false
+    m.weco_explain_mode = :rule
+    m.weco_explain_rule = nothing
+    m.weco_explain_index = nothing
+    m.weco_popup_rect = Rect(0, 0, 0, 0)
+    return nothing
+end
+
+"""Clear plot dblclick memory (mode enter / load / zoom). Not used on Esc/q explain close."""
+function _clear_plot_click_memory!(m::SPCWorkbenchModel)
+    m.plot_press = nothing
+    m.plot_last_click = nothing
+    return nothing
+end
+
+"""Open :point WECO explain at index if any enabled rules fire; return true if opened."""
+function _weco_try_open_point_explain!(m::SPCWorkbenchModel, idx::Int)::Bool
+    _ensure_charts!(m)
+    (isempty(m.charts) || length(m.data.values) == 0) && return false
+    ch = current_chart(m)
+    ctx = resolve_chart_render_context(ch; sigma_method = :mr)
+    viols = weco_detect(ch.data.values, ctx.lz.cl, ctx.lz.sigma; enabled_rules = ch.enabled_rules)
+    rules_at = weco_rules_at_index(viols, idx)
+    isempty(rules_at) && return false
+    m.weco_explain_open = true
+    m.weco_explain_mode = :point
+    m.weco_explain_rule = rules_at[1]
+    m.weco_explain_index = idx
+    m.last_event = "weco explain #$idx"
+    return true
+end
+
+"""First enabled WECO rule id on chart (WECO-1…8 order), else \"WECO-1\"."""
+function _weco_first_enabled_rule(ch)::String
+    for k in 1:8
+        rid = "WECO-$k"
+        get(ch.enabled_rules, rid, false) && return rid
+    end
+    return "WECO-1"
+end
+
+"""Dashboard hotkey w/W: toggle close, or open with hover/first-enabled selection (KD-WB-3)."""
+function _weco_key_toggle!(m::SPCWorkbenchModel)
+    if m.weco_explain_open
+        _clear_weco_explain!(m)
+        m.last_event = "weco explain closed"
+        return nothing
+    end
+    _ensure_charts!(m)
+    if isempty(m.charts) || length(m.data.values) == 0
+        m.last_event = "nothing to explain"
+        return nothing
+    end
+    ch = current_chart(m)
+    ctx = resolve_chart_render_context(ch; sigma_method = :mr)
+    # Match side-panel detect (data.values) for index alignment with hover
+    viols = weco_detect(ch.data.values, ctx.lz.cl, ctx.lz.sigma; enabled_rules = ch.enabled_rules)
+    rules_at = m.hovered === nothing ? String[] : weco_rules_at_index(viols, m.hovered)
+    if length(rules_at) >= 2
+        m.weco_explain_open = true
+        m.weco_explain_mode = :point
+        m.weco_explain_rule = rules_at[1]
+        m.weco_explain_index = m.hovered
+        m.last_event = "weco explain #$(m.hovered)"
+    elseif length(rules_at) == 1
+        rid = rules_at[1]
+        m.weco_explain_open = true
+        m.weco_explain_mode = :rule
+        m.weco_explain_rule = rid
+        m.weco_explain_index = m.hovered
+        m.last_event = "weco explain $rid"
+    else
+        rid = if m.weco_explain_rule !== nothing
+            m.weco_explain_rule
+        else
+            _weco_first_enabled_rule(ch)
+        end
+        m.weco_explain_open = true
+        m.weco_explain_mode = :rule
+        m.weco_explain_rule = rid
+        m.weco_explain_index = m.hovered  # may be nothing
+        m.last_event = "weco explain $rid"
+    end
+    return nothing
+end
+
+"""Open/retarget/toggle rule explain from bubble press (does not touch drag/hover)."""
+function _weco_bubble_press!(m::SPCWorkbenchModel, k::Int)
+    rid = "WECO-$k"
+    if m.weco_explain_open && m.weco_explain_mode === :rule && m.weco_explain_rule == rid
+        _clear_weco_explain!(m)
+        m.last_event = "weco explain closed"
+    else
+        m.weco_explain_open = true
+        m.weco_explain_mode = :rule
+        m.weco_explain_rule = rid
+        m.weco_explain_index = m.hovered  # may be nothing
+        m.last_event = "weco explain $rid"
+    end
+    return nothing
+end
+
+"""
+Paint WECO explain popup right-anchored over primary `plot_area` (KD-WB-2/14).
+Sets `m.weco_popup_rect` for hit-test; skips when plot too narrow (<16).
+Re-queries viols each paint so At-line stays live.
+"""
+function _render_weco_explain_popup!(buf, plot_area::Rect, m::SPCWorkbenchModel)
+    if !m.weco_explain_open
+        m.weco_popup_rect = Rect(0, 0, 0, 0)
+        return nothing
+    end
+    if plot_area.width < 16 || plot_area.height < 4
+        m.weco_popup_rect = Rect(0, 0, 0, 0)
+        m.last_event = isempty(m.last_event) ? "popup too narrow" : m.last_event
+        return nothing
+    end
+    _ensure_charts!(m)
+    isempty(m.charts) && return nothing
+    ch = current_chart(m)
+    ctx = resolve_chart_render_context(ch; sigma_method = :mr)
+    viols = weco_detect(ch.data.values, ctx.lz.cl, ctx.lz.sigma; enabled_rules = ch.enabled_rules)
+    rule = something(m.weco_explain_rule, "WECO-1")
+    enabled = get(ch.enabled_rules, rule, false)
+    mode = m.weco_explain_mode  # :rule | :point
+    rules_at = m.weco_explain_index === nothing ? String[] :
+        weco_rules_at_index(viols, m.weco_explain_index)
+    content = weco_explain_content(mode; rule, enabled, viols,
+        index = m.weco_explain_index, rules_at)
+
+    avail = max(0, plot_area.width - 1)
+    avail < 16 && (m.weco_popup_rect = Rect(0, 0, 0, 0); return nothing)
+    desired = 36
+    box_w = clamp(desired, min(28, max(12, avail)), min(48, avail))
+    body_maxw = max(4, box_w - 2)
+    body_lines = [_side_trunc(ln, body_maxw) for ln in content.lines]
+    box_h = 2 + length(body_lines)   # Block borders + body (no footer row)
+    box_h = min(box_h, plot_area.height)
+    box_h < 3 && (m.weco_popup_rect = Rect(0, 0, 0, 0); return nothing)
+
+    # Right edge at side_outer.x - 2 (gap ≥1 before side), else side_area.x - 2
+    anchor_right = if m.side_outer.width > 0
+        m.side_outer.x - 2
+    elseif m.side_area.width > 0
+        m.side_area.x - 2
+    else
+        plot_area.x + plot_area.width - 1
+    end
+    box_x = anchor_right - box_w + 1
+    box_x = max(plot_area.x, box_x)
+    # If still overflows plot right, clamp left and shrink width
+    if box_x + box_w - 1 > plot_area.x + plot_area.width - 1
+        box_w = max(12, plot_area.x + plot_area.width - box_x)
+        body_maxw = max(4, box_w - 2)
+        body_lines = [_side_trunc(ln, body_maxw) for ln in content.lines]
+        box_h = min(2 + length(body_lines), plot_area.height)
+    end
+
+    # Vertical: prefer centered on bubble row; clamp into plot_area
+    cy = m.weco_bubble_geom !== nothing ? m.weco_bubble_geom.y :
+        (plot_area.y + plot_area.height ÷ 2)
+    box_y = cy - box_h ÷ 2
+    max_y = plot_area.y + plot_area.height - box_h
+    box_y = clamp(box_y, plot_area.y, max(plot_area.y, max_y))
+
+    rect = Rect(box_x, box_y, box_w, box_h)
+    m.weco_popup_rect = rect
+    _clear_rect!(buf, rect)
+    title_s = _side_trunc(content.title, max(4, box_w - 2))
+    inner = render(
+        Block(
+            title = title_s,
+            border_style = tstyle(:border),
+            title_style = tstyle(:accent, bold = true),
+        ),
+        rect,
+        buf,
+    )
+    if inner.width < 2 || inner.height < 1
+        return nothing
+    end
+    maxw = max(1, inner.width)
+    bot = bottom(inner)
+    y = inner.y
+    for ln in body_lines
+        y > bot && break
+        set_string!(buf, inner.x, y, _side_trunc(ln, maxw), tstyle(:text))
+        y += 1
+    end
+    return nothing
 end
 
 function update!(m::SPCWorkbenchModel, evt::MouseEvent)
@@ -5036,15 +5449,68 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     end
 
     pa = m.plot_area
-    if !contains(pa, evt.x, evt.y)
+    so = m.side_outer
+    pop = m.weco_popup_rect
+    in_plot = pa.width > 0 && pa.height > 0 && contains(pa, evt.x, evt.y)
+    in_side = so.width > 0 && so.height > 0 && contains(so, evt.x, evt.y)
+    in_popup = m.weco_explain_open && pop.width > 0 && pop.height > 0 &&
+               contains(pop, evt.x, evt.y)
+
+    # Plot dblclick: drag slop vs original press cell, even if pointer left plot (KD-WB-10)
+    if evt.action == mouse_drag && m.plot_press !== nothing && evt.button == mouse_left
+        pp = m.plot_press
+        if !pp.dragged &&
+           (abs(evt.x - pp.x) >= WECO_DRAG_SLOP || abs(evt.y - pp.y) >= WECO_DRAG_SLOP)
+            m.plot_press = (idx = pp.idx, x = pp.x, y = pp.y, tick = pp.tick, dragged = true)
+            m.plot_last_click = nothing
+        end
+    end
+
+    # §5.1 priority: popup rect (consume press; preserve hover; no pan) — PR3a flags only
+    if in_popup
         if evt.action == mouse_release
             m.drag_start = nothing
+            m.plot_press = nothing  # cancel plot click if released over popup
         end
-        m.hover_x = nothing
-        m.hovered = nothing
+        # move/press/drag: preserve hovered; do not arm drag
         return
     end
 
+    # §5.2: side_outer — preserve hover; bubble press opens explain flags (no drag)
+    if in_side
+        if evt.action == mouse_press && evt.button == mouse_left
+            k = _weco_bubble_at(m, evt.x, evt.y)
+            if k !== nothing
+                _weco_bubble_press!(m, k)
+                # do NOT set drag_start; do NOT clear hover
+                return
+            end
+            # non-bubble side: preserve hover; no explain change (v1)
+            return
+        end
+        if evt.action == mouse_release
+            m.drag_start = nothing
+            m.plot_press = nothing  # cancel plot click if released over side
+        end
+        # move / drag over side: preserve hovered; ignore pan
+        return
+    end
+
+    # Outside plot ∪ side_outer: clear hover; chrome press closes explain (KD-WB-4/11/13)
+    if !in_plot
+        if evt.action == mouse_release
+            m.drag_start = nothing
+            m.plot_press = nothing  # cancel plot click if released outside
+        end
+        m.hover_x = nothing
+        m.hovered = nothing
+        if evt.action == mouse_press && m.weco_explain_open
+            _clear_weco_explain!(m)
+        end
+        return
+    end
+
+    # §5.3 plot_area: pan / select / hover + dblclick → :point explain (KD-WB-10/13)
     n = length(m.data.values)
     if n <= 0
         return
@@ -5054,6 +5520,7 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         factor = (evt.button == mouse_scroll_up) ? 0.75 : 1.33
         cx = cell_to_data_index(evt.x, pa, m.viewport)
         zoom_viewport_around!(m.viewport, cx, factor, n)
+        m.plot_last_click = nothing  # avoid false dblclick after zoom
         return
     end
 
@@ -5061,10 +5528,20 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         m.drag_start = (x = evt.x, y = evt.y, vp = deepcopy(m.viewport))
         m.hovered = compute_hovered_index(evt.x, evt.y, pa, m.data, m.viewport)
         m.selected = nothing
+        # Arm plot_press for release-without-drag dblclick; do not open/close explain
+        press_idx = m.hovered
+        if press_idx === nothing
+            press_idx = nearest_point_index_to_cell_x(evt.x, pa, m.viewport, m.data)
+        end
+        if press_idx === nothing
+            press_idx = 0
+        end
+        m.plot_press = (idx = press_idx, x = evt.x, y = evt.y, tick = m.tick, dragged = false)
         return
     end
 
     if evt.action == mouse_drag && m.drag_start !== nothing && evt.button == mouse_left
+        # plot_press.dragged already updated globally above when slop exceeded
         dx = evt.x - m.drag_start.x
         pan_viewport!(m.viewport, -dx, pa.width, n)
         m.drag_start = (x = evt.x, y = evt.y, vp = deepcopy(m.viewport))
@@ -5073,11 +5550,34 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
 
     if evt.action == mouse_release
         m.drag_start = nothing
+        pp = m.plot_press
+        m.plot_press = nothing
         m.selected = nearest_point_index_to_cell_x(evt.x, pa, m.viewport, m.data)
         if m.selected !== nothing
             m.hovered = m.selected
         end
         m.hover_x = nothing
+        # Dragged or no press arm → select only (existing path)
+        if pp === nothing || pp.dragged
+            return
+        end
+        # Release without drag: select + optional dblclick open :point for viol index
+        sel = m.selected
+        if sel !== nothing &&
+           m.plot_last_click !== nothing &&
+           m.plot_last_click.idx == sel &&
+           (m.tick - m.plot_last_click.tick) <= WECO_DBLCLICK_TICKS
+            if _weco_try_open_point_explain!(m, sel)
+                m.plot_last_click = nothing
+            else
+                # Non-viol double-click: select only; refresh single-click memory
+                m.plot_last_click = (idx = sel, tick = m.tick)
+            end
+        elseif sel !== nothing
+            m.plot_last_click = (idx = sel, tick = m.tick)
+        else
+            m.plot_last_click = nothing
+        end
         return
     end
 
@@ -5235,8 +5735,8 @@ function _render_series_canvas!(
             continue
         end
         v = Float64(values[i])
-        dx = map_to_dot_x(i, viewport, dw)
-        dy = map_to_dot_y(v, viewport, dh)
+        # Align sample braille to marker cell so ●/◆/✕ fully replace residual dots
+        dx, dy = map_sample_to_aligned_dot(i, v, plot_inner, viewport)
         set_point!(c, dx, dy)
         if prev !== nothing && _pref_on(m, "braille_series")
             line!(c, prev[1], prev[2], dx, dy)
@@ -5467,9 +5967,11 @@ function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
         (:binds, [("r/z", "reset"), ("wheel", "zoom"), ("drag", "pan")]),
         (:section, "SPECS / WECO / CONFIG"),
         (:binds, [("u", "USL"), ("t", "Target"), ("l", "LSL"), ("s", "clear")]),
-        (:binds, [("1-8", "WECO"), ("c", "config"), ("v", "lines"), ("o", "visual")]),
+        (:binds, [("1-8", "WECO"), ("w", "explain"), ("c", "config"), ("v", "lines")]),
+        (:binds, [("o", "visual")]),
         (:section, "MOUSE"),
-        (:note, "hover tooltip · click select · drag pan"),
+        (:note, "hover · click select · drag pan · dblclick viol = explain"),
+        (:note, "WECO chip = explain · dash w=explain · lib w=save · config w=Save As"),
     ]
 end
 
@@ -5546,8 +6048,8 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:binds, [("q", "close")]),
             (:section, "DASHBOARD"),
             (:binds, [("p", "pause"), ("g", "live"), ("[ ]", "chart"), ("←→", "pan")]),
-            (:binds, [("r/z", "reset"), ("u/t/l", "specs"), ("1-8", "WECO"), ("s", "clear specs")]),
-            (:binds, [("c", "config"), ("v", "lines"), ("o", "visual"), ("e", "saved cfg")]),
+            (:binds, [("r/z", "reset"), ("u/t/l", "specs"), ("1-8", "WECO"), ("w", "explain")]),
+            (:binds, [("s", "clear specs"), ("c", "config"), ("v", "lines"), ("o", "visual")]),
             (:section, "CONFIG (full page · c/v/o/e)"),
             (:note, "Rules · Lines · Visual · Saved · Tab cycle · Esc/q close only"),
             (:note, "Saved: s/w Save As · S Save · W Load · p/P path · ↵ load → dash"),
@@ -5558,7 +6060,7 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:note, "library: a/c/n/d · i/e/w/W session I/O · f/F filters"),
             (:note, "table: arrows · Enter edit · r rematerialize (never auto)"),
             (:note, "tools: master ids; assign on charts via builder"),
-            (:note, "mode-gated: dash s=clear specs · Config s=Save As · lib w≠config w"),
+            (:note, "mode-gated: dash w=explain · lib w=save · config w=Save As · builder 1-8 no popup"),
         ]
     elseif mode === :keymap
         return [
@@ -5566,13 +6068,13 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:binds, [("m", "library"), ("x", "tools"), ("d", "table"), ("b", "builder")]),
             (:binds, [("p", "pause"), ("g", "live"), ("f/F", "filter"), ("e", "saved cfg")]),
             (:binds, [("c", "config"), ("v", "lines"), ("o", "visual"), ("s", "clear specs")]),
-            (:binds, [("u/t/l", "specs"), ("1-8", "WECO"), ("h", "help"), ("k", "keymap")]),
+            (:binds, [("u/t/l", "specs"), ("1-8", "WECO"), ("w", "explain"), ("h", "help")]),
             (:binds, [("[ ]", "chart"), ("←→", "pan"), ("r/z", "reset"), ("q/Esc", "quit/close")]),
             (:section, "CONFIG"),
             (:note, "full page: Tab · s/w Save As · S Save · W Load · p/P path · load → dash"),
             (:section, "MOUSE"),
             (:binds, [("move", "hover"), ("drag", "pan"), ("click", "select"), ("wheel", "zoom")]),
-            (:note, "library: click select · double-click activate"),
+            (:note, "plot: dblclick viol = explain · library: 2× activate · chip = explain"),
         ]
     else
         return [(:note, "no keys for mode")]
@@ -6073,8 +6575,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 for i in vp2.x0 : vp2.x1
                     (i<1 || i>n2) && continue
                     v = plot2[i]
-                    dx = map_to_dot_x(i, vp2, dw2)
-                    dy = map_to_dot_y(v, vp2, dh2)
+                    dx, dy = map_sample_to_aligned_dot(i, v, inn2, vp2)
                     set_point!(c2, dx, dy)
                     if prev2 !== nothing && _pref_on(m, "braille_series")
                         line!(c2, prev2[1], prev2[2], dx, dy)
@@ -6181,8 +6682,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 for i in vp3.x0:vp3.x1
                     (i<1 || i>n3) && continue
                     v = plot3[i]
-                    dx = map_to_dot_x(i, vp3, dw3)
-                    dy = map_to_dot_y(v, vp3, dh3)
+                    dx, dy = map_sample_to_aligned_dot(i, v, inn3, vp3)
                     set_point!(c3, dx, dy)
                     if prev3 !== nothing && _pref_on(m, "braille_series")
                         line!(c3, prev3[1], prev3[2], dx, dy)
@@ -6265,6 +6765,13 @@ function view(m::SPCWorkbenchModel, f::Frame)
     # side
     _render_side_stats!(buf, side_rect, m)
 
+    # WECO explain popup: after plot + side, before Message|Keys chrome (KD-WB-2)
+    if m.weco_explain_open && m.view_mode == :dashboard
+        _render_weco_explain_popup!(buf, m.plot_area, m)
+    else
+        m.weco_popup_rect = Rect(0, 0, 0, 0)
+    end
+
     # Bottom panels: Message center (left) + Keys (right) — no status footer strip
     gcols = split_layout(Layout(Horizontal, [Fill(), Fill()]), gauge_row)
     if length(gcols) >= 2
@@ -6312,14 +6819,18 @@ function _side_line_keys(nb::Int; drop_sigma12::Bool)::Vector{Symbol}
 end
 
 """
-Render dashboard Side Stats into `side_rect` (outer). Sets `m.side_area` to Block inner.
+Render dashboard Side Stats into `side_rect` (outer). Sets `m.side_area` to Block inner
+and `m.side_outer` to the layout outer rect. Clears `m.weco_bubble_geom` each paint
+(re-set when WECO bubbles draw).
 `variant`: `:full` | `:empty_filter`
 """
 function _render_side_stats!(buf, side_rect, m::SPCWorkbenchModel;
                              variant::Symbol = :full)
     side_block = Block(title="Side Stats (chart $(m.active)/$(max(1,length(m.charts))) • dashboard)", border_style=tstyle(:border))
     side_inner = render(side_block, side_rect, buf)
+    m.side_outer = side_rect
     m.side_area = side_inner
+    m.weco_bubble_geom = nothing  # paint-owned; set in _side_sec_weco! when bubbles draw
     if variant === :empty_filter
         _side_sec_charts_empty!(buf, side_inner, m)
         return
@@ -6529,6 +7040,12 @@ end
 """
 ▸ WECO — bubbles → [digits if rem≥2 after bubbles] → Viols: N → msgs.
 Optional blank gap before chrome when tall (D5).
+
+KD-WB-1 hybrid chrome: bare ●/○ under compact_h11 / same-row / maxw<24;
+boxed `[●]` chips when tall, not same-row, and maxw≥24. Digits at glyph_x
+(chip center when boxed). Hover multi-highlight: rules in
+`weco_rules_at_index(viols, hovered)` paint center glyph `:warning bold`.
+Records `m.weco_bubble_geom` for PR3 hit-testing.
 """
 function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
                          m::SPCWorkbenchModel, act_ctx, act_ch, side_inner;
@@ -6559,29 +7076,60 @@ function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     end
     rem < 1 && return y
 
-    # 1) Bubble row
+    # Hoist viols once for Viols list + hover multi-highlight (KD-WB-1)
+    side_viols = weco_detect(act_ch.data.values, act_ctx.lz.cl, act_ctx.lz.sigma;
+                             enabled_rules = act_ch.enabled_rules)
+    hover_rules = if (hi = m.hovered) !== nothing
+        weco_rules_at_index(side_viols, hi)
+    else
+        String[]
+    end
+    hover_set = Set(hover_rules)
+
+    # KD-WB-1: boxed only when tall, not same-row, and width allows 8×3 chips
+    boxed = !compact_h11 && !same_row_label && maxw >= 24
+    step = boxed ? 3 : 1
+
+    # 1) Bubble row (bare or boxed hybrid)
     bx0 = same_row_label ? x + 5 : x
     if same_row_label
         set_string!(buf, x, y, "WECO ", tstyle(:text_dim))
     end
+    bubble_y = y
+    side_right = right(side_inner)
     for i in 1:8
         rid = "WECO-$i"
         on = get(act_ch.enabled_rules, rid, false)
-        bx = bx0 + i - 1
-        if bx <= right(side_inner)
-            set_char!(buf, bx, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
+        x_left = bx0 + (i - 1) * step
+        glyph_x = boxed ? x_left + 1 : x_left
+        # Hover fire overrides enable style on center glyph only
+        if rid in hover_set
+            sty = tstyle(:warning, bold=true)
+        else
+            sty = on ? tstyle(:success) : tstyle(:text_dim)
+        end
+        glyph = on ? '●' : '○'
+        if boxed
+            x_left <= side_right && set_char!(buf, x_left, y, '[', tstyle(:text_dim))
+            glyph_x <= side_right && set_char!(buf, glyph_x, y, glyph, sty)
+            (x_left + 2) <= side_right && set_char!(buf, x_left + 2, y, ']', tstyle(:text_dim))
+        else
+            glyph_x <= side_right && set_char!(buf, glyph_x, y, glyph, sty)
         end
     end
+    m.weco_bubble_geom = WecoBubbleGeom(y=bubble_y, x0=bx0, step=step, n=8, boxed=boxed)
     y += 1
     rem = bot - y + 1
 
     # 2) Digit row only if rem ≥ 2 after bubbles (need digits + Viols); else skip (D6).
     #    KD-SS-17 H≤11: always omit digits (D6 ≺ D17 Viols) — keep bubble + Viols tight.
+    #    digit_x = glyph_x (center of boxed chip); NOT x_left of brackets.
     if rem >= 2 && !compact_h11
         for i in 1:8
-            nx = bx0 + i - 1
-            if nx <= right(side_inner)
-                set_char!(buf, nx, y, Char('0' + i), tstyle(:text_dim))
+            x_left = bx0 + (i - 1) * step
+            digit_x = boxed ? x_left + 1 : x_left
+            if digit_x <= side_right
+                set_char!(buf, digit_x, y, Char('0' + i), tstyle(:text_dim))
             end
         end
         y += 1
@@ -6589,8 +7137,6 @@ function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     end
 
     # 3) Viols: N (D17) — prefer over digits when only one row left after bubbles
-    side_viols = weco_detect(act_ch.data.values, act_ctx.lz.cl, act_ctx.lz.sigma;
-                             enabled_rules = act_ch.enabled_rules)
     show_viols = _side_viol_msgs_by_index(side_viols; n = SIDE_VIOL_MSG_MAX)
     nv = length(side_viols)
     if y <= bot
@@ -7247,17 +7793,7 @@ end
 # Enhance footer with current chart + mode
 # (footer render already at end of view; header now mentions keys)
 
-# WECO rule descs (Config Rules section + side panel)
-const WECO_RULE_DESCS = [
-    "1 point beyond 3σ",
-    "2 of 3 consec. zone A (>2σ)",
-    "4 of 5 consec. zone B (>1σ)",
-    "8 in a row same side CL",
-    "6 in a row trending",
-    "14 alternating",
-    "15 inside 1σ",
-    "8 outside 1σ",
-]
+# WECO_RULE_DESCS / WECO_EXPLAIN_HOW live in pure section (near weco_detect)
 
 # ── Live (slice 6) — PR3: per-chart live_enabled + modal gates ─────────
 

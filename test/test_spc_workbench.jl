@@ -490,13 +490,124 @@ include("../src/spc_workbench_io.jl")
 
     @testset "Rule enable/disable and combined violations" begin
         cl, s = 0.0, 1.0
-        vals = [3.5, 2.2, 2.1]  # W1 at1 + W2 at3
+        vals = [3.5, 2.2, 2.1]  # W1 at1 + W2 at3 (different indices — enable-filter only)
         vboth = weco_detect(vals, cl, s; enabled_rules=Dict("WECO-1"=>true, "WECO-2"=>true))
         @test any(x->x.rule=="WECO-1" && x.index==1, vboth)
         @test any(x->x.rule=="WECO-2" && x.index==3, vboth)
 
         v1only = weco_detect(vals, cl, s; enabled_rules=Dict("WECO-1"=>true, "WECO-2"=>false))
         @test length(v1only) == 1 && v1only[1].rule == "WECO-1"
+    end
+
+    @testset "weco_rules_at_index + explain content (pure)" begin
+        # empty / out-of-range index
+        @test isempty(weco_rules_at_index(WECOViolation[], 1))
+        @test isempty(weco_rules_at_index(WECOViolation[], 0))
+        @test isempty(weco_rules_at_index(WECOViolation[], -1))
+
+        # single rule at index
+        viols_one = [WECOViolation("WECO-1", 3, "#3 = 3.5 beyond +3σ (UCL 3.0)")]
+        @test weco_rules_at_index(viols_one, 3) == ["WECO-1"]
+        @test isempty(weco_rules_at_index(viols_one, 1))
+        @test isempty(weco_rules_at_index(viols_one, 2))
+
+        # synthetic same-index multi fixture (NOT the L491 different-index series)
+        viols_multi = [
+            WECOViolation("WECO-1", 8, "#8 = 3.5 beyond +3σ (UCL 3.0)"),
+            WECOViolation("WECO-4", 8, "8 in a row ending #8 above CL"),
+            WECOViolation("WECO-2", 3, "2 of 3 ending #3 in zone A (+ 2σ side)"),
+        ]
+        @test weco_rules_at_index(viols_multi, 8) == ["WECO-1", "WECO-4"]
+        @test weco_rules_at_index(viols_multi, 3) == ["WECO-2"]
+        @test isempty(weco_rules_at_index(viols_multi, 1))
+
+        # stable order by rule number even if insertion is unsorted
+        viols_unsorted = [
+            WECOViolation("WECO-5", 2, "msg5"),
+            WECOViolation("WECO-1", 2, "msg1"),
+            WECOViolation("WECO-3", 2, "msg3"),
+        ]
+        @test weco_rules_at_index(viols_unsorted, 2) == ["WECO-1", "WECO-3", "WECO-5"]
+
+        # dedupe same rule+index
+        viols_dup = [
+            WECOViolation("WECO-1", 4, "first"),
+            WECOViolation("WECO-1", 4, "second"),
+        ]
+        @test weco_rules_at_index(viols_dup, 4) == ["WECO-1"]
+
+        # _first_viol
+        @test _first_viol(viols_multi, "WECO-1", 8) !== nothing
+        @test _first_viol(viols_multi, "WECO-1", 8).msg == "#8 = 3.5 beyond +3σ (UCL 3.0)"
+        @test _first_viol(viols_multi, "WECO-4", 3) === nothing
+        @test _first_viol(viols_dup, "WECO-1", 4).msg == "first"
+
+        # WECO_EXPLAIN_HOW catalog: all 8 keys, non-empty
+        @test length(WECO_EXPLAIN_HOW) == 8
+        for k in 1:8
+            rid = "WECO-$k"
+            @test haskey(WECO_EXPLAIN_HOW, rid)
+            @test !isempty(WECO_EXPLAIN_HOW[rid])
+        end
+        @test length(WECO_RULE_DESCS) == 8
+        @test WECO_POPUP_MAX_BODY == 5
+
+        # :rule content contracts — ON + At when viol present
+        c_on = weco_explain_content(:rule; rule="WECO-1", enabled=true,
+            viols=viols_multi, index=8)
+        @test occursin("WECO-1", c_on.title)
+        @test occursin("ON", c_on.title)
+        @test any(l -> startswith(l, "How:"), c_on.lines)
+        @test any(l -> startswith(l, "At:"), c_on.lines)
+        @test length(c_on.lines) <= WECO_POPUP_MAX_BODY
+        @test c_on.lines[1] == WECO_RULE_DESCS[1]
+        @test occursin(WECO_EXPLAIN_HOW["WECO-1"], c_on.lines[2])
+
+        # :rule OFF — title OFF; How present; no At without matching viol
+        c_off = weco_explain_content(:rule; rule="WECO-6", enabled=false,
+            viols=viols_multi, index=8)
+        @test occursin("WECO-6", c_off.title)
+        @test occursin("OFF", c_off.title)
+        @test any(l -> startswith(l, "How:"), c_off.lines)
+        @test !any(l -> startswith(l, "At:"), c_off.lines)
+        @test !any(l -> occursin("State:", l), c_off.lines)
+
+        # :rule with index but no viol for that rule — no At
+        c_noat = weco_explain_content(:rule; rule="WECO-1", enabled=true,
+            viols=viols_multi, index=3)
+        @test !any(l -> startswith(l, "At:"), c_noat.lines)
+
+        # :rule with index=nothing — no At
+        c_ni = weco_explain_content(:rule; rule="WECO-1", enabled=true,
+            viols=viols_multi, index=nothing)
+        @test !any(l -> startswith(l, "At:"), c_ni.lines)
+
+        # :point content contracts
+        rules8 = weco_rules_at_index(viols_multi, 8)
+        c_pt = weco_explain_content(:point; index=8, viols=viols_multi, rules_at=rules8)
+        @test c_pt.title == "WECO · #8"
+        @test length(c_pt.lines) <= WECO_POPUP_MAX_BODY
+        @test any(l -> occursin("WECO-1", l), c_pt.lines)
+        @test any(l -> occursin("WECO-4", l), c_pt.lines)
+        @test any(l -> occursin("beyond +3σ", l) || occursin("above CL", l), c_pt.lines)
+
+        # :point with >4 rules → ≤4 rule lines + "+N more"
+        rules_many = ["WECO-1", "WECO-2", "WECO-3", "WECO-4", "WECO-5", "WECO-6"]
+        viols_many = [WECOViolation(r, 9, "msg $r") for r in rules_many]
+        c_more = weco_explain_content(:point; index=9, viols=viols_many, rules_at=rules_many)
+        @test c_more.title == "WECO · #9"
+        @test length(c_more.lines) <= WECO_POPUP_MAX_BODY
+        @test count(l -> startswith(l, "WECO-"), c_more.lines) <= 4
+        @test any(l -> occursin("more", l), c_more.lines)
+        @test any(l -> l == "+2 more", c_more.lines)
+
+        # :point without viol msgs falls back to short desc
+        c_fb = weco_explain_content(:point; index=1, viols=WECOViolation[],
+            rules_at=["WECO-2"])
+        @test c_fb.title == "WECO · #1"
+        @test length(c_fb.lines) == 1
+        @test occursin("WECO-2", c_fb.lines[1])
+        @test occursin(WECO_RULE_DESCS[2], c_fb.lines[1])
     end
 
     @testset "compute_limits_and_zones" begin
@@ -2642,6 +2753,59 @@ end
         @test found_yellow_diamond
     end
 
+    @testset "no residual braille dots beside point markers" begin
+        # Regression: map_to_dot_* and data_index_to_cell can land sample braille in a
+        # neighboring cell from ●/◆/✕, leaving a tiny braille speck beside the marker.
+        # With connectors + limit lines off, markers must fully replace sample canvas dots.
+        is_braille(c::Char) = let u = UInt32(c); 0x2800 <= u <= 0x28FF; end
+        marker_syms = Set(['●', '◆', '✕'])
+        # Non-flat series so Y mapping mismatch is likely if coords diverge
+        vals = Float64[0.0, 1.5, 0.5, 2.0, 1.0, 3.0, 0.2, 2.5, 1.2, 0.8, 2.2, 1.8]
+        d = WorkbenchData(values=vals, cl=1.4, sigma=0.8)
+        m = SPCWorkbenchModel(data=d, paused=true,
+            viewport=Viewport(x0=1, x1=length(vals), ylo=-0.5, yhi=3.5))
+        m.visual_prefs["solid_series"] = false
+        m.visual_prefs["solid_stroke"] = false
+        m.visual_prefs["braille_series"] = false
+        m.visual_prefs["secondary_canvas"] = false
+        for k in keys(m.show_chart_lines)
+            m.show_chart_lines[k] = false
+        end
+        m.usl = nothing
+        m.lsl = nothing
+        _ensure_charts!(m)
+        ch = m.charts[1]
+        ch.usl = nothing
+        ch.lsl = nothing
+
+        tb = T.TestBackend(70, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 70, 18), [], []))
+        pa = m.plot_area
+        @test pa.width > 4 && pa.height > 3
+
+        marker_cells = Tuple{Int,Int}[]
+        residual_braille = Tuple{Int,Int,Char}[]
+        for y in pa.y:T.bottom(pa), x in pa.x:T.right(pa)
+            c = T.char_at(tb, x, y)
+            if c in marker_syms
+                push!(marker_cells, (x, y))
+            elseif is_braille(c)
+                push!(residual_braille, (x, y, c))
+            end
+        end
+        @test length(marker_cells) >= 3
+        # Sample braille must not survive beside/under markers when connectors are off
+        @test isempty(residual_braille)
+        # Also: no braille in 4-neighbors of any marker (belt-and-suspenders)
+        for (mx, my) in marker_cells
+            for (dx, dy) in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                nx, ny = mx + dx, my + dy
+                (nx < pa.x || nx > T.right(pa) || ny < pa.y || ny > T.bottom(pa)) && continue
+                @test !is_braille(T.char_at(tb, nx, ny))
+            end
+        end
+    end
+
     @testset "mouse hover/click/drag/zoom drive state + re-render shows updates (no crash)" begin
         d = generate_spc_workbench_data(18; seed=55)
         n = length(d.values)
@@ -3163,6 +3327,521 @@ end
             end
             @test viol_y !== nothing
         end
+    end
+
+    @testset "side stats WECO: H=36 boxed chips + digit_x=glyph_x + side_outer/geom (PR2)" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        tb = T.TestBackend(100, 36); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 36), [], []))
+        @test m.side_area.width > 0
+        @test m.side_outer.width > 0
+        @test m.side_outer.x <= m.side_area.x
+        @test m.side_outer.width >= m.side_area.width
+        @test m.weco_bubble_geom !== nothing
+        g = m.weco_bubble_geom
+        @test g.boxed === true
+        @test g.step == 3
+        @test g.n == 8
+        @test g.y > 0 && g.x0 > 0
+
+        found = _side_weco_bubbles(tb, m)
+        @test found !== nothing
+        if found !== nothing
+            # Brackets present on bubble row around glyphs
+            row_chars = Char[T.char_at(tb, x, found.y) for x in found.sa.x:T.right(found.sa)]
+            @test count(==('['), row_chars) >= 8
+            @test count(==(']'), row_chars) >= 8
+            # Glyph xs match geom centers: x0 + (i-1)*3 + 1
+            bubble_xs = Int[]
+            for x in found.sa.x:T.right(found.sa)
+                ch = T.char_at(tb, x, found.y)
+                (ch == '●' || ch == '○') && push!(bubble_xs, x)
+            end
+            @test length(bubble_xs) == 8
+            expected_xs = [g.x0 + (i - 1) * g.step + 1 for i in 1:8]
+            @test bubble_xs == expected_xs
+            # Digits under glyph centers (digit_x = glyph_x)
+            num_y = found.y + 1
+            digits = Char[T.char_at(tb, x, num_y) for x in bubble_xs]
+            @test digits == ['1', '2', '3', '4', '5', '6', '7', '8']
+            # Default no-hover: ON success, OFF dim (not warning)
+            @test m.hovered === nothing
+            @test T.style_at(tb, bubble_xs[1], found.y) == T.tstyle(:success)
+            @test T.style_at(tb, bubble_xs[6], found.y) == T.tstyle(:text_dim)
+        end
+    end
+
+    @testset "side stats WECO: hover multi-highlight + leave clears warning (PR2)" begin
+        # Same-index multi: 8 points above CL with last beyond +3σ → WECO-1 + WECO-4 at #8
+        cl, s = 0.0, 1.0
+        vals = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 3.5]
+        d = WorkbenchData(values = vals, cl = cl, sigma = s)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        ch = current_chart(m)
+        ch.limits_mode = :manual
+        ch.manual_cl = cl
+        ch.manual_ucl = cl + 3 * s
+        ch.manual_lcl = cl - 3 * s
+        ch.enabled_rules = Dict(
+            "WECO-1" => true, "WECO-2" => true, "WECO-3" => true, "WECO-4" => true,
+            "WECO-5" => true, "WECO-6" => false, "WECO-7" => false, "WECO-8" => false,
+        )
+        m.enabled_rules = ch.enabled_rules
+        ctx = resolve_chart_render_context(ch)
+        viols = weco_detect(ch.data.values, ctx.lz.cl, ctx.lz.sigma; enabled_rules=ch.enabled_rules)
+        rules8 = weco_rules_at_index(viols, 8)
+        @test "WECO-1" in rules8
+        @test "WECO-4" in rules8
+        @test length(rules8) >= 2
+
+        # No hover: enable-only styles
+        tb0 = T.TestBackend(100, 36); T.reset!(tb0.buf)
+        T.view(m, T.Frame(tb0.buf, T.Rect(1, 1, 100, 36), [], []))
+        found0 = _side_weco_bubbles(tb0, m)
+        @test found0 !== nothing
+        warn_sty = T.tstyle(:warning, bold=true)
+        if found0 !== nothing
+            bubble_xs0 = Int[]
+            for x in found0.sa.x:T.right(found0.sa)
+                ch = T.char_at(tb0, x, found0.y)
+                (ch == '●' || ch == '○') && push!(bubble_xs0, x)
+            end
+            @test length(bubble_xs0) == 8
+            @test T.style_at(tb0, bubble_xs0[1], found0.y) == T.tstyle(:success)
+            @test T.style_at(tb0, bubble_xs0[4], found0.y) == T.tstyle(:success)
+            @test T.style_at(tb0, bubble_xs0[1], found0.y) != warn_sty
+        end
+
+        # Hover multi-rule OOC at index 8 → ≥2 chips warning bold
+        m.hovered = 8
+        tb1 = T.TestBackend(100, 36); T.reset!(tb1.buf)
+        T.view(m, T.Frame(tb1.buf, T.Rect(1, 1, 100, 36), [], []))
+        found1 = _side_weco_bubbles(tb1, m)
+        @test found1 !== nothing
+        if found1 !== nothing
+            bubble_xs1 = Int[]
+            for x in found1.sa.x:T.right(found1.sa)
+                ch = T.char_at(tb1, x, found1.y)
+                (ch == '●' || ch == '○') && push!(bubble_xs1, x)
+            end
+            @test length(bubble_xs1) == 8
+            n_warn = count(i -> T.style_at(tb1, bubble_xs1[i], found1.y) == warn_sty, 1:8)
+            @test n_warn >= 2
+            # Rules that fire at 8 (at least 1 and 4) are warning
+            for rid in rules8
+                k = parse(Int, replace(rid, "WECO-" => ""))
+                @test T.style_at(tb1, bubble_xs1[k], found1.y) == warn_sty
+            end
+            # Non-firing ON chip (e.g. WECO-2 if not in rules8) stays success
+            for k in 1:5
+                rid = "WECO-$k"
+                if rid ∉ rules8
+                    @test T.style_at(tb1, bubble_xs1[k], found1.y) == T.tstyle(:success)
+                end
+            end
+        end
+
+        # Hover OK / non-viol index → no warning chips
+        m.hovered = 1
+        @test isempty(weco_rules_at_index(viols, 1))
+        tb_ok = T.TestBackend(100, 36); T.reset!(tb_ok.buf)
+        T.view(m, T.Frame(tb_ok.buf, T.Rect(1, 1, 100, 36), [], []))
+        found_ok = _side_weco_bubbles(tb_ok, m)
+        @test found_ok !== nothing
+        if found_ok !== nothing
+            bubble_xs_ok = Int[]
+            for x in found_ok.sa.x:T.right(found_ok.sa)
+                ch = T.char_at(tb_ok, x, found_ok.y)
+                (ch == '●' || ch == '○') && push!(bubble_xs_ok, x)
+            end
+            @test all(i -> T.style_at(tb_ok, bubble_xs_ok[i], found_ok.y) != warn_sty, 1:8)
+        end
+
+        # Leave hover → warning cleared
+        m.hovered = nothing
+        tb2 = T.TestBackend(100, 36); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 36), [], []))
+        found2 = _side_weco_bubbles(tb2, m)
+        @test found2 !== nothing
+        if found2 !== nothing
+            bubble_xs2 = Int[]
+            for x in found2.sa.x:T.right(found2.sa)
+                ch = T.char_at(tb2, x, found2.y)
+                (ch == '●' || ch == '○') && push!(bubble_xs2, x)
+            end
+            @test all(i -> T.style_at(tb2, bubble_xs2[i], found2.y) != warn_sty, 1:8)
+            @test T.style_at(tb2, bubble_xs2[1], found2.y) == T.tstyle(:success)
+        end
+    end
+
+    @testset "WECO mouse regions: side_outer preserve hover + bubble press flags (PR3a gates 1–4)" begin
+        d = generate_spc_workbench_data(18; seed=42)
+        n = length(d.values)
+        m = SPCWorkbenchModel(data=d, paused=true, viewport=Viewport(x0=1, x1=n))
+        tb = T.TestBackend(100, 36); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 36), [], []))
+        pa = m.plot_area
+        so = m.side_outer
+        @test pa.width > 5 && so.width > 0
+        @test m.weco_bubble_geom !== nothing
+        g = m.weco_bubble_geom
+
+        # Seed hover via plot move
+        cx = pa.x + pa.width ÷ 2
+        cy = pa.y + pa.height ÷ 2
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_move, false, false, false))
+        @test m.hovered !== nothing
+        h0 = m.hovered
+
+        # Gate 1: move from plot onto side_outer → hovered unchanged
+        sx = so.x + so.width ÷ 2
+        sy = so.y + so.height ÷ 2
+        @test T.contains(so, sx, sy)
+        @test !T.contains(pa, sx, sy)
+        T.update!(m, T.MouseEvent(sx, sy, T.mouse_left, T.mouse_move, false, false, false))
+        @test m.hovered === h0
+
+        # Gate 2: move outside both plot and side_outer → hovered cleared
+        ox, oy = 1, 1  # terminal chrome / header corner
+        @test !T.contains(pa, ox, oy)
+        @test !T.contains(so, ox, oy)
+        T.update!(m, T.MouseEvent(ox, oy, T.mouse_left, T.mouse_move, false, false, false))
+        @test m.hovered === nothing
+
+        # Re-seed hover for bubble press gates
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_move, false, false, false))
+        @test m.hovered !== nothing
+        h1 = m.hovered
+        vp_x0, vp_x1 = m.viewport.x0, m.viewport.x1
+
+        # Gate 3+4: press on bubble → explain flags; hover preserved; no drag_start / no pan
+        bx = g.x0 + (g.boxed ? 1 : 0)  # glyph cell of chip 1 (also in bare chip span)
+        by = g.y
+        @test _weco_bubble_at(m, bx, by) == 1
+        m.drag_start = nothing
+        T.update!(m, T.MouseEvent(bx, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === true
+        @test m.weco_explain_mode === :rule
+        @test m.weco_explain_rule == "WECO-1"
+        @test m.weco_explain_index === h1
+        @test m.hovered === h1
+        @test m.drag_start === nothing
+        @test m.viewport.x0 == vp_x0 && m.viewport.x1 == vp_x1
+        @test occursin("weco explain WECO-1", m.last_event)
+
+        # Same bubble re-press toggles closed (still no drag)
+        T.update!(m, T.MouseEvent(bx, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === false
+        @test m.weco_explain_rule === nothing
+        @test m.hovered === h1
+        @test m.drag_start === nothing
+
+        # Other bubble retargets; OFF chip (e.g. 6) still opens
+        bx6 = g.x0 + (6 - 1) * g.step + (g.boxed ? 1 : 0)
+        T.update!(m, T.MouseEvent(bx, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_rule == "WECO-1"
+        T.update!(m, T.MouseEvent(bx6, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === true
+        @test m.weco_explain_rule == "WECO-6"
+        @test m.hovered === h1
+        @test m.drag_start === nothing
+
+        # Plot press while explain open: pan/select armed; explain stays open (KD-WB-13)
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === true
+        @test m.weco_explain_rule == "WECO-6"
+        @test m.drag_start !== nothing
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.drag_start === nothing
+        @test m.weco_explain_open === true
+
+        # Outside chrome press closes explain
+        T.update!(m, T.MouseEvent(ox, oy, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === false
+        @test m.weco_explain_rule === nothing
+        @test m.hovered === nothing
+
+        # Pure hit-test helper: miss y / off-row
+        @test _weco_bubble_at(m, bx, by + 5) === nothing
+        @test _clear_weco_explain!(m) === nothing
+    end
+
+    @testset "WECO explain popup: w/Esc/q + paint + clear paths (PR3b)" begin
+        d = generate_spc_workbench_data(18; seed=42)
+        n = length(d.values)
+        m = SPCWorkbenchModel(data=d, paused=true, viewport=Viewport(x0=1, x1=n))
+        W, H = 100, 36
+        tb = T.TestBackend(W, H)
+        function re_view!()
+            T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, W, H), [], []))
+        end
+        re_view!()
+        @test m.weco_bubble_geom !== nothing
+        g = m.weco_bubble_geom
+        pa = m.plot_area
+        @test pa.width >= 16
+
+        # w open → How: body + title ON; popup rect sized
+        @test m.weco_explain_open === false
+        T.update!(m, T.KeyEvent('w'))
+        @test m.weco_explain_open === true
+        @test m.weco_explain_mode === :rule
+        @test m.weco_explain_rule == "WECO-1"  # first enabled
+        re_view!()
+        @test m.weco_popup_rect.width > 0 && m.weco_popup_rect.height > 0
+        @test T.find_text(tb, "How:") !== nothing
+        @test T.find_text(tb, "WECO-1") !== nothing
+        @test T.find_text(tb, "ON") !== nothing || occursin("ON", m.weco_explain_rule === nothing ? "" :
+            weco_explain_content(:rule; rule="WECO-1", enabled=true).title)
+
+        # w toggle close
+        T.update!(m, T.KeyEvent('w'))
+        @test m.weco_explain_open === false
+        @test m.quit === false
+        re_view!()
+        @test m.weco_popup_rect.width == 0
+
+        # Bubble press opens painted popup
+        bx = g.x0 + (g.boxed ? 1 : 0)
+        by = g.y
+        T.update!(m, T.MouseEvent(bx, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === true
+        @test m.weco_explain_rule == "WECO-1"
+        re_view!()
+        @test T.find_text(tb, "How:") !== nothing
+
+        # Esc closes explain without quit
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.weco_explain_open === false
+        @test m.quit === false
+
+        # q closes explain without quit
+        T.update!(m, T.KeyEvent('w'))
+        @test m.weco_explain_open === true
+        T.update!(m, T.KeyEvent('q'))
+        @test m.weco_explain_open === false
+        @test m.quit === false
+
+        # Q also closes without quit
+        T.update!(m, T.KeyEvent('w'))
+        @test m.weco_explain_open === true
+        T.update!(m, T.KeyEvent('Q'))
+        @test m.weco_explain_open === false
+        @test m.quit === false
+
+        # Plot press while open: explain stays open (KD-WB-13)
+        # Use bottom-left of plot_area so we do not hit the right-anchored popup rect.
+        T.update!(m, T.KeyEvent('w'))
+        @test m.weco_explain_open === true
+        re_view!()
+        pa = m.plot_area
+        pop = m.weco_popup_rect
+        cx = pa.x + 2
+        cy = pa.y + max(1, pa.height - 2)
+        @test T.contains(pa, cx, cy)
+        @test !(pop.width > 0 && T.contains(pop, cx, cy))
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === true
+        @test m.drag_start !== nothing
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.weco_explain_open === true
+
+        # Outside chrome press closes
+        T.update!(m, T.MouseEvent(1, 1, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === false
+
+        # OFF bubble (WECO-6 default off): title OFF + How:
+        re_view!()
+        g = m.weco_bubble_geom
+        bx6 = g.x0 + (6 - 1) * g.step + (g.boxed ? 1 : 0)
+        by6 = g.y
+        T.update!(m, T.MouseEvent(bx6, by6, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === true
+        @test m.weco_explain_rule == "WECO-6"
+        re_view!()
+        @test T.find_text(tb, "OFF") !== nothing
+        @test T.find_text(tb, "How:") !== nothing
+
+        # Leave dashboard (library) force-closes explain
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode === :library
+        @test m.weco_explain_open === false
+        @test m.weco_explain_rule === nothing
+
+        # Back to dashboard; reopen then config mode also clears
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
+        T.update!(m, T.KeyEvent('w'))
+        @test m.weco_explain_open === true
+        T.update!(m, T.KeyEvent('c'))
+        @test m.view_mode === :config
+        @test m.weco_explain_open === false
+
+        # Load ephemerals clear explain
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
+        T.update!(m, T.KeyEvent('w'))
+        @test m.weco_explain_open === true
+        _clear_load_ephemerals!(m)
+        @test m.weco_explain_open === false
+        @test m.weco_explain_rule === nothing
+        @test m.weco_popup_rect.width == 0
+
+        # Empty data: w → nothing to explain (seed_demos=:none → empty chart)
+        m_empty = SPCWorkbenchModel(data=empty_workbench_data(), paused=true, seed_demos=:none)
+        _ensure_charts!(m_empty)
+        @test length(m_empty.data.values) == 0
+        T.update!(m_empty, T.KeyEvent('w'))
+        @test m_empty.weco_explain_open === false
+        @test occursin("nothing to explain", m_empty.last_event)
+
+        # Help/keys mention dashboard w=explain (Main-included helpers)
+        m2 = SPCWorkbenchModel(data=d, paused=true, viewport=Viewport(x0=1, x1=n))
+        entries = _contextual_key_entries(m2; expanded=true)
+        flat = join([string(e) for e in entries], " ")
+        @test occursin("explain", flat)
+        help_e = _mode_key_entries(:help)
+        help_flat = join([string(e) for e in help_e], " ")
+        @test occursin("explain", help_flat)
+        @test occursin("dash w", help_flat) || occursin("WECO explain", help_flat)
+    end
+
+    @testset "WECO plot double-click explain :point (PR4 / KD-WB-10)" begin
+        # Multi-rule viol at #8 (same fixture as hover multi-highlight)
+        cl, s = 0.0, 1.0
+        vals = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 3.5]
+        d = WorkbenchData(values = vals, cl = cl, sigma = s)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single,
+            viewport = Viewport(x0 = 1, x1 = length(vals)))
+        _ensure_charts!(m)
+        ch = current_chart(m)
+        ch.limits_mode = :manual
+        ch.manual_cl = cl
+        ch.manual_ucl = cl + 3 * s
+        ch.manual_lcl = cl - 3 * s
+        ch.enabled_rules = Dict(
+            "WECO-1" => true, "WECO-2" => true, "WECO-3" => true, "WECO-4" => true,
+            "WECO-5" => true, "WECO-6" => false, "WECO-7" => false, "WECO-8" => false,
+        )
+        m.enabled_rules = ch.enabled_rules
+        ctx = resolve_chart_render_context(ch)
+        viols = weco_detect(ch.data.values, ctx.lz.cl, ctx.lz.sigma; enabled_rules = ch.enabled_rules)
+        rules8 = weco_rules_at_index(viols, 8)
+        @test length(rules8) >= 2
+        @test isempty(weco_rules_at_index(viols, 1))
+
+        W, H = 100, 36
+        tb = T.TestBackend(W, H)
+        function re_view!()
+            T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, W, H), [], []))
+        end
+        re_view!()
+        pa = m.plot_area
+        @test pa.width > 0 && pa.height > 0
+
+        # Cell under viol index 8 / non-viol index 1 (mid-row of plot)
+        x_viol = data_index_to_cell(8, pa, m.viewport)
+        x_ok = data_index_to_cell(1, pa, m.viewport)
+        cy = pa.y + max(1, pa.height ÷ 2)
+        @test T.contains(pa, x_viol, cy)
+        @test T.contains(pa, x_ok, cy)
+
+        function click_release!(x, y)
+            T.update!(m, T.MouseEvent(x, y, T.mouse_left, T.mouse_press, false, false, false))
+            T.update!(m, T.MouseEvent(x, y, T.mouse_left, T.mouse_release, false, false, false))
+        end
+
+        # --- Double click-release same viol idx within WECO_DBLCLICK_TICKS → :point ---
+        @test m.weco_explain_open === false
+        click_release!(x_viol, cy)
+        @test m.selected == 8
+        @test m.plot_last_click !== nothing
+        @test m.plot_last_click.idx == 8
+        @test m.weco_explain_open === false  # first click selects only
+        re_view!()  # advance tick (library-style discipline)
+        @test (m.tick - m.plot_last_click.tick) <= WECO_DBLCLICK_TICKS
+        click_release!(x_viol, cy)
+        @test m.selected == 8
+        @test m.weco_explain_open === true
+        @test m.weco_explain_mode === :point
+        @test m.weco_explain_index == 8
+        @test m.weco_explain_rule in rules8
+        @test occursin("weco explain #8", m.last_event)
+        @test m.plot_last_click === nothing
+        re_view!()
+        @test T.find_text(tb, "WECO · #8") !== nothing || T.find_text(tb, "#8") !== nothing
+        # multi-rule body present (both rules or How-style lines)
+        body_ok = any(r -> T.find_text(tb, r) !== nothing, rules8)
+        @test body_ok
+
+        # Close for next scenarios
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.weco_explain_open === false
+
+        # --- Drag between (dx ≥ WECO_DRAG_SLOP) → no explain; select may update ---
+        # Drag left so pointer stays inside plot_area (index 8 is at right edge).
+        m.plot_last_click = nothing
+        m.plot_press = nothing
+        re_view!()
+        T.update!(m, T.MouseEvent(x_viol, cy, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.plot_press !== nothing && m.plot_press.dragged === false
+        x_drag = x_viol - WECO_DRAG_SLOP
+        @test T.contains(pa, x_drag, cy)
+        T.update!(m, T.MouseEvent(x_drag, cy, T.mouse_left, T.mouse_drag, false, false, false))
+        @test m.plot_press !== nothing && m.plot_press.dragged === true
+        @test m.plot_last_click === nothing
+        T.update!(m, T.MouseEvent(x_drag, cy, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.weco_explain_open === false
+        @test m.plot_press === nothing
+        # Even after a prior single-click memory + drag, no open:
+        m.plot_last_click = (idx = 8, tick = m.tick)
+        T.update!(m, T.MouseEvent(x_viol, cy, T.mouse_left, T.mouse_press, false, false, false))
+        T.update!(m, T.MouseEvent(x_viol - WECO_DRAG_SLOP, cy, T.mouse_left, T.mouse_drag, false, false, false))
+        T.update!(m, T.MouseEvent(x_viol - WECO_DRAG_SLOP, cy, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.weco_explain_open === false
+
+        # --- Non-viol double click-release → select only; no explain ---
+        m.plot_last_click = nothing
+        m.plot_press = nothing
+        re_view!()
+        # Restore viewport after pan from drag tests
+        m.viewport.x0 = 1
+        m.viewport.x1 = length(vals)
+        re_view!()
+        pa = m.plot_area
+        x_ok = data_index_to_cell(1, pa, m.viewport)
+        x_viol = data_index_to_cell(8, pa, m.viewport)
+        click_release!(x_ok, cy)
+        @test m.selected == 1
+        @test m.plot_last_click !== nothing && m.plot_last_click.idx == 1
+        @test m.weco_explain_open === false
+        re_view!()
+        click_release!(x_ok, cy)
+        @test m.selected == 1
+        @test m.weco_explain_open === false  # non-viol: no explain
+        @test m.plot_last_click !== nothing && m.plot_last_click.idx == 1
+
+        # Slow second click (Δtick > WECO_DBLCLICK_TICKS) must NOT open even on viol
+        m.plot_last_click = nothing
+        re_view!()
+        click_release!(x_viol, cy)
+        @test m.plot_last_click !== nothing
+        first_tick = m.plot_last_click.tick
+        m.tick = first_tick + WECO_DBLCLICK_TICKS + 1
+        @test (m.tick - m.plot_last_click.tick) > WECO_DBLCLICK_TICKS
+        click_release!(x_viol, cy)
+        @test m.weco_explain_open === false
+        @test m.selected == 8
+
+        # Help notes mention dblclick viol explain
+        entries = _contextual_key_entries(m; expanded = true)
+        flat = join([string(e) for e in entries], " ")
+        @test occursin("dblclick", flat) || occursin("double", lowercase(flat))
+        @test occursin("explain", flat)
     end
 
     # Side panel chart-line parameters (CL/±1/±2/±3/Specs) + configurable visibility
