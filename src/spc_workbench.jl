@@ -2546,6 +2546,143 @@ function _load_selected_preset!(m::SPCWorkbenchModel)::Bool
     return true
 end
 
+"""Config overlay keys — only invoked while `m.config_open` (extract for unified Config menu)."""
+function _handle_config_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
+    if evt.key == :escape || (evt.key == :char && (evt.char == 'c' || evt.char == 'C' ||
+            evt.char == 'v' || evt.char == 'V' || evt.char == 'o' || evt.char == 'O'))
+        m.config_open = false
+        m.last_event = "config closed"
+        return
+    end
+    # Tab cycles WECO → Lines → Visual → WECO
+    if evt.key == :tab || (evt.key == :char && evt.char == '\t')
+        m.config_tab = m.config_tab == :weco ? :lines : (m.config_tab == :lines ? :visual : :weco)
+        m.config_selected = 1
+        m.last_event = "config tab $(m.config_tab)"
+        return
+    end
+    n_items = if m.config_tab == :lines
+        length(CHART_LINE_KEYS)
+    elseif m.config_tab == :visual
+        length(VISUAL_PREF_KEYS)
+    else
+        8
+    end
+    if evt.key == :up
+        m.config_selected = max(1, m.config_selected - 1)
+        m.last_event = "config up"
+        return
+    elseif evt.key == :down
+        m.config_selected = min(n_items, m.config_selected + 1)
+        m.last_event = "config down"
+        return
+    elseif evt.key == :enter || (evt.key == :char && evt.char == ' ')
+        if m.config_tab == :lines
+            key = CHART_LINE_KEYS[clamp(m.config_selected, 1, length(CHART_LINE_KEYS))]
+            m.show_chart_lines[key] = !get(m.show_chart_lines, key, true)
+            m.last_event = "toggle line $key"
+        elseif m.config_tab == :visual
+            key = VISUAL_PREF_KEYS[clamp(m.config_selected, 1, length(VISUAL_PREF_KEYS))]
+            m.visual_prefs[key] = !_pref_on(m, key)
+            m.last_event = "toggle visual $key"
+        else
+            rid = "WECO-$(m.config_selected)"
+            m.enabled_rules[rid] = !get(m.enabled_rules, rid, false)
+            _sync_active_back!(m)
+            m.last_event = "toggle $rid"
+        end
+        return
+    elseif evt.key == :left || evt.key == :right
+        # Lines tab: cycle style; other tabs no-op (still consume — no pan while config open)
+        if m.config_tab == :lines
+            key = CHART_LINE_KEYS[clamp(m.config_selected, 1, length(CHART_LINE_KEYS))]
+            _cycle_line_style!(m, key; dir = evt.key == :right ? 1 : -1)
+        end
+        return
+    elseif evt.key == :char && isdigit(evt.char)
+        idx = parse(Int, string(evt.char))
+        if m.config_tab == :lines
+            if 1 <= idx <= length(CHART_LINE_KEYS)
+                key = CHART_LINE_KEYS[idx]
+                m.show_chart_lines[key] = !get(m.show_chart_lines, key, true)
+                m.config_selected = idx
+                m.last_event = "toggle line $key"
+            end
+        elseif m.config_tab == :visual
+            if 1 <= idx <= length(VISUAL_PREF_KEYS)
+                key = VISUAL_PREF_KEYS[idx]
+                m.visual_prefs[key] = !_pref_on(m, key)
+                m.config_selected = idx
+                m.last_event = "toggle visual $key"
+            end
+        elseif 1 <= idx <= 8
+            rid = "WECO-$idx"
+            m.enabled_rules[rid] = !get(m.enabled_rules, rid, false)
+            m.config_selected = idx
+            _sync_active_back!(m)
+            m.last_event = "toggle $rid"
+        end
+        return
+    elseif evt.key == :char && (evt.char == 'S' || evt.char == 's' ||
+            evt.char == 'A' || evt.char == 'a' ||
+            evt.char == 'e' || evt.char == 'E')
+        # Unified presets menu (save popup + load list live there)
+        _open_presets_menu!(m)
+        return
+    end
+    return
+end
+
+"""Graph Presets full-page keys — only invoked while `view_mode == :presets`."""
+function _handle_presets_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
+    npre = length(m.graph_presets)
+    if npre >= 1
+        m.presets_selected = clamp(m.presets_selected, 1, npre)
+    end
+    if evt.key == :escape || (evt.key == :char && evt.char == 'q')
+        m.view_mode = :dashboard
+        m.pending_delete = false
+        m.last_event = "presets closed"
+        return
+    elseif evt.key == :up
+        if npre >= 1
+            m.presets_selected = max(1, m.presets_selected - 1)
+        end
+        _sync_presets_scroll!(m)
+        m.last_event = "presets sel $(m.presets_selected)"
+        return
+    elseif evt.key == :down
+        if npre >= 1
+            m.presets_selected = min(npre, m.presets_selected + 1)
+        end
+        _sync_presets_scroll!(m)
+        m.last_event = "presets sel $(m.presets_selected)"
+        return
+    elseif evt.key == :enter
+        _load_selected_preset!(m)
+        return
+    elseif evt.key == :char
+        c = evt.char
+        if c == 's' || c == 'S'
+            # Popup: name entry for saving current graph set
+            _open_prompt!(m, :save_graph_preset; seed = "")
+            return
+        elseif c == 'l' || c == 'L' || c == 'a' || c == 'A'
+            _load_selected_preset!(m)
+            return
+        elseif c == 'd' || c == 'D'
+            if npre < 1
+                m.last_event = "no presets to delete"
+            else
+                m.pending_delete = true
+                m.last_event = "confirm delete preset? y/N"
+            end
+            return
+        end
+    end
+    return  # absorb other keys — no fall-through
+end
+
 # ── Multi-plot pane selection + filters (GC-PR1 / GC-PR4) ───────────────
 
 """True when any session filter is non-empty."""
@@ -3363,90 +3500,9 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return
     end
 
-    # config / editing handling (slice 4+)
+    # config / editing handling (slice 4+) — overlay only; still driven by config_open
     if m.config_open
-        if evt.key == :escape || (evt.key == :char && (evt.char == 'c' || evt.char == 'C' ||
-                evt.char == 'v' || evt.char == 'V' || evt.char == 'o' || evt.char == 'O'))
-            m.config_open = false
-            m.last_event = "config closed"
-            return
-        end
-        # Tab cycles WECO → Lines → Visual → WECO
-        if evt.key == :tab || (evt.key == :char && evt.char == '\t')
-            m.config_tab = m.config_tab == :weco ? :lines : (m.config_tab == :lines ? :visual : :weco)
-            m.config_selected = 1
-            m.last_event = "config tab $(m.config_tab)"
-            return
-        end
-        n_items = if m.config_tab == :lines
-            length(CHART_LINE_KEYS)
-        elseif m.config_tab == :visual
-            length(VISUAL_PREF_KEYS)
-        else
-            8
-        end
-        if evt.key == :up
-            m.config_selected = max(1, m.config_selected - 1)
-            m.last_event = "config up"
-            return
-        elseif evt.key == :down
-            m.config_selected = min(n_items, m.config_selected + 1)
-            m.last_event = "config down"
-            return
-        elseif evt.key == :enter || (evt.key == :char && evt.char == ' ')
-            if m.config_tab == :lines
-                key = CHART_LINE_KEYS[clamp(m.config_selected, 1, length(CHART_LINE_KEYS))]
-                m.show_chart_lines[key] = !get(m.show_chart_lines, key, true)
-                m.last_event = "toggle line $key"
-            elseif m.config_tab == :visual
-                key = VISUAL_PREF_KEYS[clamp(m.config_selected, 1, length(VISUAL_PREF_KEYS))]
-                m.visual_prefs[key] = !_pref_on(m, key)
-                m.last_event = "toggle visual $key"
-            else
-                rid = "WECO-$(m.config_selected)"
-                m.enabled_rules[rid] = !get(m.enabled_rules, rid, false)
-                _sync_active_back!(m)
-                m.last_event = "toggle $rid"
-            end
-            return
-        elseif evt.key == :left || evt.key == :right
-            # Lines tab: cycle style; other tabs no-op (still consume — no pan while config open)
-            if m.config_tab == :lines
-                key = CHART_LINE_KEYS[clamp(m.config_selected, 1, length(CHART_LINE_KEYS))]
-                _cycle_line_style!(m, key; dir = evt.key == :right ? 1 : -1)
-            end
-            return
-        elseif evt.key == :char && isdigit(evt.char)
-            idx = parse(Int, string(evt.char))
-            if m.config_tab == :lines
-                if 1 <= idx <= length(CHART_LINE_KEYS)
-                    key = CHART_LINE_KEYS[idx]
-                    m.show_chart_lines[key] = !get(m.show_chart_lines, key, true)
-                    m.config_selected = idx
-                    m.last_event = "toggle line $key"
-                end
-            elseif m.config_tab == :visual
-                if 1 <= idx <= length(VISUAL_PREF_KEYS)
-                    key = VISUAL_PREF_KEYS[idx]
-                    m.visual_prefs[key] = !_pref_on(m, key)
-                    m.config_selected = idx
-                    m.last_event = "toggle visual $key"
-                end
-            elseif 1 <= idx <= 8
-                rid = "WECO-$idx"
-                m.enabled_rules[rid] = !get(m.enabled_rules, rid, false)
-                m.config_selected = idx
-                _sync_active_back!(m)
-                m.last_event = "toggle $rid"
-            end
-            return
-        elseif evt.key == :char && (evt.char == 'S' || evt.char == 's' ||
-                evt.char == 'A' || evt.char == 'a' ||
-                evt.char == 'e' || evt.char == 'E')
-            # Unified presets menu (save popup + load list live there)
-            _open_presets_menu!(m)
-            return
-        end
+        _handle_config_keys!(m, evt)
         return
     end
 
@@ -3746,52 +3802,8 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
 
     # Unified Graph Presets menu — Esc/q close without quit
     if m.view_mode == :presets
-        npre = length(m.graph_presets)
-        if npre >= 1
-            m.presets_selected = clamp(m.presets_selected, 1, npre)
-        end
-        if evt.key == :escape || (evt.key == :char && evt.char == 'q')
-            m.view_mode = :dashboard
-            m.pending_delete = false
-            m.last_event = "presets closed"
-            return
-        elseif evt.key == :up
-            if npre >= 1
-                m.presets_selected = max(1, m.presets_selected - 1)
-            end
-            _sync_presets_scroll!(m)
-            m.last_event = "presets sel $(m.presets_selected)"
-            return
-        elseif evt.key == :down
-            if npre >= 1
-                m.presets_selected = min(npre, m.presets_selected + 1)
-            end
-            _sync_presets_scroll!(m)
-            m.last_event = "presets sel $(m.presets_selected)"
-            return
-        elseif evt.key == :enter
-            _load_selected_preset!(m)
-            return
-        elseif evt.key == :char
-            c = evt.char
-            if c == 's' || c == 'S'
-                # Popup: name entry for saving current graph set
-                _open_prompt!(m, :save_graph_preset; seed = "")
-                return
-            elseif c == 'l' || c == 'L' || c == 'a' || c == 'A'
-                _load_selected_preset!(m)
-                return
-            elseif c == 'd' || c == 'D'
-                if npre < 1
-                    m.last_event = "no presets to delete"
-                else
-                    m.pending_delete = true
-                    m.last_event = "confirm delete preset? y/N"
-                end
-                return
-            end
-        end
-        return  # absorb other keys — no fall-through
+        _handle_presets_keys!(m, evt)
+        return
     end
 
     # Global quit (dashboard only — modes already returned above)
@@ -4920,63 +4932,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
 
     if m.config_open
         # overlay (slice 4) — no bleed; Tab cycles WECO → Lines → Visual
-        ov = plot_rect
-        ov_h = max(6, min(ov.height - 2, 14))
-        ov_rect = Rect(ov.x + 2, ov.y + 1, ov.width - 4, ov_h)
-        tab_lbl = m.config_tab == :lines ? "Chart Lines" : (m.config_tab == :visual ? "Visual Preferences" : "WECO Rules")
-        title_hints = if m.config_tab == :lines
-            "Tab · ↑↓ · 1-N toggle · ←/→ style · e/S presets menu · Esc/v close"
-        else
-            "Tab · ↑↓ · 1-N · e/S presets menu · Esc/c/v/o close"
-        end
-        cfg = Block(title="Config: $tab_lbl ($title_hints)", border_style=tstyle(:accent, bold=true))
-        inner = render(cfg, ov_rect, buf)
-        # clear
-        for yy in inner.y:bottom(inner)
-            for xx in inner.x:right(inner)
-                set_char!(buf, xx, yy, ' ', tstyle(:text))
-            end
-        end
-        y = inner.y + 1
-        if m.config_tab == :lines
-            for (idx, key) in enumerate(CHART_LINE_KEYS)
-                if y > bottom(inner) - 1
-                    break
-                end
-                sel = idx == m.config_selected ? "▶ " : "  "
-                on = get(m.show_chart_lines, key, true)
-                bub = on ? "●" : "○"
-                lbl = get(CHART_LINE_LABELS, key, key)
-                st_lbl = get(LINE_STYLE_LABELS, _line_style(m, key), _line_style(m, key))
-                set_string!(buf, inner.x + 1, y, "$sel$idx $bub $lbl  $(on ? "[ON]" : "[OFF]")  $st_lbl", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
-                y += 1
-            end
-        elseif m.config_tab == :visual
-            set_string!(buf, inner.x + 1, y, "Graph visual prefs (add more over time):", tstyle(:text_dim))
-            y += 1
-            for (idx, key) in enumerate(VISUAL_PREF_KEYS)
-                if y > bottom(inner) - 1
-                    break
-                end
-                sel = idx == m.config_selected ? "▶ " : "  "
-                on = _pref_on(m, key)
-                bub = on ? "●" : "○"
-                lbl = get(VISUAL_PREF_LABELS, key, key)
-                set_string!(buf, inner.x + 1, y, "$sel$idx $bub $lbl  $(on ? "[ON]" : "[OFF]")", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
-                y += 1
-            end
-        else
-            for (idx, rid) in enumerate(["WECO-1","WECO-2","WECO-3","WECO-4","WECO-5","WECO-6","WECO-7","WECO-8"])
-                if y > bottom(inner) - 1
-                    break
-                end
-                sel = idx == m.config_selected ? "▶ " : "  "
-                on = get(m.enabled_rules, rid, false) ? "[ON]" : "[OFF]"
-                desc = get(WECO_RULE_DESCS, idx, "")
-                set_string!(buf, inner.x + 1, y, "$sel$rid $on $desc", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
-                y += 1
-            end
-        end
+        _render_config_overlay!(buf, plot_rect, m)
         return
     end
 
@@ -5563,13 +5519,72 @@ function _render_tools_page!(buf, area, m)
     end
 end
 
+# ── Config overlay body (plot_rect path while config_open) ───────────────
+"""Draw the config overlay into `plot_rect` (WECO / Lines / Visual tabs)."""
+function _render_config_overlay!(buf, plot_rect, m)
+    ov = plot_rect
+    ov_h = max(6, min(ov.height - 2, 14))
+    ov_rect = Rect(ov.x + 2, ov.y + 1, ov.width - 4, ov_h)
+    tab_lbl = m.config_tab == :lines ? "Chart Lines" : (m.config_tab == :visual ? "Visual Preferences" : "WECO Rules")
+    title_hints = if m.config_tab == :lines
+        "Tab · ↑↓ · 1-N toggle · ←/→ style · e/S presets menu · Esc/v close"
+    else
+        "Tab · ↑↓ · 1-N · e/S presets menu · Esc/c/v/o close"
+    end
+    cfg = Block(title="Config: $tab_lbl ($title_hints)", border_style=tstyle(:accent, bold=true))
+    inner = render(cfg, ov_rect, buf)
+    # clear
+    for yy in inner.y:bottom(inner)
+        for xx in inner.x:right(inner)
+            set_char!(buf, xx, yy, ' ', tstyle(:text))
+        end
+    end
+    y = inner.y + 1
+    if m.config_tab == :lines
+        for (idx, key) in enumerate(CHART_LINE_KEYS)
+            if y > bottom(inner) - 1
+                break
+            end
+            sel = idx == m.config_selected ? "▶ " : "  "
+            on = get(m.show_chart_lines, key, true)
+            bub = on ? "●" : "○"
+            lbl = get(CHART_LINE_LABELS, key, key)
+            st_lbl = get(LINE_STYLE_LABELS, _line_style(m, key), _line_style(m, key))
+            set_string!(buf, inner.x + 1, y, "$sel$idx $bub $lbl  $(on ? "[ON]" : "[OFF]")  $st_lbl", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
+            y += 1
+        end
+    elseif m.config_tab == :visual
+        set_string!(buf, inner.x + 1, y, "Graph visual prefs (add more over time):", tstyle(:text_dim))
+        y += 1
+        for (idx, key) in enumerate(VISUAL_PREF_KEYS)
+            if y > bottom(inner) - 1
+                break
+            end
+            sel = idx == m.config_selected ? "▶ " : "  "
+            on = _pref_on(m, key)
+            bub = on ? "●" : "○"
+            lbl = get(VISUAL_PREF_LABELS, key, key)
+            set_string!(buf, inner.x + 1, y, "$sel$idx $bub $lbl  $(on ? "[ON]" : "[OFF]")", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
+            y += 1
+        end
+    else
+        for (idx, rid) in enumerate(["WECO-1","WECO-2","WECO-3","WECO-4","WECO-5","WECO-6","WECO-7","WECO-8"])
+            if y > bottom(inner) - 1
+                break
+            end
+            sel = idx == m.config_selected ? "▶ " : "  "
+            on = get(m.enabled_rules, rid, false) ? "[ON]" : "[OFF]"
+            desc = get(WECO_RULE_DESCS, idx, "")
+            set_string!(buf, inner.x + 1, y, "$sel$rid $on $desc", idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
+            y += 1
+        end
+    end
+    return nothing
+end
+
 # ── Unified Graph Presets page — save popup + load selected ─────────────
-function _render_presets_page!(buf, area, m)
-    content, chrome = _split_mode_chrome(area)
-    m.presets_area = content
-    set_string!(buf, content.x + 1, content.y,
-        "GRAPH PRESETS  ·  Esc/q → dashboard", tstyle(:title, bold=true))
-    y = content.y + 2
+"""Draw the named presets list body into `content` starting at row `y`. Returns next free y."""
+function _render_presets_list_body!(buf, content, m; y::Int)
     npre = length(m.graph_presets)
     if npre >= 1
         m.presets_selected = clamp(m.presets_selected, 1, npre)
@@ -5586,6 +5601,7 @@ function _render_presets_page!(buf, area, m)
         set_string!(buf, content.x + 2, y,
             "  Capture lines on/off, styles, visual prefs, and WECO rules under a name.",
             tstyle(:text_dim))
+        y += 1
     else
         first_i = m.presets_scroll + 1
         last_i = min(npre, m.presets_scroll + capacity)
@@ -5601,6 +5617,16 @@ function _render_presets_page!(buf, area, m)
             y += 1
         end
     end
+    return y
+end
+
+function _render_presets_page!(buf, area, m)
+    content, chrome = _split_mode_chrome(area)
+    m.presets_area = content
+    set_string!(buf, content.x + 1, content.y,
+        "GRAPH PRESETS  ·  Esc/q → dashboard", tstyle(:title, bold=true))
+    y = content.y + 2
+    _render_presets_list_body!(buf, content, m; y = y)
     if chrome !== nothing
         _render_mode_chrome!(buf, chrome, m; mode=:presets)
     end
@@ -5759,7 +5785,7 @@ function _live_may_advance(m::SPCWorkbenchModel)::Bool
     m.config_open && return false
     m.prompt_kind !== nothing && return false
     m.pending_delete && return false
-    m.view_mode in (:help, :keymap, :library, :builder, :tools, :table) && return false
+    m.view_mode in (:help, :keymap, :library, :builder, :tools, :table, :presets) && return false
     ch = current_chart(m)
     (isempty(ch.data.values) || !ch.live_enabled) && return false
     return true

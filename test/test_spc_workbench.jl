@@ -5072,6 +5072,8 @@ end
         @test _live_may_advance(m) === false
         m.view_mode = :builder
         @test _live_may_advance(m) === false
+        m.view_mode = :presets
+        @test _live_may_advance(m) === false
         m.view_mode = :dashboard
         @test _live_may_advance(m) === true
 
