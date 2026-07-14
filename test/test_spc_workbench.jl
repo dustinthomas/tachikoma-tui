@@ -2753,6 +2753,59 @@ end
         @test found_yellow_diamond
     end
 
+    @testset "no residual braille dots beside point markers" begin
+        # Regression: map_to_dot_* and data_index_to_cell can land sample braille in a
+        # neighboring cell from ●/◆/✕, leaving a tiny braille speck beside the marker.
+        # With connectors + limit lines off, markers must fully replace sample canvas dots.
+        is_braille(c::Char) = let u = UInt32(c); 0x2800 <= u <= 0x28FF; end
+        marker_syms = Set(['●', '◆', '✕'])
+        # Non-flat series so Y mapping mismatch is likely if coords diverge
+        vals = Float64[0.0, 1.5, 0.5, 2.0, 1.0, 3.0, 0.2, 2.5, 1.2, 0.8, 2.2, 1.8]
+        d = WorkbenchData(values=vals, cl=1.4, sigma=0.8)
+        m = SPCWorkbenchModel(data=d, paused=true,
+            viewport=Viewport(x0=1, x1=length(vals), ylo=-0.5, yhi=3.5))
+        m.visual_prefs["solid_series"] = false
+        m.visual_prefs["solid_stroke"] = false
+        m.visual_prefs["braille_series"] = false
+        m.visual_prefs["secondary_canvas"] = false
+        for k in keys(m.show_chart_lines)
+            m.show_chart_lines[k] = false
+        end
+        m.usl = nothing
+        m.lsl = nothing
+        _ensure_charts!(m)
+        ch = m.charts[1]
+        ch.usl = nothing
+        ch.lsl = nothing
+
+        tb = T.TestBackend(70, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 70, 18), [], []))
+        pa = m.plot_area
+        @test pa.width > 4 && pa.height > 3
+
+        marker_cells = Tuple{Int,Int}[]
+        residual_braille = Tuple{Int,Int,Char}[]
+        for y in pa.y:T.bottom(pa), x in pa.x:T.right(pa)
+            c = T.char_at(tb, x, y)
+            if c in marker_syms
+                push!(marker_cells, (x, y))
+            elseif is_braille(c)
+                push!(residual_braille, (x, y, c))
+            end
+        end
+        @test length(marker_cells) >= 3
+        # Sample braille must not survive beside/under markers when connectors are off
+        @test isempty(residual_braille)
+        # Also: no braille in 4-neighbors of any marker (belt-and-suspenders)
+        for (mx, my) in marker_cells
+            for (dx, dy) in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                nx, ny = mx + dx, my + dy
+                (nx < pa.x || nx > T.right(pa) || ny < pa.y || ny > T.bottom(pa)) && continue
+                @test !is_braille(T.char_at(tb, nx, ny))
+            end
+        end
+    end
+
     @testset "mouse hover/click/drag/zoom drive state + re-render shows updates (no crash)" begin
         d = generate_spc_workbench_data(18; seed=55)
         n = length(d.values)

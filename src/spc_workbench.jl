@@ -1930,6 +1930,28 @@ function data_val_to_cell_row(v::Float64, pa::Rect, vp::Viewport)
     clamp(y, pa.y, bottom(pa))
 end
 
+"""
+    map_sample_to_aligned_dot(i, v, plot_inner, vp) -> (dx, dy)
+
+Braille-dot coords for sample `i` at value `v`, **aligned to the same terminal
+cell** as Unicode markers (`data_index_to_cell` / `data_val_to_cell_row`).
+
+`map_to_dot_x`/`map_to_dot_y` use independent rounding over `(dot_w-1)`/`(dot_h-1)`
+and often land one cell away from the marker, leaving a residual braille speck
+beside ●/◆/✕ after `set_char!` overwrites only the marker cell.
+"""
+function map_sample_to_aligned_dot(i::Int, v::Real, plot_inner::Rect, vp::Viewport)
+    cell_x = data_index_to_cell(i, plot_inner, vp)
+    cell_y = data_val_to_cell_row(Float64(v), plot_inner, vp)
+    # Canvas cell (1-based) under render_canvas: terminal = plot_inner.x + cx - 1
+    cx0 = clamp(cell_x - plot_inner.x, 0, max(0, plot_inner.width - 1))
+    cy0 = clamp(cell_y - plot_inner.y, 0, max(0, plot_inner.height - 1))
+    # Left sub-column + mid braille row so the speck sits under the marker glyph
+    dx = cx0 * 2
+    dy = cy0 * 4 + 1
+    return (dx, dy)
+end
+
 function draw_hover_tooltip!(buf, plot_inner::Rect, i::Int, v::Float64, is_viol::Bool, vp::Viewport; usl=nothing, target=nothing, lsl=nothing)
     # simple version for workbench (extended in later slices)
     hx = data_index_to_cell(i, plot_inner, vp)
@@ -5713,8 +5735,8 @@ function _render_series_canvas!(
             continue
         end
         v = Float64(values[i])
-        dx = map_to_dot_x(i, viewport, dw)
-        dy = map_to_dot_y(v, viewport, dh)
+        # Align sample braille to marker cell so ●/◆/✕ fully replace residual dots
+        dx, dy = map_sample_to_aligned_dot(i, v, plot_inner, viewport)
         set_point!(c, dx, dy)
         if prev !== nothing && _pref_on(m, "braille_series")
             line!(c, prev[1], prev[2], dx, dy)
@@ -6553,8 +6575,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 for i in vp2.x0 : vp2.x1
                     (i<1 || i>n2) && continue
                     v = plot2[i]
-                    dx = map_to_dot_x(i, vp2, dw2)
-                    dy = map_to_dot_y(v, vp2, dh2)
+                    dx, dy = map_sample_to_aligned_dot(i, v, inn2, vp2)
                     set_point!(c2, dx, dy)
                     if prev2 !== nothing && _pref_on(m, "braille_series")
                         line!(c2, prev2[1], prev2[2], dx, dy)
@@ -6661,8 +6682,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
                 for i in vp3.x0:vp3.x1
                     (i<1 || i>n3) && continue
                     v = plot3[i]
-                    dx = map_to_dot_x(i, vp3, dw3)
-                    dy = map_to_dot_y(v, vp3, dh3)
+                    dx, dy = map_sample_to_aligned_dot(i, v, inn3, vp3)
                     set_point!(c3, dx, dy)
                     if prev3 !== nothing && _pref_on(m, "braille_series")
                         line!(c3, prev3[1], prev3[2], dx, dy)
