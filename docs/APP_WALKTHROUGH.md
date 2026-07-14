@@ -180,7 +180,8 @@ What you see:
 | `u` / `t` / `l` | Edit USL / Target / **LSL** |
 | `s` | Clear all spec limits |
 | `1`…`8` | Toggle WECO rule N |
-| `c` / `v` / `o` | Config WECO / chart lines / visual prefs |
+| `c` / `v` / `o` | Open **Config** → Rules / Lines / Visual |
+| **`e`** | Open **Config** → **Saved** (named configs + file save/load) |
 | `m` | Chart **library** |
 | `b` | Chart **builder** |
 | `x` | **Tools** registry |
@@ -241,10 +242,21 @@ Spreadsheet-like view of the in-memory table:
 
 CSV import can fill this table; multi-column CSVs keep extra columns for builder mapping.
 
-#### Help / keymap / config overlays
+#### Help / keymap
 
 - `?`/`h` help, `k` keymap
-- `c`/`v`/`o` WECO rules, which lines to show (CL, σ zones, specs), visual prefs (including dual secondary canvas)
+
+#### Config (full page — `view_mode = :config`)
+
+One surface for WECO rules, chart lines, visual prefs, and saved configs.
+Replaces the old three-tab plot overlay and the separate Graph Presets page.
+
+- Deep-links from dashboard: **`c`** Rules · **`v`** Lines · **`o`** Visual · **`e`** Saved
+- In-Config: Tab cycles sections; `c`/`v`/`o`/`e` jump (do not close); **Esc/`q` only** close → dashboard
+- Toggles apply immediately on the live model
+- **Saved:** `s` name-save (session list); `w` / `W` graph-config file save/load; Enter/`l`/`a`/Space load named → dashboard
+- Load applies WECO to the **active chart** + session defaults for new charts (not every chart)
+- Config is **not** full session save (library `w`/`W` is session JSON)
 
 ---
 
