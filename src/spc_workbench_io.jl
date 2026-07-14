@@ -876,7 +876,6 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
 end
 
 function _clear_load_ephemerals!(m::SPCWorkbenchModel)
-    m.config_open = false
     m.config_selected = 1
     m.editing = nothing
     m.edit_buf = ""

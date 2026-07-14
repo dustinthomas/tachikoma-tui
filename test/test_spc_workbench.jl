@@ -2528,7 +2528,6 @@ end
         @test T.find_text(tb, "config open") === nothing   # tiny guard did not draw full config UI
         T.update!(m, T.KeyEvent('c'))
         @test m.view_mode === :config
-        @test m.config_open == false
         tb2 = T.TestBackend(50,12); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1,1,50,12),[],[]))
         @test T.find_text(tb2, "WECO-") !== nothing
@@ -3086,7 +3085,6 @@ end
         # Configure: open config Lines tab (v or c+Tab), toggle sigma1 off
         T.update!(m, T.KeyEvent('v'))  # open chart-lines config
         @test m.view_mode === :config
-        @test m.config_open == false
         @test m.config_tab == :lines
         # select ±1σ (item 2) and toggle
         T.update!(m, T.KeyEvent('2'))
@@ -3097,7 +3095,6 @@ end
         # still in config — close and check side
         T.update!(m, T.KeyEvent(:escape))
         @test m.view_mode === :dashboard
-        @test m.config_open == false
         tb3 = T.TestBackend(90, 24); T.reset!(tb3.buf)
         T.view(m, T.Frame(tb3.buf, T.Rect(1,1,90,24),[],[]))
         s1_row = _side_find_row(tb3, m, "±1")
@@ -3121,14 +3118,12 @@ end
         T.update!(m, T.KeyEvent('c'))
         @test m.view_mode === :config
         @test m.config_tab == :weco
-        @test m.config_open == false
         T.update!(m, T.KeyEvent(:escape))  # Esc/q only close
         @test m.view_mode === :dashboard
 
         # Tab switches WECO → Lines → Visual → Saved → WECO (four-way)
         T.update!(m, T.KeyEvent('c'))
         @test m.view_mode === :config && m.config_tab == :weco
-        @test m.config_open == false
         T.update!(m, T.KeyEvent(:tab))
         @test m.config_tab == :lines
         T.update!(m, T.KeyEvent(:tab))
@@ -3155,7 +3150,6 @@ end
         # Key o opens Visual Preferences panel
         T.update!(m, T.KeyEvent('o'))
         @test m.view_mode === :config
-        @test m.config_open == false
         @test m.config_tab == :visual
         tb = T.TestBackend(80, 18); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1,1,80,18),[],[]))
@@ -3172,7 +3166,6 @@ end
         @test m.visual_prefs["solid_series"] == false
         T.update!(m, T.KeyEvent(:escape))
         @test m.view_mode === :dashboard
-        @test m.config_open == false
 
         # With solid OFF: re-enable and compare connector density
         # Solid ON should place solid connector glyphs on the cell path between points
@@ -3454,7 +3447,6 @@ end
         x0_before = m.viewport.x0
         T.update!(m, T.KeyEvent('v'))
         @test m.view_mode === :config
-        @test m.config_open == false
         @test m.config_tab == :lines
         tb = T.TestBackend(90, 24); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 24), [], []))
@@ -3491,7 +3483,6 @@ end
         @test occursin("←/→ style", full2)
         T.update!(m, T.KeyEvent(:escape))
         @test m.view_mode === :dashboard
-        @test m.config_open == false
     end
 
     @testset "full-page Config: open-only c/v/o, Esc/q close, jumps, Saved path" begin
@@ -3503,7 +3494,6 @@ end
         T.update!(m, T.KeyEvent('c'))
         @test m.view_mode === :config
         @test m.config_tab == :weco
-        @test m.config_open == false
         tb = T.TestBackend(90, 22); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 22), [], []))
         full = join([string(T.row_text(tb, i)) for i in 1:22 if T.row_text(tb, i) !== nothing], "\n")
@@ -3523,13 +3513,11 @@ end
         @test m.view_mode === :config && m.config_tab == :visual
         T.update!(m, T.KeyEvent('e'))  # e → Saved (not separate :presets mode)
         @test m.view_mode === :config && m.config_tab === :saved
-        @test m.config_open == false
 
         # q closes without quit
         T.update!(m, T.KeyEvent('q'))
         @test m.view_mode === :dashboard
         @test m.quit == false
-        @test m.config_open == false
 
         # Esc closes without quit
         T.update!(m, T.KeyEvent('c'))
@@ -3591,7 +3579,6 @@ end
         T.update!(m, T.KeyEvent('e'))
         @test m.view_mode === :config
         @test m.config_tab === :saved
-        @test m.config_open == false
         tb = T.TestBackend(100, 24); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
         full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
@@ -3609,14 +3596,12 @@ end
         # Config e jumps to Saved; s is name-save (not a separate page)
         T.update!(m, T.KeyEvent('v'))
         @test m.view_mode === :config && m.config_tab == :lines
-        @test m.config_open == false
         tb2 = T.TestBackend(100, 24); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 24), [], []))
         full_cfg = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
         @test occursin("e saved", full_cfg) || occursin("[Saved]", full_cfg) ||
               occursin("saved", lowercase(full_cfg))
         T.update!(m, T.KeyEvent('e'))
-        @test m.config_open == false
         @test m.view_mode === :config && m.config_tab === :saved
 
         # Mutate live graph set, then save via popup (s → name prompt)
@@ -5316,9 +5301,6 @@ end
         m.view_mode = :dashboard
         @test _live_may_advance(m) === true
 
-        m.config_open = true
-        @test _live_may_advance(m) === false
-        m.config_open = false
         m.editing = :usl
         @test _live_may_advance(m) === false
         m.editing = nothing
@@ -6041,7 +6023,7 @@ const _sync_active_back! = TachikomaTUI._sync_active_back!
         m.tick = 7
         m.quit = false
         m.live_max = 321
-        m.config_open = true
+        m.view_mode = :config
         m.editing = :usl
         m.edit_buf = "partial"
         m.last_event = "prior"
@@ -6064,7 +6046,7 @@ const _sync_active_back! = TachikomaTUI._sync_active_back!
         @test m.tick == snapshot_tick
         @test m.live_max == snapshot_live_max
         @test m.rng === rng_before
-        @test m.config_open == true  # fail closed: no partial apply / no clear
+        @test m.view_mode === :config  # fail closed: no partial apply / no clear
         @test m.editing === :usl
 
         # empty charts
@@ -6113,7 +6095,7 @@ const _sync_active_back! = TachikomaTUI._sync_active_back!
         @test length(m.charts) == snapshot_n
         @test m.charts[1].usl == snapshot_usl
         @test m.rng === rng_before
-        @test m.config_open == true
+        @test m.view_mode === :config  # still uncleared after fail-closed load err
 
         # schema err via load_workbench! also prefixes last_event (path readable)
         path_bad = joinpath(tempdir(), "spc_wb_bad_$(rand(UInt32)).json")
@@ -6129,6 +6111,7 @@ const _sync_active_back! = TachikomaTUI._sync_active_back!
             @test length(m.charts) == snapshot_n
             @test m.charts[1].usl == snapshot_usl
             @test m.rng === rng_before
+            @test m.view_mode === :config
         finally
             isfile(path_bad) && rm(path_bad; force = true)
         end
@@ -6144,7 +6127,7 @@ const _sync_active_back! = TachikomaTUI._sync_active_back!
         m.tick = 42
         m.live_max = 150
         m.quit = false
-        m.config_open = true
+        m.view_mode = :config
         m.editing = :target
         m.edit_buf = "99"
         m.hovered = 2
@@ -6167,7 +6150,6 @@ const _sync_active_back! = TachikomaTUI._sync_active_back!
             @test m.last_workbench_path == path
             @test startswith(m.last_event, "loaded ")
             # ephemerals cleared
-            @test m.config_open == false
             @test m.editing === nothing
             @test m.edit_buf == ""
             @test m.hovered === nothing

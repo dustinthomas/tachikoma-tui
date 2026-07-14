@@ -1793,8 +1793,7 @@ end
     live_max::Int = 200
     rng::MersenneTwister = MersenneTwister(1234)
     current_gauge_val::Float64 = 0.0
-    # Slice 4+
-    config_open::Bool = false
+    # Slice 4+ — Config is full-page view_mode=:config (no overlay flag)
     config_selected::Int = 1
     config_tab::Symbol = :weco   # :weco | :lines | :visual | :saved
     # Slice 5+
@@ -2566,10 +2565,9 @@ function _open_presets_menu!(m::SPCWorkbenchModel)
     return nothing
 end
 
-"""Open full-page Config (Rules / Lines / Visual / Saved). Forces config_open=false — no dual UI."""
+"""Open full-page Config (Rules / Lines / Visual / Saved)."""
 function _open_config!(m::SPCWorkbenchModel; tab::Symbol = :weco)
     m.view_mode = :config
-    m.config_open = false          # always clear; never dual-path (KD-UC-7)
     m.config_tab = tab
     m.config_selected = 1
     m.pending_delete = false
@@ -2615,7 +2613,6 @@ function _handle_config_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
     # Close only with Esc/q (KD-UC-14) — never quit from Config
     if evt.key == :escape || (evt.key == :char && evt.char == 'q')
         m.view_mode = :dashboard
-        m.config_open = false
         m.pending_delete = false
         m.last_event = "config closed"
         return
@@ -3454,7 +3451,7 @@ function _apply_prompt!(m::SPCWorkbenchModel)
         if err === nothing
             m.prompt_kind = nothing
             m.prompt_buf = ""
-            if m.view_mode === :presets || m.view_mode === :config
+            if m.view_mode === :config
                 m.view_mode = :dashboard
             end
         else
@@ -3723,7 +3720,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     end
 
     # pending_delete: y confirms; any other key (incl Esc) clears — never quit
-    # Mode-local: tools → tool; Config Saved (or legacy :presets) → graph preset; else chart.
+    # Mode-local: tools → tool; Config Saved → graph preset; else chart.
     if m.pending_delete
         if evt.key == :char && (evt.char == 'y' || evt.char == 'Y')
             if m.view_mode == :tools
@@ -3736,8 +3733,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                 _sync_tools_scroll!(m)
                 m.last_event = ok ? "deleted tool" : "delete tool refused"
                 return
-            elseif m.view_mode == :presets ||
-                   (m.view_mode == :config && m.config_tab === :saved)
+            elseif m.view_mode == :config && m.config_tab === :saved
                 # KD-UC-15 CRITICAL: never fall through to chart-delete from Config Saved
                 npre = length(m.graph_presets)
                 if npre >= 1
@@ -4106,7 +4102,7 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         return
     end
     # Modal / tools / table / config / prompt / pending_delete: keyboard-only (KD16)
-    if m.config_open || m.editing !== nothing ||
+    if m.editing !== nothing ||
        m.view_mode == :help || m.view_mode == :keymap ||
        m.view_mode == :builder ||
        m.view_mode == :tools ||
@@ -5928,7 +5924,6 @@ const WECO_RULE_DESCS = [
 function _live_may_advance(m::SPCWorkbenchModel)::Bool
     m.paused && return false
     m.editing !== nothing && return false
-    m.config_open && return false
     m.prompt_kind !== nothing && return false
     m.pending_delete && return false
     m.view_mode in (:help, :keymap, :library, :builder, :tools, :table, :config) && return false
