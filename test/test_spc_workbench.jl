@@ -55,7 +55,7 @@ include("../src/spc_workbench.jl")
             p.chart_line_styles[k] = "solid"
         end
         @test _preset_styles_chip(p) == "solid"
-        @test SAVED_LIST_CHROME_ROWS == 4
+        @test SAVED_LIST_CHROME_ROWS == 5  # title + rule + header + blank + action
     end
 
     @testset "graph presets: capture/apply whole graph set (lines+styles+visual+rules)" begin
@@ -3765,7 +3765,7 @@ end
         @test m.view_mode === :config && m.config_tab === :saved
         tb = T.TestBackend(100, 24); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
-        # Area is remaining body; capacity reserves list chrome rows (title/rule/header/actions)
+        # Area is remaining body; capacity reserves full list chrome (title/rule/header/blank/actions)
         @test m.presets_area.height > 0
         cap = _presets_visible_capacity(m)
         @test cap >= 1
@@ -3775,12 +3775,15 @@ end
         m.presets_selected = 20
         _sync_presets_scroll!(m)
         @test m.presets_scroll > 0
-        # re-render: last name visible, first name scrolled off (PR1 chip row format)
+        # re-render: last name visible, first name scrolled off; footer chrome survives full window
         tb2 = T.TestBackend(100, 24); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 24), [], []))
         full = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
         @test occursin("cfg-20", full)
         @test !occursin("cfg-1  ", full)  # early entries scrolled away (exact pad, not cfg-10+)
+        @test occursin("Actions:", full)  # action strip reserved in chrome budget (Issue 1/5)
+        @test occursin("name-save", full)
+        @test occursin("Name", full) && occursin("WECO", full)  # column header still present
         T.update!(m, T.KeyEvent(:escape))
     end
 
@@ -3828,10 +3831,12 @@ end
               occursin("Lines", full1) && occursin("Styles", full1)
         @test occursin("fab-dense", full1)
         @test occursin("loose", full1)
-        # body chips: WECO count, lines-off chip, mixed styles (default line styles differ)
+        # body chips: both rows visible → both lines chips (p1 specs off, p2 all on)
         @test occursin("8/8", full1)  # p1 with WECO 6-8 enabled
-        @test occursin("off-1", full1) || occursin("all", full1)
+        @test occursin("off-1", full1)
+        @test occursin("all", full1)
         @test occursin("mixed", full1)
+        @test occursin("Actions:", full1)
         @test !occursin("lines-off=", full1)  # old summary format gone
         @test !occursin("missing", lowercase(full1))  # no missing-file badge
         T.update!(m, T.KeyEvent(:escape))

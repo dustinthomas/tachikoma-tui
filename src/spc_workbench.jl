@@ -2539,8 +2539,9 @@ end
 
 # ── Graph presets menu scroll helpers ───────────────────────────────────
 
-# PR1 Saved chrome: title + rule + col header + action strip (KD-SE-10).
-const SAVED_LIST_CHROME_ROWS = 4
+# PR1 Saved chrome: title + rule + col header + blank + action strip (KD-SE-10).
+# Blank spacer is reserved so Actions never loses its row when the list is full.
+const SAVED_LIST_CHROME_ROWS = 5
 
 """Visible list-row capacity for Config Saved. `presets_area` is the remaining
 body rect (from list body start), not full page content — subtract the list's
@@ -5736,14 +5737,13 @@ function _render_config_page!(buf, area, m)
     tab_help_x = content.x + (m.config_tab === :saved ? 47 : 44)
     set_string!(buf, tab_help_x, y, "Tab cycle · ←/→ style · e saved", tstyle(:text_dim))
     y += 1
-    tab_lbl = m.config_tab == :lines ? "Chart Lines" :
-              (m.config_tab == :visual ? "Visual Preferences" :
-               (m.config_tab === :saved ? "Saved Configs" : "WECO Rules"))
-    chname = isempty(m.charts) ? "—" : current_chart(m).name
     if m.config_tab === :saved
         # PR1: hierarchy + action strip live in list body; blank under tab strip
         y += 1
     else
+        tab_lbl = m.config_tab == :lines ? "Chart Lines" :
+                  (m.config_tab == :visual ? "Visual Preferences" : "WECO Rules")
+        chname = isempty(m.charts) ? "—" : current_chart(m).name
         set_string!(buf, content.x + 2, y,
             "Section: $tab_lbl   ·  Active chart: $chname   ·  toggles apply immediately",
             tstyle(:text_dim))
@@ -5757,21 +5757,22 @@ function _render_config_page!(buf, area, m)
 end
 
 # ── Named configs list body (Config → Saved) ────────────────────────────
-"""Pad/truncate `s` to fixed width for Saved column layout."""
+"""Pad/truncate `s` to fixed width for Saved column layout (codepoint-safe)."""
 function _saved_col(s::AbstractString, w::Int)::String
-    t = String(s)
-    length(t) > w && return t[1:w]
+    w <= 0 && return ""
+    t = _side_trunc(s, w)
     return rpad(t, w)
 end
 
-"""Format one Saved list row: marker, index, name, body chips (no path)."""
+"""Format one Saved list row: marker, fixed-width index, name, body chips (no path)."""
 function _format_preset_list_row(p::GraphPreset, i::Int; selected::Bool)::String
     marker = selected ? "▶" : " "
+    idx = lpad(string(i), 2)
     name = _saved_col(p.name, 14)
     weco = _saved_col(_preset_weco_chip(p), 5)
     lines = _saved_col(_preset_lines_chip(p), 6)
     styles = _preset_styles_chip(p)
-    return "$marker $i $name  $weco  $lines  $styles"
+    return "$marker $idx $name  $weco  $lines  $styles"
 end
 
 """Draw the named presets list body into `content` starting at row `y`. Returns next free y."""
@@ -5796,8 +5797,9 @@ function _render_presets_list_body!(buf, content, m; y::Int)
         y += 1
     end
     if y <= bot
+        # Gutter matches marker + 2-digit index + space before Name
         set_string!(buf, x0, y,
-            _side_trunc("#  Name            WECO   Lines   Styles", maxw),
+            _side_trunc("   # Name            WECO   Lines   Styles", maxw),
             tstyle(:text_dim))
         y += 1
     end
@@ -5807,10 +5809,11 @@ function _render_presets_list_body!(buf, content, m; y::Int)
 
     if npre == 0
         # Boxed empty CTA with shipped key labels (KD-SE-10 / PR1)
-        box_w = min(maxw, 62)
-        box_w = max(box_w, 40)
+        # Never wider than body; clamp avoids floor-above-maxw overflow on narrow terms
+        box_w = clamp(maxw, 1, 62)
         if y <= bot
-            set_string!(buf, x0, y, "╭" * "─"^(box_w - 2) * "╮", tstyle(:text_dim))
+            top = _side_trunc("╭" * "─"^max(0, box_w - 2) * "╮", box_w)
+            set_string!(buf, x0, y, top, tstyle(:text_dim))
             y += 1
         end
         empty_lines = (
@@ -5820,12 +5823,17 @@ function _render_presets_list_body!(buf, content, m; y::Int)
         )
         for (raw, sty) in empty_lines
             y > bot && break
-            pad = max(0, box_w - 1 - length(raw))
-            set_string!(buf, x0, y, raw * " "^pad * "│", sty)
+            # Truncate body text so left+right borders fit inside box_w
+            body_w = max(0, box_w - 1)  # leave room for trailing │
+            body = _side_trunc(raw, body_w)
+            pad = max(0, body_w - length(body))
+            row = _side_trunc(body * " "^pad * "│", box_w)
+            set_string!(buf, x0, y, row, sty)
             y += 1
         end
         if y <= bot
-            set_string!(buf, x0, y, "╰" * "─"^(box_w - 2) * "╯", tstyle(:text_dim))
+            bot_line = _side_trunc("╰" * "─"^max(0, box_w - 2) * "╯", box_w)
+            set_string!(buf, x0, y, bot_line, tstyle(:text_dim))
             y += 1
         end
     else
@@ -5841,9 +5849,10 @@ function _render_presets_list_body!(buf, content, m; y::Int)
         end
     end
 
-    # Action strip with current shipped key labels (name-save still on s)
-    if y <= bot
-        y += 1  # blank before actions when room
+    # Footer: blank + Actions as a 2-row budget (reserved in SAVED_LIST_CHROME_ROWS).
+    # Only emit blank when action also fits so Actions is never clipped away.
+    if y + 1 <= bot
+        y += 1  # blank spacer
     end
     if y <= bot
         set_string!(buf, x0, y,
