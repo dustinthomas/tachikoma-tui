@@ -48,7 +48,7 @@ export GraphConfigIndexEntry, GRAPH_CONFIG_INDEX_CAP
 export default_graph_config_index_path
 export read_graph_config_index, write_graph_config_index
 export upsert_graph_config_index_entry!, graph_preset_index_summary
-export graph_config_index_entry_from_preset
+export graph_config_index_entry_from_preset, remove_graph_config_index_entry!
 export extract_html_spc_state, extract_html_spc_state_file
 export html_state_to_workbench, html_state_to_workbench!
 export load_html_archive, load_html_archive!

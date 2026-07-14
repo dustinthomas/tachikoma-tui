@@ -3720,6 +3720,8 @@ end
     @testset "Config Saved: open + save popup + load selected (R2 dashboard)" begin
         d = generate_spc_workbench_data(16; seed = 42)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        # Isolate empty index before first Saved open (KD-SE-25 merge)
+        m.graph_config_index_path = joinpath(tempdir(), "spc_wb_empty_idx_$(rand(UInt32)).json")
 
         # Dashboard e opens Config → Saved (no dashboard bleed; no :presets mode)
         T.update!(m, T.KeyEvent('e'))
@@ -3892,37 +3894,41 @@ end
         _ensure_charts!(m)
         @test length(m.charts) >= 3
         n_charts0 = length(m.charts)
-        # Seed two named configs
-        push!(m.graph_presets, capture_graph_preset(m; name = "keep-me"))
-        push!(m.graph_presets, capture_graph_preset(m; name = "drop-me"))
-        @test length(m.graph_presets) == 2
+        mktempdir() do dir
+            m.graph_config_index_path = joinpath(dir, "graph_config_index.json")
+            # Seed two named configs
+            push!(m.graph_presets, capture_graph_preset(m; name = "keep-me"))
+            push!(m.graph_presets, capture_graph_preset(m; name = "drop-me"))
+            @test length(m.graph_presets) == 2
 
-        T.update!(m, T.KeyEvent('e'))
-        @test m.view_mode === :config && m.config_tab === :saved
-        m.presets_selected = 2  # drop-me
-        T.update!(m, T.KeyEvent('d'))
-        @test m.pending_delete == true
-        @test occursin("confirm delete preset", m.last_event)
-        T.update!(m, T.KeyEvent('y'))
-        @test m.pending_delete == false
-        @test length(m.graph_presets) == 1
-        @test m.graph_presets[1].name == "keep-me"
-        @test length(m.charts) == n_charts0  # chart count unchanged
-        @test occursin("deleted preset", m.last_event)
-        # re-render Saved list
-        tb = T.TestBackend(100, 22); T.reset!(tb.buf)
-        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 22), [], []))
-        full = join([string(T.row_text(tb, i)) for i in 1:22 if T.row_text(tb, i) !== nothing], "\n")
-        @test occursin("keep-me", full)
-        @test !occursin("drop-me", full)
-        T.update!(m, T.KeyEvent(:escape))
-        @test m.view_mode === :dashboard
+            T.update!(m, T.KeyEvent('e'))
+            @test m.view_mode === :config && m.config_tab === :saved
+            m.presets_selected = 2  # drop-me
+            T.update!(m, T.KeyEvent('d'))
+            @test m.pending_delete == true
+            @test occursin("confirm delete preset", m.last_event)
+            T.update!(m, T.KeyEvent('y'))
+            @test m.pending_delete == false
+            @test length(m.graph_presets) == 1
+            @test m.graph_presets[1].name == "keep-me"
+            @test length(m.charts) == n_charts0  # chart count unchanged
+            @test occursin("deleted preset", m.last_event)
+            # re-render Saved list
+            tb = T.TestBackend(100, 22); T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 22), [], []))
+            full = join([string(T.row_text(tb, i)) for i in 1:22 if T.row_text(tb, i) !== nothing], "\n")
+            @test occursin("keep-me", full)
+            @test !occursin("drop-me", full)
+            T.update!(m, T.KeyEvent(:escape))
+            @test m.view_mode === :dashboard
+        end
     end
 
     @testset "Config Saved: scroll capacity uses remaining body (not full content)" begin
         d = generate_spc_workbench_data(12; seed = 3)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
         _ensure_charts!(m)
+        m.graph_config_index_path = joinpath(tempdir(), "spc_wb_empty_idx_$(rand(UInt32)).json")
         for i in 1:20
             push!(m.graph_presets, capture_graph_preset(m; name = "cfg-$i"))
         end
@@ -3952,61 +3958,68 @@ end
         T.update!(m, T.KeyEvent(:escape))
     end
 
-    @testset "Config Saved PR1 polish: hierarchy, body chips, empty CTA, action strip" begin
+    @testset "Config Saved polish: hierarchy, body chips, Path chrome, empty CTA" begin
         d = generate_spc_workbench_data(12; seed = 11)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
         _ensure_charts!(m)
+        # Isolate index so empty Saved stays empty (no host XDG merge)
+        mktempdir() do dir
+            m.graph_config_index_path = joinpath(dir, "graph_config_index.json")
 
-        # Empty Saved: hierarchy + boxed CTA + disk-first key labels (no Path chrome)
-        T.update!(m, T.KeyEvent('e'))
-        @test m.view_mode === :config && m.config_tab === :saved
-        tb = T.TestBackend(100, 24); T.reset!(tb.buf)
-        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
-        full0 = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
-        @test occursin("SAVED GRAPH CONFIGS", full0)
-        @test occursin("0 saved", full0)
-        @test occursin("No saved configs yet", full0) || occursin("No saved configs", full0)
-        @test occursin("Save As", full0)
-        @test occursin("Actions:", full0)
-        @test occursin("[★ Saved]", full0) || occursin("★ Saved", full0)
-        @test !occursin("Path  ", full0)  # no Path column header (PR1 path-free)
-        @test !occursin(" on disk", full0)
-        # s opens Save As explorer (KD-SE-7)
-        T.update!(m, T.KeyEvent('s'))
-        @test m.file_browser_open === true
-        @test m.file_browser_mode === :save_graph_config
-        @test m.prompt_kind === nothing
-        T.update!(m, T.KeyEvent(:escape))
-        @test m.file_browser_open === false
+            # Empty Saved: hierarchy + boxed CTA + disk-first key labels + Path header
+            T.update!(m, T.KeyEvent('e'))
+            @test m.view_mode === :config && m.config_tab === :saved
+            tb = T.TestBackend(100, 24); T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
+            full0 = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
+            @test occursin("SAVED GRAPH CONFIGS", full0)
+            @test occursin("0 saved", full0)
+            @test occursin("No saved configs yet", full0) || occursin("No saved configs", full0)
+            @test occursin("Save As", full0)
+            @test occursin("Actions:", full0)
+            @test occursin("[★ Saved]", full0) || occursin("★ Saved", full0)
+            @test occursin("Path", full0)  # PR4 path column header
+            @test !occursin(" on disk", full0)
+            # s opens Save As explorer (KD-SE-7)
+            T.update!(m, T.KeyEvent('s'))
+            @test m.file_browser_open === true
+            @test m.file_browser_mode === :save_graph_config
+            @test m.prompt_kind === nothing
+            T.update!(m, T.KeyEvent(:escape))
+            @test m.file_browser_open === false
 
-        # Two presets → column header + WECO/lines/styles chips from body
-        p1 = capture_graph_preset(m; name = "fab-dense")
-        p1.show_chart_lines["specs"] = false
-        p1.enabled_rules["WECO-6"] = true
-        p1.enabled_rules["WECO-7"] = true
-        p1.enabled_rules["WECO-8"] = true  # defaults 1-5 on → 8/8
-        push!(m.graph_presets, p1)
-        p2 = capture_graph_preset(m; name = "loose")
-        # default styles are mixed (solid/dotted/dashed/long_dash)
-        push!(m.graph_presets, p2)
-        tb2 = T.TestBackend(100, 24); T.reset!(tb2.buf)
-        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 24), [], []))
-        full1 = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
-        @test occursin("SAVED GRAPH CONFIGS", full1)
-        @test occursin("2 saved", full1)
-        @test occursin("Name", full1) && occursin("WECO", full1) &&
-              occursin("Lines", full1) && occursin("Styles", full1)
-        @test occursin("fab-dense", full1)
-        @test occursin("loose", full1)
-        # body chips: both rows visible → both lines chips (p1 specs off, p2 all on)
-        @test occursin("8/8", full1)  # p1 with WECO 6-8 enabled
-        @test occursin("off-1", full1)
-        @test occursin("all", full1)
-        @test occursin("mixed", full1)
-        @test occursin("Actions:", full1)
-        @test !occursin("lines-off=", full1)  # old summary format gone
-        @test !occursin("missing", lowercase(full1))  # no missing-file badge
-        T.update!(m, T.KeyEvent(:escape))
+            # Two path-less presets → column header + WECO/lines/styles chips from body
+            p1 = capture_graph_preset(m; name = "fab-dense")
+            p1.show_chart_lines["specs"] = false
+            p1.enabled_rules["WECO-6"] = true
+            p1.enabled_rules["WECO-7"] = true
+            p1.enabled_rules["WECO-8"] = true  # defaults 1-5 on → 8/8
+            push!(m.graph_presets, p1)
+            p2 = capture_graph_preset(m; name = "loose")
+            # default styles are mixed (solid/dotted/dashed/long_dash)
+            push!(m.graph_presets, p2)
+            # re-open Saved so selection/chrome refresh (merge keeps path-less)
+            T.update!(m, T.KeyEvent(:escape))
+            T.update!(m, T.KeyEvent('e'))
+            tb2 = T.TestBackend(100, 24); T.reset!(tb2.buf)
+            T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 24), [], []))
+            full1 = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
+            @test occursin("SAVED GRAPH CONFIGS", full1)
+            @test occursin("2 saved", full1)
+            @test occursin("Name", full1) && occursin("WECO", full1) &&
+                  occursin("Lines", full1) && occursin("Styles", full1) &&
+                  occursin("Path", full1)
+            @test occursin("fab-dense", full1)
+            @test occursin("loose", full1)
+            # body chips: both rows visible → both lines chips (p1 specs off, p2 all on)
+            @test occursin("8/8", full1)  # p1 with WECO 6-8 enabled
+            @test occursin("off-1", full1)
+            @test occursin("all", full1)
+            @test occursin("mixed", full1)
+            @test occursin("Actions:", full1)
+            @test !occursin("lines-off=", full1)  # old summary format gone
+            T.update!(m, T.KeyEvent(:escape))
+        end
     end
 
     @testset "chart line styles: primary buffer density solid ≫ dotted" begin
@@ -7094,6 +7107,7 @@ end
         d = generate_spc_workbench_data(10; seed = 23)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
         _ensure_charts!(m)
+        m.graph_config_index_path = joinpath(tempdir(), "spc_wb_empty_idx_$(rand(UInt32)).json")
         push!(m.graph_presets, capture_graph_preset(m; name = "keep"))
         m.show_chart_lines["specs"] = false
         m.enabled_rules["WECO-6"] = true
@@ -7412,6 +7426,170 @@ end
             T.update!(m, T.KeyEvent('s'))
             @test m.usl === nothing
             @test occursin("specs cleared", m.last_event)
+        end
+    end
+
+    @testset "PR4: index merge/backfill, path chrome, delete→index (KD-SE-25/9/26)" begin
+        d = generate_spc_workbench_data(12; seed = 44)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+
+        mktempdir() do dir
+            _isolate_index!(m, dir)
+            idx_path = m.graph_config_index_path
+            present = joinpath(dir, "present.json")
+            gone = joinpath(dir, "gone.json")
+
+            # Write a real config file + seed index with present + missing paths
+            p_ok = capture_graph_preset(m; name = "present")
+            p_ok.path = present
+            p_ok.show_chart_lines["specs"] = false
+            p_ok.enabled_rules["WECO-6"] = true
+            @test save_graph_preset(p_ok, present) === nothing
+
+            e_present = GraphConfigIndexEntry(
+                name = "present",
+                path = abspath(present),
+                saved_at = "2026-01-01T10:00:00",
+                last_used_at = "2026-01-02T12:00:00",  # newer → first in MRU
+                summary = Dict{String,Any}(
+                    "weco_on" => 6,
+                    "lines_off" => 1,
+                    "styles" => "mixed",
+                ),
+            )
+            e_gone = GraphConfigIndexEntry(
+                name = "gone",
+                path = abspath(gone),
+                saved_at = "2026-01-01T09:00:00",
+                last_used_at = "2026-01-01T11:00:00",  # older
+                summary = Dict{String,Any}(
+                    "weco_on" => 3,
+                    "lines_off" => 2,
+                    "styles" => "solid",
+                ),
+            )
+            @test write_graph_config_index(idx_path, GraphConfigIndexEntry[e_present, e_gone]) === nothing
+            @test !isfile(gone)
+
+            # Empty session list; open Saved → merge pulls both index paths
+            empty!(m.graph_presets)
+            T.update!(m, T.KeyEvent('e'))
+            @test m.view_mode === :config && m.config_tab === :saved
+            @test length(m.graph_presets) == 2
+            # MRU: present first (newer last_used_at)
+            @test m.graph_presets[1].name == "present"
+            @test abspath(m.graph_presets[1].path) == abspath(present)
+            @test m.graph_presets[2].name == "gone"
+            @test abspath(m.graph_presets[2].path) == abspath(gone)
+            # Missing badge cached (no per-frame re-stat)
+            @test m.preset_path_missing[abspath(present)] === false
+            @test m.preset_path_missing[abspath(gone)] === true
+            # Lazy DEFAULT body for index-only entries (do not apply defaults without load)
+            @test WB._is_lazy_default_body(m.graph_presets[1])
+            @test WB._is_lazy_default_body(m.graph_presets[2])
+
+            # Path chrome: Path column + ! badge on gone; summary chips for lazy
+            tb = T.TestBackend(100, 24); T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
+            full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
+            @test occursin("Path", full)
+            @test occursin("present", full)
+            @test occursin("!gone", full) || occursin("!gone", replace(full, " " => ""))
+            @test occursin("2 saved", full)
+            @test occursin("6/8", full)  # summary weco_on for present
+            @test occursin("3/8", full)  # summary for gone
+            @test occursin("off-1", full)
+            @test occursin("present.json", full) || occursin(basename(present), full)
+
+            # Index-only entry must NOT apply defaults without file re-read (KD-SE-21)
+            m.show_chart_lines["specs"] = true  # model differs from file
+            m.presets_selected = 1
+            T.update!(m, T.KeyEvent(:enter))
+            # Load re-reads present.json → specs false
+            @test m.show_chart_lines["specs"] === false
+            @test occursin("loaded graph config", m.last_event)
+            @test m.view_mode === :dashboard
+
+            # Backfill: list path-bearing missing from index → write once
+            T.update!(m, T.KeyEvent('e'))
+            only_list = joinpath(dir, "list-only.json")
+            p_lo = capture_graph_preset(m; name = "list-only")
+            p_lo.path = only_list
+            p_lo.show_chart_lines["cl"] = false
+            @test save_graph_preset(p_lo, only_list) === nothing
+            # Manually push without index write
+            push!(m.graph_presets, p_lo)
+            # Clear index of list-only if present; keep present+gone only
+            @test write_graph_config_index(idx_path, GraphConfigIndexEntry[e_present, e_gone]) === nothing
+            before_mtime = mtime(idx_path)
+            sleep(0.05)
+            # Re-open Saved → merge backfills list-only into index
+            T.update!(m, T.KeyEvent(:escape))
+            T.update!(m, T.KeyEvent('e'))
+            @test any(p -> abspath(p.path) == abspath(only_list), m.graph_presets)
+            loaded_idx = read_graph_config_index(idx_path)
+            @test any(e -> abspath(e.path) == abspath(only_list), loaded_idx)
+            @test mtime(idx_path) >= before_mtime
+
+            # Delete removes list + index entry; file remains on disk (KD-SE-9)
+            n_before = length(m.graph_presets)
+            # select present
+            sel_present = findfirst(p -> abspath(p.path) == abspath(present), m.graph_presets)
+            @test sel_present !== nothing
+            m.presets_selected = sel_present
+            T.update!(m, T.KeyEvent('d'))
+            @test m.pending_delete === true
+            T.update!(m, T.KeyEvent('y'))
+            @test occursin("deleted preset", m.last_event)
+            @test length(m.graph_presets) == n_before - 1
+            @test !any(p -> abspath(p.path) == abspath(present), m.graph_presets)
+            @test isfile(present)  # never rm file
+            after_del = read_graph_config_index(idx_path)
+            @test !any(e -> abspath(e.path) == abspath(present), after_del)
+
+            # Temp index survives new model instance (inject same path)
+            m2 = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+            _ensure_charts!(m2)
+            m2.graph_config_index_path = idx_path
+            empty!(m2.graph_presets)
+            T.update!(m2, T.KeyEvent('e'))
+            # present was deleted from index; gone + list-only remain
+            paths2 = Set(abspath(p.path) for p in m2.graph_presets if !isempty(strip(p.path)))
+            @test abspath(gone) in paths2
+            @test abspath(only_list) in paths2
+            @test !(abspath(present) in paths2)
+            @test m2.preset_path_missing[abspath(gone)] === true
+
+            # Path-less legacy stays; not backfilled to index
+            T.update!(m2, T.KeyEvent(:escape))
+            push!(m2.graph_presets, capture_graph_preset(m2; name = "memory-only"))
+            n_idx_before = length(read_graph_config_index(idx_path))
+            T.update!(m2, T.KeyEvent('e'))
+            @test any(p -> p.name == "memory-only" && isempty(strip(p.path)), m2.graph_presets)
+            @test length(read_graph_config_index(idx_path)) == n_idx_before
+
+            # load_workbench! also merges index
+            m3 = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+            _ensure_charts!(m3)
+            m3.graph_config_index_path = idx_path
+            wb_path = joinpath(dir, "session.json")
+            @test save_workbench(m3, wb_path) === nothing
+            empty!(m3.graph_presets)
+            @test load_workbench!(m3, wb_path) === nothing
+            paths3 = Set(abspath(p.path) for p in m3.graph_presets if !isempty(strip(p.path)))
+            @test abspath(gone) in paths3
+            @test abspath(only_list) in paths3
+
+            # _display_path helpers
+            @test WB._display_path("") == "—"
+            home_p = joinpath(homedir(), "cfg", "x.json")
+            disp = WB._display_path(home_p; maxw = 40)
+            @test startswith(disp, "~") || occursin("x.json", disp)
+            longp = "/very/long/path/that/should/be/middle/elided/config.json"
+            short = WB._display_path(longp; maxw = 20)
+            @test length(short) <= 20
+            @test occursin("…", short) || length(longp) <= 20
         end
     end
 
@@ -8010,6 +8188,18 @@ const WB = TachikomaTUI
         @test !isempty(capped[hit].saved_at)
         # oldest bulk entry (n1 / 00:00:00) should be gone
         @test !any(e -> e.name == "n1", capped)
+
+        # remove_graph_config_index_entry! path-keyed (KD-SE-9)
+        ents_rm = GraphConfigIndexEntry[
+            GraphConfigIndexEntry(name = "a", path = "/tmp/rm/a.json", last_used_at = "2026-01-01T00:00:00"),
+            GraphConfigIndexEntry(name = "b", path = "/tmp/rm/b.json", last_used_at = "2026-01-02T00:00:00"),
+        ]
+        @test remove_graph_config_index_entry!(ents_rm, "/tmp/rm/a.json") === true
+        @test length(ents_rm) == 1
+        @test ents_rm[1].name == "b"
+        @test remove_graph_config_index_entry!(ents_rm, "/tmp/rm/nope.json") === false
+        @test remove_graph_config_index_entry!(ents_rm, "") === false
+        @test length(ents_rm) == 1
     end
 
 end

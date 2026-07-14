@@ -615,7 +615,7 @@ end
     is_parent::Bool = false
 end
 
-# ── Saved-list body chips (PR1 path-free polish; KD-SE-10) ───────────────
+# ── Saved-list body chips (PR1 polish + PR4 summary/path chrome) ────────
 """WECO chip from in-memory preset body: \"N/8\" enabled rules."""
 function _preset_weco_chip(p::GraphPreset)::String
     return "$(count(values(p.enabled_rules)))/8"
@@ -631,6 +631,51 @@ end
 function _preset_styles_chip(p::GraphPreset)::String
     styles = unique(collect(values(p.chart_line_styles)))
     return length(styles) == 1 ? String(first(styles)) : "mixed"
+end
+
+"""True when preset body equals DEFAULT_* (index-only / not yet loaded)."""
+function _is_lazy_default_body(p::GraphPreset)::Bool
+    return p.show_chart_lines == DEFAULT_CHART_LINES &&
+           p.chart_line_styles == DEFAULT_CHART_LINE_STYLES &&
+           p.visual_prefs == DEFAULT_VISUAL_PREFS &&
+           p.enabled_rules == DEFAULT_WECO_RULES
+end
+
+"""
+Path display for Saved list Path column: `~/…` when under homedir, else
+absolute; middle-elide when longer than `maxw` (KD-SE-26 — no mtime).
+"""
+function _display_path(path::AbstractString; maxw::Int = 28)::String
+    raw = strip(String(path))
+    isempty(raw) && return "—"
+    ap = try
+        abspath(expanduser(raw))
+    catch
+        String(raw)
+    end
+    home = try
+        abspath(homedir())
+    catch
+        ""
+    end
+    display = if !isempty(home) && (ap == home || startswith(ap, home * "/"))
+        "~" * ap[length(home) + 1:end]
+    else
+        ap
+    end
+    n = length(display)
+    n <= maxw && return display
+    maxw <= 1 && return "…"
+    maxw == 2 && return _side_trunc(display, 2)
+    # middle-elide: keep head…tail
+    keep = maxw - 1  # for …
+    head_n = keep ÷ 2
+    tail_n = keep - head_n
+    head = _side_trunc(display, head_n)
+    # tail: last tail_n codepoints
+    chars = collect(display)
+    tail = length(chars) <= tail_n ? display : String(chars[end - tail_n + 1:end])
+    return head * "…" * tail
 end
 
 # ── Helpers ─────────────────────────────────────────────────────────────
@@ -1897,6 +1942,10 @@ end
     last_graph_config_path::String = ""
     # Injectable index path for tests; empty → default_graph_config_index_path() (KD-SE-5)
     graph_config_index_path::String = ""
+    # Cached path existence (abspath → missing); refreshed on merge/open, not per-frame (KD-SE-26)
+    preset_path_missing::Dict{String,Bool} = Dict{String,Bool}()
+    # Cached index summaries for chips when body is lazy defaults (KD-SE-25)
+    preset_index_summary::Dict{String,Dict{String,Any}} = Dict{String,Dict{String,Any}}()
     # Session-ephemeral dashboard/library filters (GC-PR4) — NOT in JSON schema
     filter_tool::String = ""       # empty = no filter; match requires tool in ch.tools
     filter_type::String = ""       # wire form e.g. "I-MR"; empty = no filter (NOT Union{Nothing,ChartType})
@@ -2397,6 +2446,15 @@ function _browser_start_dir(m::SPCWorkbenchModel, seed_path::AbstractString = ""
     !isempty(strip(m.last_graph_config_path)) && push!(candidates, m.last_graph_config_path)
     sel = _selected_entry_path(m)
     !isempty(sel) && push!(candidates, sel)
+    # Index MRU path when available (PR4)
+    try
+        ents = read_graph_config_index(_effective_index_path(m))
+        if !isempty(ents)
+            _, mi = findmax(e -> e.last_used_at, ents)
+            !isempty(strip(ents[mi].path)) && push!(candidates, ents[mi].path)
+        end
+    catch
+    end
     for c in candidates
         ap = abspath(expanduser(c))
         if isfile(ap)
@@ -2561,6 +2619,10 @@ function _index_upsert_and_write!(m::SPCWorkbenchModel, p::GraphPreset)::Union{N
             m.file_browser_error = String(err)
             return String(err)
         end
+        # refresh caches for this path
+        ap = e.path
+        m.preset_path_missing[ap] = !isfile(ap)
+        m.preset_index_summary[ap] = e.summary
         return nothing
     catch e
         # index helpers may be absent in pure workbench include; surface if present
@@ -2587,10 +2649,128 @@ function _index_touch_and_write!(m::SPCWorkbenchModel, p::GraphPreset)::Union{No
         upsert_graph_config_index_entry!(entries, e)
         err = write_graph_config_index(idx_path, entries)
         err !== nothing && return String(err)
+        # refresh caches for this path
+        ap = e.path
+        m.preset_path_missing[ap] = !isfile(ap)
+        m.preset_index_summary[ap] = e.summary
         return nothing
     catch e
         return "index err: $(sprint(showerror, e))"
     end
+end
+
+"""Remove path from durable index (never `rm` file). Returns nothing or warn."""
+function _index_remove_and_write!(m::SPCWorkbenchModel, path::AbstractString)::Union{Nothing,String}
+    raw = strip(String(path))
+    isempty(raw) && return nothing
+    try
+        idx_path = _effective_index_path(m)
+        entries = read_graph_config_index(idx_path)
+        removed = remove_graph_config_index_entry!(entries, raw)
+        if removed
+            err = write_graph_config_index(idx_path, entries)
+            err !== nothing && return String(err)
+        end
+        ap = abspath(expanduser(raw))
+        delete!(m.preset_path_missing, ap)
+        delete!(m.preset_index_summary, ap)
+        return nothing
+    catch e
+        return "index err: $(sprint(showerror, e))"
+    end
+end
+
+"""
+    _merge_graph_config_index!(m) -> nothing
+
+Merge durable index ↔ session Saved list (KD-SE-25):
+1. Load index (empty on missing/corrupt).
+2. For each index entry (MRU by `last_used_at`): keep list body on path match;
+   else append path + DEFAULT body (display-only until load).
+3. Backfill index from path-bearing list entries missing from index; write only if changed.
+4. Path-less legacy entries stay at end (no index backfill).
+5. Cache missing-file flags + summaries (stat once — not per frame).
+"""
+function _merge_graph_config_index!(m::SPCWorkbenchModel)::Nothing
+    try
+        idx_path = _effective_index_path(m)
+        index_entries = read_graph_config_index(idx_path)
+        # MRU: newest last_used_at first (ISO timestamps sort lexicographically)
+        sorted_idx = sort(index_entries; by = e -> e.last_used_at, rev = true)
+
+        by_path = Dict{String,GraphPreset}()
+        list_path_order = String[]
+        pathless = GraphPreset[]
+        for p in m.graph_presets
+            raw = strip(p.path)
+            if isempty(raw)
+                push!(pathless, p)
+            else
+                ap = abspath(expanduser(raw))
+                p.path = ap
+                if !haskey(by_path, ap)
+                    by_path[ap] = p
+                    push!(list_path_order, ap)
+                end
+            end
+        end
+
+        empty!(m.preset_path_missing)
+        empty!(m.preset_index_summary)
+
+        new_list = GraphPreset[]
+        seen = Set{String}()
+        index_paths = Set{String}()
+
+        for e in sorted_idx
+            ap = abspath(expanduser(strip(e.path)))
+            isempty(strip(ap)) && continue
+            push!(index_paths, ap)
+            ap in seen && continue
+            push!(seen, ap)
+            m.preset_index_summary[ap] = Dict{String,Any}(String(k) => v for (k, v) in e.summary)
+            m.preset_path_missing[ap] = !isfile(ap)
+            if haskey(by_path, ap)
+                push!(new_list, by_path[ap])  # prefer existing list body (non-lazy)
+            else
+                nm = strip(e.name)
+                isempty(nm) && (nm = _graph_config_name_from_path(ap))
+                push!(new_list, GraphPreset(; name = nm, path = ap))  # lazy DEFAULT body
+            end
+        end
+
+        # List path-bearing entries not in index (will backfill)
+        for ap in list_path_order
+            ap in seen && continue
+            push!(seen, ap)
+            push!(new_list, by_path[ap])
+            m.preset_path_missing[ap] = !isfile(ap)
+        end
+
+        # Path-less legacy at end
+        append!(new_list, pathless)
+        m.graph_presets = new_list
+
+        # Backfill index from list paths missing from index; write only if changed
+        backfill_changed = false
+        for p in m.graph_presets
+            raw = strip(p.path)
+            isempty(raw) && continue
+            ap = abspath(expanduser(raw))
+            ap in index_paths && continue
+            e = graph_config_index_entry_from_preset(p)
+            e === nothing && continue
+            upsert_graph_config_index_entry!(index_entries, e)
+            m.preset_index_summary[ap] = e.summary
+            backfill_changed = true
+        end
+        if backfill_changed
+            write_graph_config_index(idx_path, index_entries)
+        end
+    catch
+        # fail-closed: leave list as-is
+    end
+    return nothing
 end
 
 """
@@ -3137,8 +3317,13 @@ function _sync_presets_scroll!(m::SPCWorkbenchModel, n::Int = length(m.graph_pre
     return nothing
 end
 
-"""Clamp presets_selected + sync scroll. Call on every entry into :saved (KD-UC-16)."""
+"""Clamp presets_selected + sync scroll. Call on every entry into :saved (KD-UC-16).
+
+Also merges durable index ↔ list (KD-SE-25) so Saved open / tab land refreshes
+path chrome and recovers drift.
+"""
 function _init_saved_selection!(m::SPCWorkbenchModel)
+    _merge_graph_config_index!(m)
     n = length(m.graph_presets)
     if n < 1
         m.presets_selected = 1
@@ -4308,10 +4493,15 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                 return
             elseif m.view_mode == :config && m.config_tab === :saved
                 # KD-UC-15 CRITICAL: never fall through to chart-delete from Config Saved
+                # KD-SE-9: remove list + index entry by path; never rm the file
                 npre = length(m.graph_presets)
                 if npre >= 1
                     m.presets_selected = clamp(m.presets_selected, 1, npre)
+                    del_path = strip(m.graph_presets[m.presets_selected].path)
                     deleteat!(m.graph_presets, m.presets_selected)
+                    if !isempty(del_path)
+                        _index_remove_and_write!(m, del_path)
+                    end
                     n2 = length(m.graph_presets)
                     m.presets_selected = n2 >= 1 ? clamp(m.presets_selected, 1, n2) : 1
                     _sync_presets_scroll!(m)
@@ -6378,15 +6568,55 @@ function _saved_col(s::AbstractString, w::Int)::String
     return rpad(t, w)
 end
 
-"""Format one Saved list row: marker, fixed-width index, name, body chips (no path)."""
-function _format_preset_list_row(p::GraphPreset, i::Int; selected::Bool)::String
+"""WECO / Lines / Styles chips: body when loaded; index summary when lazy; — if missing+no summary."""
+function _preset_chips(m::SPCWorkbenchModel, p::GraphPreset)::Tuple{String,String,String}
+    raw = strip(p.path)
+    ap = isempty(raw) ? "" : abspath(expanduser(raw))
+    summary = isempty(ap) ? nothing : get(m.preset_index_summary, ap, nothing)
+    lazy = _is_lazy_default_body(p)
+    is_missing = !isempty(ap) && get(m.preset_path_missing, ap, false)
+    if lazy && summary isa AbstractDict && !isempty(summary)
+        weco_n = get(summary, "weco_on", nothing)
+        weco = weco_n === nothing ? "—" : "$(weco_n)/8"
+        lo = get(summary, "lines_off", nothing)
+        lines = if lo === nothing
+            "—"
+        else
+            n = lo isa Integer ? Int(lo) : tryparse(Int, string(lo))
+            n === nothing ? "—" : (n == 0 ? "all" : "off-$n")
+        end
+        st = get(summary, "styles", nothing)
+        styles = st === nothing ? "—" : string(st)
+        return (weco, lines, styles)
+    end
+    if lazy && is_missing
+        return ("—", "—", "—")
+    end
+    return (_preset_weco_chip(p), _preset_lines_chip(p), _preset_styles_chip(p))
+end
+
+"""Format one Saved list row: marker, index, name (+ ! if missing), chips, path (PR4)."""
+function _format_preset_list_row(
+    m::SPCWorkbenchModel,
+    p::GraphPreset,
+    i::Int;
+    selected::Bool,
+    path_maxw::Int = 28,
+)::String
     marker = selected ? "▶" : " "
     idx = lpad(string(i), 2)
-    name = _saved_col(p.name, 14)
-    weco = _saved_col(_preset_weco_chip(p), 5)
-    lines = _saved_col(_preset_lines_chip(p), 6)
-    styles = _preset_styles_chip(p)
-    return "$marker $idx $name  $weco  $lines  $styles"
+    raw = strip(p.path)
+    ap = isempty(raw) ? "" : abspath(expanduser(raw))
+    is_missing = !isempty(ap) && get(m.preset_path_missing, ap, false)
+    # Missing-file `!` badge glued to name (cached; no per-frame stat)
+    name_src = is_missing ? ("!" * p.name) : p.name
+    name = _saved_col(name_src, 14)
+    weco_s, lines_s, styles_s = _preset_chips(m, p)
+    weco = _saved_col(weco_s, 5)
+    lines = _saved_col(lines_s, 6)
+    styles = _saved_col(styles_s, 6)
+    path_disp = isempty(raw) ? "—" : _display_path(raw; maxw = path_maxw)
+    return "$marker $idx $name  $weco  $lines  $styles  $path_disp"
 end
 
 """Draw the named presets list body into `content` starting at row `y`. Returns next free y."""
@@ -6399,7 +6629,7 @@ function _render_presets_list_body!(buf, content, m; y::Int)
     maxw = max(1, content.width - 4)
     x0 = content.x + 2
 
-    # Hierarchy title + count (list length only — path-free PR1)
+    # Hierarchy title + count (merged list length after index merge)
     title = "▸ SAVED GRAPH CONFIGS"
     count_s = npre == 1 ? "1 saved" : "$npre saved"
     gap = max(1, maxw - length(title) - length(count_s))
@@ -6411,9 +6641,9 @@ function _render_presets_list_body!(buf, content, m; y::Int)
         y += 1
     end
     if y <= bot
-        # Gutter matches marker + 2-digit index + space before Name
+        # Gutter matches marker + 2-digit index + space; Path column (PR4 / KD-SE-26)
         set_string!(buf, x0, y,
-            _side_trunc("   # Name            WECO   Lines   Styles", maxw),
+            _side_trunc("   # Name            WECO   Lines   Styles  Path", maxw),
             tstyle(:text_dim))
         y += 1
     end
@@ -6422,7 +6652,7 @@ function _render_presets_list_body!(buf, content, m; y::Int)
     _sync_presets_scroll!(m, npre, capacity)
 
     if npre == 0
-        # Boxed empty CTA with shipped key labels (KD-SE-10 / PR1)
+        # Boxed empty CTA with disk-first key labels
         # Never wider than body; clamp avoids floor-above-maxw overflow on narrow terms
         box_w = clamp(maxw, 1, 62)
         if y <= bot
@@ -6433,7 +6663,7 @@ function _render_presets_list_body!(buf, content, m; y::Int)
         empty_lines = (
             ("│  ★  No saved configs yet", tstyle(:warning, bold=true)),
             ("│  Capture lines · styles · visual · WECO as a portable JSON.", tstyle(:text_dim)),
-            ("│  [s]/[w] Save As  ·  [S] Quick Save  ·  [W] Load", tstyle(:text)),
+            ("│  [s]/[w] Save As  ·  [S] Quick Save  ·  [W] Load  ·  p/P path", tstyle(:text)),
         )
         for (raw, sty) in empty_lines
             y > bot && break
@@ -6451,12 +6681,18 @@ function _render_presets_list_body!(buf, content, m; y::Int)
             y += 1
         end
     else
+        # Path column width from remaining row budget (marker+idx+name+chips ≈ 42)
+        path_maxw = max(8, maxw - 42)
         first_i = m.presets_scroll + 1
         last_i = min(npre, m.presets_scroll + capacity)
         for i in first_i:last_i
             y > bot && break
             p = m.graph_presets[i]
-            line = _format_preset_list_row(p, i; selected = (i == m.presets_selected))
+            line = _format_preset_list_row(
+                m, p, i;
+                selected = (i == m.presets_selected),
+                path_maxw = path_maxw,
+            )
             sty = i == m.presets_selected ? tstyle(:accent, bold=true) : tstyle(:text)
             set_string!(buf, x0, y, _side_trunc(line, maxw), sty)
             y += 1

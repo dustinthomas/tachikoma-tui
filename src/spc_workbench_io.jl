@@ -850,6 +850,25 @@ function graph_config_index_entry_from_preset(
     )
 end
 
+"""
+    remove_graph_config_index_entry!(entries, path) -> Bool
+
+Path-keyed remove (absolute path identity). Returns true if an entry was
+removed. Empty path → false. Never touches the filesystem file (KD-SE-9).
+"""
+function remove_graph_config_index_entry!(
+    entries::Vector{GraphConfigIndexEntry},
+    path::AbstractString,
+)::Bool
+    raw = strip(String(path))
+    isempty(raw) && return false
+    ap = abspath(expanduser(raw))
+    i = findfirst(e -> abspath(expanduser(strip(e.path))) == ap, entries)
+    i === nothing && return false
+    deleteat!(entries, i)
+    return true
+end
+
 function _tools_registry_from_json(v)::Union{Vector{ToolEntry},String}
     v === nothing && return ToolEntry[]
     v isa AbstractVector || return "tools must be an array"
@@ -1196,6 +1215,9 @@ function _clear_load_ephemerals!(m::SPCWorkbenchModel)
     m.prompt_kind = nothing
     m.prompt_buf = ""
     m.pending_delete = false
+    m.pending_overwrite = false
+    m.pending_overwrite_path = ""
+    m.file_browser_open = false
     # Tools registry UI ephemerals (P2-PR4) — selection/scroll/staged id not in JSON
     m.tools_selected = 1
     m.tools_scroll = 0
@@ -1206,6 +1228,9 @@ function _clear_load_ephemerals!(m::SPCWorkbenchModel)
     m.filter_type = ""
     m.filter_owner = ""
     m.filter_prompt_field = :tool
+    # Path chrome caches rebuilt on next merge (KD-SE-25)
+    empty!(m.preset_path_missing)
+    empty!(m.preset_index_summary)
     return nothing
 end
 
@@ -1388,6 +1413,11 @@ function load_workbench!(m::SPCWorkbenchModel, path::AbstractString)::Union{Noth
     err = workbench_from_dict!(m, d)
     if err !== nothing
         return _set_load_err!(m, err)
+    end
+    # Disk-first: merge durable config index into session list (KD-SE-25)
+    try
+        _merge_graph_config_index!(m)
+    catch
     end
     m.last_workbench_path = String(path)
     m.last_event = "loaded $(basename(String(path)))"
@@ -1793,7 +1823,7 @@ export GraphConfigIndexEntry, GRAPH_CONFIG_INDEX_CAP
 export _tachikoma_data_dir, default_graph_config_index_path
 export read_graph_config_index, write_graph_config_index
 export upsert_graph_config_index_entry!, graph_preset_index_summary
-export graph_config_index_entry_from_preset
+export graph_config_index_entry_from_preset, remove_graph_config_index_entry!
 export extract_html_spc_state, extract_html_spc_state_file
 export html_state_to_workbench, html_state_to_workbench!
 export load_html_archive, load_html_archive!
