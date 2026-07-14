@@ -2957,31 +2957,37 @@ end
     end
 
     # Side Stats: WECO on/off as filled/empty circle bubbles (● green on, ○ dim off)
-    # Helper: collect contiguous ●/○ sequence from side panel (avoids multi-byte row_text slicing)
+    # PR2 locator: find 8-char bubble run in side_area (do NOT require WECO on same row).
+    # Disambiguate Lines rows (single ● + "CL="/ "±") from WECO (8 consecutive bubbles).
     function _side_weco_bubbles(tb, m)
         sa = m.side_area
+        best = nothing
         for y in sa.y:T.bottom(sa)
-            # look for "WECO" label chars in side columns
-            has_weco = false
-            for x in sa.x:(T.right(sa) - 3)
-                if T.char_at(tb, x, y) == 'W' && T.char_at(tb, x + 1, y) == 'E' &&
-                   T.char_at(tb, x + 2, y) == 'C' && T.char_at(tb, x + 3, y) == 'O'
-                    has_weco = true
-                    break
-                end
-            end
-            has_weco || continue
+            chars = Char[T.char_at(tb, x, y) for x in sa.x:T.right(sa)]
+            txt = rstrip(String(chars))
+            # Skip Lines parameter rows (single bubble + label=)
+            occursin("CL=", txt) && continue
+            occursin("±", txt) && continue
+            occursin("Specs=", txt) && continue
             bubbles = Char[]
-            for x in sa.x:T.right(sa)
-                ch = T.char_at(tb, x, y)
+            for ch in chars
                 if ch == '●' || ch == '○'
                     push!(bubbles, ch)
                 end
             end
-            isempty(bubbles) && continue
-            return (y=y, bubbles=String(bubbles), sa=sa)
+            length(bubbles) < 8 && continue
+            # Prefer row with WECO on same or previous row when multiple candidates
+            has_weco_near = occursin("WECO", txt)
+            if !has_weco_near && y > sa.y
+                prev = Char[T.char_at(tb, x, y - 1) for x in sa.x:T.right(sa)]
+                has_weco_near = occursin("WECO", rstrip(String(prev)))
+            end
+            cand = (y=y, bubbles=String(bubbles[1:8]), sa=sa, weco_near=has_weco_near)
+            if best === nothing || (has_weco_near && !best.weco_near)
+                best = cand
+            end
         end
-        return nothing
+        return best === nothing ? nothing : (y=best.y, bubbles=best.bubbles, sa=best.sa)
     end
 
     @testset "side stats WECO rule bubbles: ● green when ON, ○ when OFF; toggle updates" begin
@@ -3106,33 +3112,34 @@ end
         T.view(m, T.Frame(tb.buf, T.Rect(1,1,90,24),[],[]))
         sa = m.side_area
         @test sa.width > 0
+        @test sa.height >= 15  # tall layout gap contract
 
-        # Locate Specs= and WECO rows in side panel
+        # Locate Specs body and WECO chrome (▸ WECO or compact WECO ●●…)
         specs_y = nothing
-        weco_y = nothing
+        weco_chrome_y = nothing
         for y in sa.y:T.bottom(sa)
             chars = Char[T.char_at(tb, x, y) for x in sa.x:T.right(sa)]
             txt = rstrip(String(chars))
             if occursin("Specs=", txt) || occursin("Specs ", txt)
                 specs_y = y
             end
-            if length(txt) >= 4 && startswith(lstrip(txt), "WECO")
-                weco_y = y
+            # Do not use startswith(lstrip, "WECO") — breaks on "▸ WECO"
+            if occursin("WECO", txt)
+                weco_chrome_y === nothing && (weco_chrome_y = y)
             end
         end
         @test specs_y !== nothing
-        @test weco_y !== nothing
-        if specs_y !== nothing && weco_y !== nothing
-            # At least one blank row between Specs and WECO
-            @test weco_y >= specs_y + 2
-            # Intermediate row(s) should be blank (or whitespace only)
-            for y in (specs_y + 1):(weco_y - 1)
+        @test weco_chrome_y !== nothing
+        if specs_y !== nothing && weco_chrome_y !== nothing
+            # H=24: require blank gap between Specs and WECO chrome
+            @test weco_chrome_y >= specs_y + 2
+            for y in (specs_y + 1):(weco_chrome_y - 1)
                 chars = Char[T.char_at(tb, x, y) for x in sa.x:T.right(sa)]
                 @test all(c -> c == ' ' || c == '\0', chars)
             end
         end
 
-        # Numbers 1-8 under each bubble, column-aligned
+        # Numbers 1-8 under each bubble, column-aligned (digit_y == bubble_y+1)
         found = _side_weco_bubbles(tb, m)
         @test found !== nothing
         if found !== nothing
@@ -3148,6 +3155,13 @@ end
             @test num_y <= T.bottom(found.sa)
             digits = Char[T.char_at(tb, x, num_y) for x in bubble_xs]
             @test digits == ['1', '2', '3', '4', '5', '6', '7', '8']
+            # Viols: follows digits when digits present
+            viol_y = nothing
+            for y in (num_y + 1):T.bottom(found.sa)
+                chars = Char[T.char_at(tb, x, y) for x in found.sa.x:T.right(found.sa)]
+                occursin("Viols:", rstrip(String(chars))) && (viol_y = y; break)
+            end
+            @test viol_y !== nothing
         end
     end
 
@@ -3280,6 +3294,162 @@ end
         @test m.config_tab == :weco
         T.update!(m, T.KeyEvent(:escape))
         @test m.view_mode === :dashboard
+    end
+
+    # ── PR2 Side Stats sectionize + collapse acceptance ───────────────────
+    @testset "side stats PR2: H=36 section headers visible" begin
+        d = generate_spc_workbench_data(16; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        tb = T.TestBackend(100, 36); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 36), [], []))
+        side = _side_full(tb, m)
+        @test occursin("STATS", side) || occursin("▸ STATS", side)
+        @test occursin("LINES", side)
+        @test occursin("WECO", side)
+        @test occursin("Cpk=", side)
+        @test occursin("Viols:", side)
+    end
+
+    @testset "side stats PR2: Target T= on STATS at tall height" begin
+        d = generate_spc_workbench_data(16; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        m.usl = 16.0
+        m.lsl = 8.0
+        m.target = 12.0
+        _ensure_charts!(m)
+        ch = current_chart(m)
+        ch.usl = m.usl
+        ch.lsl = m.lsl
+        ch.target = m.target
+        tb = T.TestBackend(100, 36); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 36), [], []))
+        side = _side_full(tb, m)
+        @test occursin("T=12", side)  # T=12 or T=12.0
+        @test occursin("Specs=", side) || occursin("USL=", side)
+        @test occursin("USL=", side)
+        @test occursin("LSL=", side)
+        # No hex band: row (KD-SS-5); band name may appear as dim " · green" only
+        @test !occursin("band:", side)
+        @test !occursin(r"#[0-9a-fA-F]{3,8}", side)
+    end
+
+    @testset "side stats PR2: collapse+hover short height multi-chart" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true, seed_demos=:triple)
+        # Seed demos before asserting multi-chart (charts filled on ensure/view)
+        _ensure_charts!(m)
+        @test length(m.charts) >= 2
+        n_pri = length(resolve_chart_render_context(current_chart(m); sigma_method=:mr).primary_values)
+        m.hovered = max(1, min(1, n_pri))
+        tb = T.TestBackend(80, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 18), [], []))
+        @test length(m.charts) >= 2
+        @test m.side_area.height <= 11
+        side = _side_full(tb, m)
+        @test occursin("h[", side)  # hover body kept (D18)
+        # KD-SS-17: headerless HOVER under compact profile
+        @test !occursin("▸ HOVER", side)
+        # ±1/±2 dropped under KD-SS-17 when hover + multi-chart
+        @test !occursin("±1", side)
+        @test !occursin("±2", side)
+        # Chart list names lowest priority (D1) — absent at short height
+        @test !occursin("▶", side)
+    end
+
+    @testset "side stats PR2: short height Viols ≻ digits/charts" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true, seed_demos=:triple)
+        _ensure_charts!(m)
+        tb = T.TestBackend(80, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 18), [], []))
+        side = _side_full(tb, m)
+        @test occursin("Viols:", side)
+        found = _side_weco_bubbles(tb, m)
+        @test found !== nothing
+        # Digits (D6) omitted under H≤11; next non-empty side row after bubbles is Viols:
+        if found !== nothing
+            digit_run = false
+            for y in (found.y + 1):T.bottom(found.sa)
+                chars = Char[T.char_at(tb, x, y) for x in found.sa.x:T.right(found.sa)]
+                txt = rstrip(String(chars))
+                isempty(txt) && continue
+                if occursin("Viols:", txt)
+                    break
+                end
+                # consecutive 1..8 digit row under bubbles
+                only_digits = all(c -> c == ' ' || c == '\0' || ('1' <= c <= '8'), chars)
+                has_seq = occursin("12345678", replace(txt, r"[\s\0]" => ""))
+                digit_run = only_digits && has_seq
+                break
+            end
+            @test !digit_run
+        end
+        # Chart names (D1) absent
+        @test !occursin("▶", side)
+    end
+
+    @testset "side stats PR2: H=18 Viols after bubbles + default pattern" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        tb = T.TestBackend(80, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 18), [], []))
+        found = _side_weco_bubbles(tb, m)
+        @test found !== nothing
+        if found !== nothing
+            @test found.bubbles == "●●●●●○○○"
+            # Viols on a later row in side panel
+            side = _side_full(tb, m)
+            @test occursin("Viols:", side)
+        end
+    end
+
+    @testset "side stats PR2: H=19/20 hover multi WECO floor (no height cliff)" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        for term_h in (19, 20)
+            m = SPCWorkbenchModel(data=d, paused=true, seed_demos=:triple)
+            _ensure_charts!(m)
+            @test length(m.charts) >= 2
+            m.hovered = 1
+            tb = T.TestBackend(80, term_h); T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, term_h), [], []))
+            @test m.side_area.height >= 12  # above compact_h11 cliff region
+            side = _side_full(tb, m)
+            @test occursin("h[", side)
+            found = _side_weco_bubbles(tb, m)
+            @test found !== nothing  # bubbles not starved by full Lines
+            @test occursin("Viols:", side)  # D17 floor via reserve_tail=2
+        end
+        # H=20 + Target must not starve WECO (D14 gated for all heights)
+        m = SPCWorkbenchModel(data=d, paused=true, seed_demos=:triple)
+        _ensure_charts!(m)
+        m.target = 12.0
+        current_chart(m).target = 12.0
+        m.hovered = 1
+        tb = T.TestBackend(80, 20); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 20), [], []))
+        side = _side_full(tb, m)
+        @test _side_weco_bubbles(tb, m) !== nothing
+        @test occursin("Viols:", side)
+        @test occursin("h[", side)
+    end
+
+    @testset "side stats PR2: H=16 hover keeps hover+WECO; no Charts without Lines" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true, seed_demos=:triple)
+        _ensure_charts!(m)
+        m.hovered = 1
+        tb = T.TestBackend(80, 16); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 16), [], []))
+        side = _side_full(tb, m)
+        @test occursin("h[", side)
+        @test !occursin("▸ HOVER", side)  # compact headerless
+        found = _side_weco_bubbles(tb, m)
+        @test found !== nothing
+        @test occursin("Viols:", side)
+        # Either Lines minimal present (CL) or, if omitted, Charts count must not outrank (D4 ≺ D13)
+        has_lines = occursin("CL=", side)
+        has_charts_count = occursin("Charts:", side)
+        @test has_lines || !has_charts_count
     end
 
     @testset "visual prefs panel + solid series line connector" begin
