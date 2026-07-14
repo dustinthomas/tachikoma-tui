@@ -5970,14 +5970,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
             "Press [f] to edit filters or [F] to clear. Demo tools may be empty.", tstyle(:text_dim))
         m.plot_area = plot_rect
         # Side panel still shows filtered count (design: side list always uses visible_charts)
-        side_block = Block(title="Side Stats (chart $(m.active)/$(max(1,length(m.charts))) • dashboard)", border_style=tstyle(:border))
-        side_inner = render(side_block, side_rect, buf)
-        m.side_area = side_inner
-        nch_all = length(m.charts)
-        set_string!(buf, side_inner.x, side_inner.y, "Charts: 0/$nch_all", tstyle(:text_dim))
-        if side_inner.y + 1 <= bottom(side_inner)
-            set_string!(buf, side_inner.x, side_inner.y + 1, " (no match)", tstyle(:warning))
-        end
+        _render_side_stats!(buf, side_rect, m; variant = :empty_filter)
         gcols = split_layout(Layout(Horizontal, [Fill(), Fill()]), gauge_row)
         if length(gcols) >= 2
             _render_message_panel!(buf, gcols[1], m)
@@ -6270,157 +6263,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
     end
 
     # side
-    side_block = Block(title="Side Stats (chart $(m.active)/$(max(1,length(m.charts))) • dashboard)", border_style=tstyle(:border))
-    side_inner = render(side_block, side_rect, buf)
-    m.side_area = side_inner
-    x = side_inner.x
-    y = side_inner.y
-    if n > 0
-        # Use the resolved ctx for active (canonical limits + band) to avoid duplication
-        act_ch = current_chart(m)
-        act_ctx = resolve_chart_render_context(act_ch; sigma_method=:mr)
-        lz = act_ctx.lz
-        n_primary = length(act_ctx.primary_values)
-        # Mode badge = effective gateway path (same predicate as resolve_chart_render_context)
-        mode_lbl = _manual_limits_effective(act_ch) ? "limits:manual" : "limits:auto"
-        set_string!(buf, x, y, "n=$n_primary $mode_lbl", tstyle(:text)); y += 1
-        # Secondary stats (Rbar/sbar/MRbar); dual secondary canvas under active plot when pref on
-        cl_sigma = "cl=$(round(lz.cl;digits=2)) σ=$(round(lz.sigma;digits=2))"
-        if act_ctx.secondary_bar !== nothing && !isempty(act_ctx.secondary_name)
-            sec_lbl = if act_ctx.secondary_name == "R"
-                "Rbar"
-            elseif act_ctx.secondary_name == "s"
-                "sbar"
-            elseif act_ctx.secondary_name == "MR"
-                "MRbar"
-            else
-                act_ctx.secondary_name
-            end
-            cl_sigma *= " $sec_lbl=$(round(act_ctx.secondary_bar; digits=2))"
-        end
-        set_string!(buf, x, y, cl_sigma, tstyle(:text_dim)); y += 1
-        cpk_s = act_ctx.cpk === nothing ? "—" : _fmt(act_ctx.cpk)
-        band = act_ctx.band
-        cpk_st = band == :green ? tstyle(:success, bold=true) : (band == :red ? tstyle(:error, bold=true) : (band == :amber ? tstyle(:warning, bold=true) : tstyle(:text)))
-        set_string!(buf, x, y, "Cpk=$cpk_s", cpk_st); y += 1
-        if act_ctx.cpk !== nothing
-            set_string!(buf, x, y, "band:$(band) $(cpk_color_for_band(band))", tstyle(:text_dim)); y += 1
-        end
-        if m.usl !== nothing || m.lsl !== nothing
-            set_string!(buf, x, y, "USL=$(m.usl===nothing ? "—" : round(m.usl;digits=1)) T=$(m.target===nothing ? "—" : round(m.target;digits=1)) LSL=$(m.lsl===nothing ? "—" : round(m.lsl;digits=1))", tstyle(:text_dim)); y += 1
-        end
-        # Hover first (priority over long line list when side is short) — primary series index
-        if (hi = m.hovered) !== nothing && 1 <= hi <= n_primary
-            if y <= bottom(side_inner) - 1
-                v = act_ctx.primary_values[hi]
-                st = point_status(hi, act_ctx, act_ch)
-                stat = st == :oos ? "OOS" : (st == :ooc ? "OOC" : "OK")
-                set_string!(buf, x, y, "h[$hi]=$(round(v;digits=2)) $stat", tstyle(:accent, bold=true))
-                y += 1
-            end
-        end
-        # Chart line parameters (●/○ = draw on chart; [v] config). Compact: header + 5 value rows.
-        if y <= bottom(side_inner) - 1
-            set_string!(buf, x, y, "Lines [v]", tstyle(:text_dim)); y += 1
-        end
-        usl_s = m.usl === nothing ? "—" : string(round(m.usl; digits=1))
-        lsl_s = m.lsl === nothing ? "—" : string(round(m.lsl; digits=1))
-        line_rows = (
-            ("CL", "cl", string(round(lz.cl; digits=2))),
-            ("±1σ", "sigma1", "$(round(lz.ucl1; digits=2))/$(round(lz.lcl1; digits=2))"),
-            ("±2σ", "sigma2", "$(round(lz.ucl2; digits=2))/$(round(lz.lcl2; digits=2))"),
-            ("±3σ", "sigma3", "UCL=$(round(lz.ucl; digits=2)) LCL=$(round(lz.lcl; digits=2))"),
-            ("Specs", "specs", "USL=$usl_s LSL=$lsl_s"),
-        )
-        for (label, key, valstr) in line_rows
-            if y > bottom(side_inner) - 1
-                break
-            end
-            on = _line_on(m, key)
-            set_char!(buf, x, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
-            set_string!(buf, x + 2, y, "$label=$valstr", tstyle(:text_dim))
-            y += 1
-        end
-        # WECO on/off bubbles: ● green when enabled, ○ dim when off (rules 1–8)
-        # Optional blank gap after Specs when there is room for gap + WECO row.
-        # Numbers 1–8 under each bubble when a second row fits.
-        bot = bottom(side_inner)
-        if y + 1 <= bot  # at least one row left for WECO bubbles
-            # blank spacer only if Specs→WECO gap and bubble row both fit
-            if y + 2 <= bot
-                y += 1
-            end
-            if y <= bot
-                set_string!(buf, x, y, "WECO ", tstyle(:text_dim))
-                bx0 = x + 5
-                bx = bx0
-                for i in 1:8
-                    rid = "WECO-$i"
-                    on = get(act_ch.enabled_rules, rid, false)
-                    if bx <= right(side_inner)
-                        set_char!(buf, bx, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
-                    end
-                    bx += 1
-                end
-                y += 1
-                # digit row under bubbles when space remains
-                if y <= bot
-                    for i in 1:8
-                        nx = bx0 + i - 1
-                        if nx <= right(side_inner)
-                            set_char!(buf, nx, y, Char('0' + i), tstyle(:text_dim))
-                        end
-                    end
-                    y += 1
-                end
-            end
-        end
-        # Last-N WECO msgs by sample index (most recent); chart-scoped data/rules (PR5 / P1.8)
-        side_viols = weco_detect(act_ch.data.values, lz.cl, lz.sigma; enabled_rules = act_ch.enabled_rules)
-        show_viols = _side_viol_msgs_by_index(side_viols; n = SIDE_VIOL_MSG_MAX)
-        nv = length(side_viols)
-        if y <= bot
-            set_string!(buf, x, y, "Viols: $nv", nv > 0 ? tstyle(:warning) : tstyle(:text_dim))
-            y += 1
-        end
-        if !isempty(show_viols)
-            maxw = max(4, side_inner.width - 1)
-            for v in show_viols
-                y > bot && break
-                line = _side_trunc("$(v.rule) $(v.msg)", maxw)
-                set_string!(buf, x, y, line, tstyle(:warning))
-                y += 1
-            end
-        end
-        # dashboard multi hint (lowest priority when cramped) — filtered list (GC-PR4)
-        side_vis = visible_charts(m)
-        nch_all = length(m.charts)
-        nvis_side = length(side_vis)
-        if nch_all > 1 || _any_filter_active(m)
-            if y <= bottom(side_inner) - 1
-                cnt = _any_filter_active(m) ? "Charts: $nvis_side/$nch_all" : "Charts: $nch_all"
-                set_string!(buf, x, y, cnt, tstyle(:text_dim))
-                y += 1
-            end
-            if nvis_side == 0 && _any_filter_active(m)
-                if y <= bottom(side_inner) - 1
-                    set_string!(buf, x, y, " (no match)", tstyle(:warning))
-                    y += 1
-                end
-            else
-                act_id = current_chart(m).id
-                for c in side_vis
-                    if y > bottom(side_inner) - 1; break; end
-                    cctx = resolve_chart_render_context(c; sigma_method=:mr)
-                    is_act = c.id == act_id
-                    set_string!(buf, x, y, " $(is_act ? "▶" : " ") $(c.name[1:min(8,length(c.name))]) cpk=$(_fmt(cctx.cpk))", tstyle(is_act ? :accent : :text_dim))
-                    y += 1
-                end
-            end
-        end
-    else
-        set_string!(buf, x, y, "n=0", tstyle(:text))
-    end
+    _render_side_stats!(buf, side_rect, m)
 
     # Bottom panels: Message center (left) + Keys (right) — no status footer strip
     gcols = split_layout(Layout(Horizontal, [Fill(), Fill()]), gauge_row)
@@ -6428,6 +6271,188 @@ function view(m::SPCWorkbenchModel, f::Frame)
         _render_message_panel!(buf, gcols[1], m)
         _render_keys_panel!(buf, gcols[2], m)
     end
+end
+
+"""
+Render dashboard Side Stats into `side_rect` (outer). Sets `m.side_area` to Block inner.
+`variant`: `:full` | `:empty_filter`
+"""
+function _render_side_stats!(buf, side_rect, m::SPCWorkbenchModel;
+                             variant::Symbol = :full)
+    side_block = Block(title="Side Stats (chart $(m.active)/$(max(1,length(m.charts))) • dashboard)", border_style=tstyle(:border))
+    side_inner = render(side_block, side_rect, buf)
+    m.side_area = side_inner
+    if variant === :empty_filter
+        # Count line MUST remain: "Charts: 0/$nch" (KD-SS-14)
+        nch_all = length(m.charts)
+        set_string!(buf, side_inner.x, side_inner.y, "Charts: 0/$nch_all", tstyle(:text_dim))
+        if side_inner.y + 1 <= bottom(side_inner)
+            set_string!(buf, side_inner.x, side_inner.y + 1, " (no match)", tstyle(:warning))
+        end
+        return
+    end
+    x = side_inner.x
+    y = side_inner.y
+    # Empty gate = length(m.data.values) (KD-SS-13); do not use chart primary length here
+    n = length(m.data.values)
+    if n > 0
+        _render_side_stats_body!(buf, side_inner, m)
+    else
+        set_string!(buf, x, y, "n=0", tstyle(:text))
+    end
+    return
+end
+
+"""
+Full non-empty Side Stats body (flat stream; sectionize is PR2).
+Strings, order, styles, bottom checks, and viol maxw match the pre-extract view path.
+"""
+function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
+    x = side_inner.x
+    y = side_inner.y
+    # Use the resolved ctx for active (canonical limits + band) to avoid duplication
+    act_ch = current_chart(m)
+    act_ctx = resolve_chart_render_context(act_ch; sigma_method=:mr)
+    lz = act_ctx.lz
+    n_primary = length(act_ctx.primary_values)
+    # Mode badge = effective gateway path (same predicate as resolve_chart_render_context)
+    mode_lbl = _manual_limits_effective(act_ch) ? "limits:manual" : "limits:auto"
+    set_string!(buf, x, y, "n=$n_primary $mode_lbl", tstyle(:text)); y += 1
+    # Secondary stats (Rbar/sbar/MRbar); dual secondary canvas under active plot when pref on
+    cl_sigma = "cl=$(round(lz.cl;digits=2)) σ=$(round(lz.sigma;digits=2))"
+    if act_ctx.secondary_bar !== nothing && !isempty(act_ctx.secondary_name)
+        sec_lbl = if act_ctx.secondary_name == "R"
+            "Rbar"
+        elseif act_ctx.secondary_name == "s"
+            "sbar"
+        elseif act_ctx.secondary_name == "MR"
+            "MRbar"
+        else
+            act_ctx.secondary_name
+        end
+        cl_sigma *= " $sec_lbl=$(round(act_ctx.secondary_bar; digits=2))"
+    end
+    set_string!(buf, x, y, cl_sigma, tstyle(:text_dim)); y += 1
+    cpk_s = act_ctx.cpk === nothing ? "—" : _fmt(act_ctx.cpk)
+    band = act_ctx.band
+    cpk_st = band == :green ? tstyle(:success, bold=true) : (band == :red ? tstyle(:error, bold=true) : (band == :amber ? tstyle(:warning, bold=true) : tstyle(:text)))
+    set_string!(buf, x, y, "Cpk=$cpk_s", cpk_st); y += 1
+    if act_ctx.cpk !== nothing
+        set_string!(buf, x, y, "band:$(band) $(cpk_color_for_band(band))", tstyle(:text_dim)); y += 1
+    end
+    if m.usl !== nothing || m.lsl !== nothing
+        set_string!(buf, x, y, "USL=$(m.usl===nothing ? "—" : round(m.usl;digits=1)) T=$(m.target===nothing ? "—" : round(m.target;digits=1)) LSL=$(m.lsl===nothing ? "—" : round(m.lsl;digits=1))", tstyle(:text_dim)); y += 1
+    end
+    # Hover first (priority over long line list when side is short) — primary series index
+    if (hi = m.hovered) !== nothing && 1 <= hi <= n_primary
+        if y <= bottom(side_inner) - 1
+            v = act_ctx.primary_values[hi]
+            st = point_status(hi, act_ctx, act_ch)
+            stat = st == :oos ? "OOS" : (st == :ooc ? "OOC" : "OK")
+            set_string!(buf, x, y, "h[$hi]=$(round(v;digits=2)) $stat", tstyle(:accent, bold=true))
+            y += 1
+        end
+    end
+    # Chart line parameters (●/○ = draw on chart; [v] config). Compact: header + 5 value rows.
+    if y <= bottom(side_inner) - 1
+        set_string!(buf, x, y, "Lines [v]", tstyle(:text_dim)); y += 1
+    end
+    usl_s = m.usl === nothing ? "—" : string(round(m.usl; digits=1))
+    lsl_s = m.lsl === nothing ? "—" : string(round(m.lsl; digits=1))
+    line_rows = (
+        ("CL", "cl", string(round(lz.cl; digits=2))),
+        ("±1σ", "sigma1", "$(round(lz.ucl1; digits=2))/$(round(lz.lcl1; digits=2))"),
+        ("±2σ", "sigma2", "$(round(lz.ucl2; digits=2))/$(round(lz.lcl2; digits=2))"),
+        ("±3σ", "sigma3", "UCL=$(round(lz.ucl; digits=2)) LCL=$(round(lz.lcl; digits=2))"),
+        ("Specs", "specs", "USL=$usl_s LSL=$lsl_s"),
+    )
+    for (label, key, valstr) in line_rows
+        if y > bottom(side_inner) - 1
+            break
+        end
+        on = _line_on(m, key)
+        set_char!(buf, x, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
+        set_string!(buf, x + 2, y, "$label=$valstr", tstyle(:text_dim))
+        y += 1
+    end
+    # WECO on/off bubbles: ● green when enabled, ○ dim when off (rules 1–8)
+    # Optional blank gap after Specs when there is room for gap + WECO row.
+    # Numbers 1–8 under each bubble when a second row fits.
+    bot = bottom(side_inner)
+    if y + 1 <= bot  # at least one row left for WECO bubbles
+        # blank spacer only if Specs→WECO gap and bubble row both fit
+        if y + 2 <= bot
+            y += 1
+        end
+        if y <= bot
+            set_string!(buf, x, y, "WECO ", tstyle(:text_dim))
+            bx0 = x + 5
+            bx = bx0
+            for i in 1:8
+                rid = "WECO-$i"
+                on = get(act_ch.enabled_rules, rid, false)
+                if bx <= right(side_inner)
+                    set_char!(buf, bx, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
+                end
+                bx += 1
+            end
+            y += 1
+            # digit row under bubbles when space remains
+            if y <= bot
+                for i in 1:8
+                    nx = bx0 + i - 1
+                    if nx <= right(side_inner)
+                        set_char!(buf, nx, y, Char('0' + i), tstyle(:text_dim))
+                    end
+                end
+                y += 1
+            end
+        end
+    end
+    # Last-N WECO msgs by sample index (most recent); chart-scoped data/rules (PR5 / P1.8)
+    side_viols = weco_detect(act_ch.data.values, lz.cl, lz.sigma; enabled_rules = act_ch.enabled_rules)
+    show_viols = _side_viol_msgs_by_index(side_viols; n = SIDE_VIOL_MSG_MAX)
+    nv = length(side_viols)
+    if y <= bot
+        set_string!(buf, x, y, "Viols: $nv", nv > 0 ? tstyle(:warning) : tstyle(:text_dim))
+        y += 1
+    end
+    if !isempty(show_viols)
+        maxw = max(4, side_inner.width - 1)
+        for v in show_viols
+            y > bot && break
+            line = _side_trunc("$(v.rule) $(v.msg)", maxw)
+            set_string!(buf, x, y, line, tstyle(:warning))
+            y += 1
+        end
+    end
+    # dashboard multi hint (lowest priority when cramped) — filtered list (GC-PR4)
+    side_vis = visible_charts(m)
+    nch_all = length(m.charts)
+    nvis_side = length(side_vis)
+    if nch_all > 1 || _any_filter_active(m)
+        if y <= bottom(side_inner) - 1
+            cnt = _any_filter_active(m) ? "Charts: $nvis_side/$nch_all" : "Charts: $nch_all"
+            set_string!(buf, x, y, cnt, tstyle(:text_dim))
+            y += 1
+        end
+        if nvis_side == 0 && _any_filter_active(m)
+            if y <= bottom(side_inner) - 1
+                set_string!(buf, x, y, " (no match)", tstyle(:warning))
+                y += 1
+            end
+        else
+            act_id = current_chart(m).id
+            for c in side_vis
+                if y > bottom(side_inner) - 1; break; end
+                cctx = resolve_chart_render_context(c; sigma_method=:mr)
+                is_act = c.id == act_id
+                set_string!(buf, x, y, " $(is_act ? "▶" : " ") $(c.name[1:min(8,length(c.name))]) cpk=$(_fmt(cctx.cpk))", tstyle(is_act ? :accent : :text_dim))
+                y += 1
+            end
+        end
+    end
+    return y
 end
 
 # small helper for fmt
