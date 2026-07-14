@@ -31,9 +31,10 @@ change that default. Use `:single` or `:none` only in explicit constructs.
 | `p` / `P` | Pause / resume live tick |
 | **`g` / `G`** | Toggle active chart `live_enabled` (**not `L`**) |
 | `r` / `z` | Reset viewport (full range + auto Y) |
-| `c` / `v` / `o` | Config WECO / Lines / Visual prefs |
-| **`e` / `E`** | Open **Graph Presets** menu (unified save/load) |
-| Config `e`/`S`/`A` | Also open Graph Presets menu from config overlay |
+| `c` / `v` / `o` | Config → Rules / Lines / Visual |
+| **`e` / `E`** | Config → **Saved** (named graph configs; load → dashboard) |
+| Config `e` | Jump to Saved section |
+| Config `s` | Name-save current graph set (session upsert) |
 | `u` / `t` / `l` | Edit USL / Target / **LSL** (`L` is LSL, not live) |
 | `s` | Clear all spec limits |
 | `1`…`8` | Toggle WECO rule N |
@@ -292,15 +293,15 @@ load_workbench!(m, "session.json")       # in-session replace (library W)
 Named snapshot of the **whole graph config set** (no series data): what is drawn,
 line styles, visual prefs, and WECO rules to calculate.
 
-**Unified menu** (`e` from dashboard, or `e`/`S`/`A` from config):
+**Config → Saved** (`e` from dashboard, or `e` from Config; Tab also cycles to Saved):
 
 | Key | Action |
 |-----|--------|
 | `s` | **Popup** name prompt — save/upsert current graph set |
-| `↑`/`↓` | Select a saved preset |
-| `Enter` / `l` | **Load** selected preset → dashboard |
-| `d` then `y` | Delete selected preset |
-| Esc / `q` | Close menu (no quit) |
+| `↑`/`↓` | Select a saved config |
+| `Enter` / `l` / `a` / **Space** | **Load** selected → dashboard (R2) |
+| `d` then `y` | Delete selected named config (not a chart) |
+| Esc / `q` | Close Config (no quit) |
 
 Load applies to active-chart WECO rules + session `default_rules`.
 

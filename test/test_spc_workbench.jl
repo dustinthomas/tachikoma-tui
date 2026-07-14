@@ -3077,7 +3077,7 @@ end
         T.update!(m, T.KeyEvent(:escape))  # Esc/q only close
         @test m.view_mode === :dashboard
 
-        # Tab switches WECO → Lines → Visual → WECO (three tabs only)
+        # Tab switches WECO → Lines → Visual → Saved → WECO (four-way)
         T.update!(m, T.KeyEvent('c'))
         @test m.view_mode === :config && m.config_tab == :weco
         @test m.config_open == false
@@ -3085,6 +3085,8 @@ end
         @test m.config_tab == :lines
         T.update!(m, T.KeyEvent(:tab))
         @test m.config_tab == :visual
+        T.update!(m, T.KeyEvent(:tab))
+        @test m.config_tab == :saved
         T.update!(m, T.KeyEvent(:tab))
         @test m.config_tab == :weco
         T.update!(m, T.KeyEvent(:escape))
@@ -3444,7 +3446,7 @@ end
         @test m.config_open == false
     end
 
-    @testset "full-page Config: open-only c/v/o, Esc/q close, jumps, presets path" begin
+    @testset "full-page Config: open-only c/v/o, Esc/q close, jumps, Saved path" begin
         d = generate_spc_workbench_data(16; seed = 11)
         m = SPCWorkbenchModel(data = d, paused = true)
         _ensure_charts!(m)
@@ -3459,10 +3461,11 @@ end
         full = join([string(T.row_text(tb, i)) for i in 1:22 if T.row_text(tb, i) !== nothing], "\n")
         @test occursin("CONFIG", full)
         @test occursin("WECO-", full)
+        @test occursin("[Saved]", full) || occursin("Saved", full)
         @test T.find_text(tb, "Side Stats") === nothing
         @test T.find_text(tb, "SPC Workbench [dashboard]") === nothing
 
-        # In-Config c/v/o jump sections and stay on Config (do NOT close)
+        # In-Config c/v/o/e jump sections and stay on Config (do NOT close)
         T.update!(m, T.KeyEvent('v'))
         @test m.view_mode === :config && m.config_tab == :lines
         T.update!(m, T.KeyEvent('c'))  # from Lines → Rules; stays :config
@@ -3470,6 +3473,9 @@ end
         @test m.config_tab == :weco
         T.update!(m, T.KeyEvent('o'))
         @test m.view_mode === :config && m.config_tab == :visual
+        T.update!(m, T.KeyEvent('e'))  # e → Saved (not separate :presets mode)
+        @test m.view_mode === :config && m.config_tab === :saved
+        @test m.config_open == false
 
         # q closes without quit
         T.update!(m, T.KeyEvent('q'))
@@ -3484,21 +3490,14 @@ end
         @test m.view_mode === :dashboard
         @test m.quit == false
 
-        # Config e/s/a → :presets (PR2 transitional; any case)
+        # Config s → name-save prompt (stays on Config; not dashboard clear-specs)
         T.update!(m, T.KeyEvent('c'))
         @test m.view_mode === :config
-        T.update!(m, T.KeyEvent('e'))
-        @test m.view_mode === :presets
-        @test m.config_open == false
-        T.update!(m, T.KeyEvent(:escape))
-        @test m.view_mode === :dashboard
-        T.update!(m, T.KeyEvent('c'))
-        T.update!(m, T.KeyEvent('s'))  # lowercase s from Config → presets (not dashboard clear-specs)
-        @test m.view_mode === :presets
-        T.update!(m, T.KeyEvent(:escape))
-        T.update!(m, T.KeyEvent('c'))
-        T.update!(m, T.KeyEvent('a'))  # lowercase a from Config → presets
-        @test m.view_mode === :presets
+        T.update!(m, T.KeyEvent('s'))
+        @test m.view_mode === :config
+        @test m.prompt_kind === :save_graph_preset
+        T.update!(m, T.KeyEvent(:escape))  # cancel prompt
+        @test m.prompt_kind === nothing
         T.update!(m, T.KeyEvent(:escape))
         @test m.view_mode === :dashboard
 
@@ -3536,39 +3535,41 @@ end
         m.paused = true
     end
 
-    @testset "graph presets: unified menu open + save popup + load selected" begin
+    @testset "Config Saved: open + save popup + load selected (R2 dashboard)" begin
         d = generate_spc_workbench_data(16; seed = 42)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
 
-        # Dashboard e opens unified Graph Presets menu (no dashboard bleed)
+        # Dashboard e opens Config → Saved (no dashboard bleed; no :presets mode)
         T.update!(m, T.KeyEvent('e'))
-        @test m.view_mode === :presets
+        @test m.view_mode === :config
+        @test m.config_tab === :saved
         @test m.config_open == false
         tb = T.TestBackend(100, 24); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
         full = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
-        @test occursin("GRAPH PRESETS", full) || occursin("Graph Presets", full)
+        @test occursin("CONFIG", full)
+        @test occursin("[Saved]", full) || occursin("Saved", full)
+        @test !occursin("GRAPH PRESETS", full)
         @test occursin("No presets", full) || occursin("no presets", full) ||
-              occursin("s · save", full) || occursin("s save", full)
+              occursin("s · save", full) || occursin("s save", full) || occursin("name-save", full)
         @test !occursin("Side Stats", full)  # dedicated page, no dashboard bleed
         # Esc closes without quit
         T.update!(m, T.KeyEvent(:escape))
         @test m.view_mode === :dashboard
         @test m.quit == false
 
-        # Config S/A/e also open the unified presets menu (PR2 transitional path)
+        # Config e jumps to Saved; s is name-save (not a separate page)
         T.update!(m, T.KeyEvent('v'))
-        @test m.view_mode === :config
+        @test m.view_mode === :config && m.config_tab == :lines
         @test m.config_open == false
         tb2 = T.TestBackend(100, 24); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 24), [], []))
         full_cfg = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
-        @test occursin("e presets", full_cfg) || occursin("presets menu", full_cfg) ||
-              occursin("S presets", full_cfg) || occursin("preset menu", full_cfg) ||
-              occursin("presets", lowercase(full_cfg))
-        T.update!(m, T.KeyEvent('S'))
+        @test occursin("e saved", full_cfg) || occursin("[Saved]", full_cfg) ||
+              occursin("saved", lowercase(full_cfg))
+        T.update!(m, T.KeyEvent('e'))
         @test m.config_open == false
-        @test m.view_mode === :presets
+        @test m.view_mode === :config && m.config_tab === :saved
 
         # Mutate live graph set, then save via popup (s → name prompt)
         m.show_chart_lines["specs"] = false
@@ -3578,7 +3579,7 @@ end
         _sync_active_back!(m)
 
         T.update!(m, T.KeyEvent('s'))
-        @test m.view_mode === :presets  # stay in menu while popup is open
+        @test m.view_mode === :config && m.config_tab === :saved  # stay on Saved while popup open
         @test m.prompt_kind === :save_graph_preset
         # Message chrome shows the name popup
         tb3 = T.TestBackend(100, 24); T.reset!(tb3.buf)
@@ -3591,7 +3592,7 @@ end
         end
         T.update!(m, T.KeyEvent(:enter))
         @test m.prompt_kind === nothing
-        @test m.view_mode === :presets  # after save, remain in unified menu
+        @test m.view_mode === :config && m.config_tab === :saved  # after save, remain on Config Saved
         @test length(m.graph_presets) == 1
         @test m.graph_presets[1].name == "my-preset"
         @test m.graph_presets[1].show_chart_lines["specs"] === false
@@ -3612,7 +3613,7 @@ end
         @test length(m.graph_presets) == 1
         @test occursin("empty", m.last_event)
 
-        # Mutate away, then load selected via Enter
+        # Mutate away, then load selected via Enter → dashboard (R2)
         m.show_chart_lines["specs"] = true
         m.chart_line_styles["cl"] = "solid"
         m.visual_prefs["secondary_canvas"] = true
@@ -3631,7 +3632,7 @@ end
 
         # Second preset + load via l key with ↑↓ selection
         T.update!(m, T.KeyEvent('e'))
-        @test m.view_mode === :presets
+        @test m.view_mode === :config && m.config_tab === :saved
         m.show_chart_lines["cl"] = false
         m.chart_line_styles["specs"] = "dashed"
         _sync_active_back!(m)
@@ -3651,11 +3652,56 @@ end
         @test m.chart_line_styles["cl"] == "long_dash"
         @test m.view_mode === :dashboard
 
-        # q closes presets without quit
+        # Space on Saved also loads → dashboard (PR3 intentional expansion)
+        T.update!(m, T.KeyEvent('e'))
+        @test m.view_mode === :config && m.config_tab === :saved
+        m.show_chart_lines["specs"] = true
+        m.chart_line_styles["cl"] = "solid"
+        m.presets_selected = 1
+        T.update!(m, T.KeyEvent(' '))
+        @test m.show_chart_lines["specs"] === false
+        @test m.chart_line_styles["cl"] == "long_dash"
+        @test m.view_mode === :dashboard
+        @test occursin("preset applied", m.last_event)
+
+        # q closes Config Saved without quit
         T.update!(m, T.KeyEvent('e'))
         T.update!(m, T.KeyEvent('q'))
         @test m.view_mode === :dashboard
         @test m.quit == false
+    end
+
+    @testset "Config Saved: pending_delete removes preset not chart (KD-UC-15)" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        @test length(m.charts) >= 3
+        n_charts0 = length(m.charts)
+        # Seed two named configs
+        push!(m.graph_presets, capture_graph_preset(m; name = "keep-me"))
+        push!(m.graph_presets, capture_graph_preset(m; name = "drop-me"))
+        @test length(m.graph_presets) == 2
+
+        T.update!(m, T.KeyEvent('e'))
+        @test m.view_mode === :config && m.config_tab === :saved
+        m.presets_selected = 2  # drop-me
+        T.update!(m, T.KeyEvent('d'))
+        @test m.pending_delete == true
+        @test occursin("confirm delete preset", m.last_event)
+        T.update!(m, T.KeyEvent('y'))
+        @test m.pending_delete == false
+        @test length(m.graph_presets) == 1
+        @test m.graph_presets[1].name == "keep-me"
+        @test length(m.charts) == n_charts0  # chart count unchanged
+        @test occursin("deleted preset", m.last_event)
+        # re-render Saved list
+        tb = T.TestBackend(100, 22); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 22), [], []))
+        full = join([string(T.row_text(tb, i)) for i in 1:22 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("keep-me", full)
+        @test !occursin("drop-me", full)
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
     end
 
     @testset "chart line styles: primary buffer density solid ≫ dotted" begin
@@ -5185,9 +5231,10 @@ end
         @test _live_may_advance(m) === false
         m.view_mode = :builder
         @test _live_may_advance(m) === false
-        m.view_mode = :presets
-        @test _live_may_advance(m) === false
         m.view_mode = :config
+        m.config_tab = :saved
+        @test _live_may_advance(m) === false
+        m.config_tab = :weco
         @test _live_may_advance(m) === false
         m.view_mode = :dashboard
         @test _live_may_advance(m) === true

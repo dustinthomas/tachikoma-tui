@@ -1796,7 +1796,7 @@ end
     # Slice 4+
     config_open::Bool = false
     config_selected::Int = 1
-    config_tab::Symbol = :weco   # :weco | :lines | :visual
+    config_tab::Symbol = :weco   # :weco | :lines | :visual | :saved
     # Slice 5+
     usl::Union{Float64, Nothing} = nothing
     target::Union{Float64, Nothing} = nothing
@@ -1822,7 +1822,7 @@ end
     library_scroll::Int = 0
     library_area::Rect = Rect(0, 0, 0, 0)
     library_last_click::Union{Nothing, NamedTuple{(:idx, :tick), Tuple{Int, Int}}} = nothing
-    view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder, :tools, :table, :presets, :config
+    view_mode::Symbol = :dashboard   # :dashboard, :focused, :help, :keymap, :library, :builder, :tools, :table, :config
     # Library / prompt SM (GC-PR2 / KD21)
     prompt_kind::Union{Nothing,Symbol} = nothing
     # :import_csv | :export_csv | :save_workbench | :load_workbench | :rename_chart
@@ -1841,7 +1841,7 @@ end
     tools_scroll::Int = 0
     tools_area::Rect = Rect(0, 0, 0, 0)
     tool_pending_id::String = ""   # staged id between :tool_add_id → :tool_add_desc
-    # Unified graph presets menu UI (view_mode=:presets)
+    # Config → Saved named-list selection (presets_selected/scroll; no separate :presets mode)
     presets_selected::Int = 1
     presets_scroll::Int = 0
     presets_area::Rect = Rect(0, 0, 0, 0)
@@ -2516,21 +2516,26 @@ function _sync_presets_scroll!(m::SPCWorkbenchModel, n::Int = length(m.graph_pre
     return nothing
 end
 
-"""Open unified Graph Presets menu (from dashboard or config)."""
-function _open_presets_menu!(m::SPCWorkbenchModel)
-    m.view_mode = :presets
-    m.config_open = false
-    m.pending_delete = false
-    m.prompt_kind = nothing
-    m.prompt_buf = ""
+"""Clamp presets_selected + sync scroll. Call on every entry into :saved (KD-UC-16)."""
+function _init_saved_selection!(m::SPCWorkbenchModel)
     n = length(m.graph_presets)
-    m.presets_selected = n >= 1 ? clamp(m.presets_selected, 1, n) : 1
+    if n < 1
+        m.presets_selected = 1
+        m.presets_scroll = 0
+        return nothing
+    end
+    m.presets_selected = clamp(m.presets_selected, 1, n)
     _sync_presets_scroll!(m)
-    m.last_event = "presets open"
     return nothing
 end
 
-"""Open full-page Config (Rules / Lines / Visual). Forces config_open=false — no dual UI."""
+"""Open Config → Saved (replaces dedicated :presets view_mode)."""
+function _open_presets_menu!(m::SPCWorkbenchModel)
+    _open_config!(m; tab = :saved)
+    return nothing
+end
+
+"""Open full-page Config (Rules / Lines / Visual / Saved). Forces config_open=false — no dual UI."""
 function _open_config!(m::SPCWorkbenchModel; tab::Symbol = :weco)
     m.view_mode = :config
     m.config_open = false          # always clear; never dual-path (KD-UC-7)
@@ -2539,15 +2544,21 @@ function _open_config!(m::SPCWorkbenchModel; tab::Symbol = :weco)
     m.pending_delete = false
     m.prompt_kind = nothing
     m.prompt_buf = ""
+    if tab === :saved
+        _init_saved_selection!(m)
+    end
     m.last_event = "config open $(tab)"
     return nothing
 end
 
-"""Jump section while already on Config (in-page c/v/o or Tab landing)."""
+"""Jump section while already on Config (in-page c/v/o/e or Tab landing)."""
 function _config_set_tab!(m::SPCWorkbenchModel, tab::Symbol)
     m.config_tab = tab
     m.config_selected = 1
     m.pending_delete = false
+    if tab === :saved
+        _init_saved_selection!(m)
+    end
     m.last_event = "config tab $(tab)"
     return nothing
 end
@@ -2578,7 +2589,7 @@ function _handle_config_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
         m.last_event = "config closed"
         return
     end
-    # In-Config section jumps: c/v/o stay on Config (do NOT close)
+    # In-Config section jumps: c/v/o/e stay on Config (do NOT close)
     if evt.key == :char && (evt.char == 'c' || evt.char == 'C')
         _config_set_tab!(m, :weco)
         return
@@ -2588,13 +2599,73 @@ function _handle_config_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
     elseif evt.key == :char && (evt.char == 'o' || evt.char == 'O')
         _config_set_tab!(m, :visual)
         return
+    elseif evt.key == :char && (evt.char == 'e' || evt.char == 'E')
+        _config_set_tab!(m, :saved)  # KD-UC-14 / PR3: e → Saved (not separate presets page)
+        return
     end
-    # Tab cycles WECO → Lines → Visual → WECO (three tabs only in PR2)
+    # Tab cycles Rules → Lines → Visual → Saved → Rules (KD-UC-3 / PR3 four-way)
     if evt.key == :tab || (evt.key == :char && evt.char == '\t')
-        next = m.config_tab == :weco ? :lines : (m.config_tab == :lines ? :visual : :weco)
+        next = if m.config_tab == :weco
+            :lines
+        elseif m.config_tab == :lines
+            :visual
+        elseif m.config_tab == :visual
+            :saved
+        else
+            :weco
+        end
         _config_set_tab!(m, next)
         return
     end
+    # Name-save available from any Config section
+    if evt.key == :char && (evt.char == 's' || evt.char == 'S')
+        _open_prompt!(m, :save_graph_preset; seed = "")
+        return
+    end
+    # ── Saved section: named list (replaces view_mode=:presets) ──────────
+    if m.config_tab === :saved
+        npre = length(m.graph_presets)
+        if npre >= 1
+            m.presets_selected = clamp(m.presets_selected, 1, npre)
+        end
+        if evt.key == :up
+            if npre >= 1
+                m.presets_selected = max(1, m.presets_selected - 1)
+            end
+            _sync_presets_scroll!(m)
+            m.last_event = "presets sel $(m.presets_selected)"
+            return
+        elseif evt.key == :down
+            if npre >= 1
+                m.presets_selected = min(npre, m.presets_selected + 1)
+            end
+            _sync_presets_scroll!(m)
+            m.last_event = "presets sel $(m.presets_selected)"
+            return
+        elseif evt.key == :enter || (evt.key == :char && evt.char == ' ')
+            # R2 load → dashboard; Space is intentional expansion (KD-UC-11 / PR3)
+            _load_selected_preset!(m)
+            return
+        elseif evt.key == :left || evt.key == :right
+            return  # consume — no pan while Config open
+        elseif evt.key == :char
+            c = evt.char
+            if c == 'l' || c == 'L' || c == 'a' || c == 'A'
+                _load_selected_preset!(m)
+                return
+            elseif c == 'd' || c == 'D'
+                if npre < 1
+                    m.last_event = "no presets to delete"
+                else
+                    m.pending_delete = true
+                    m.last_event = "confirm delete preset? y/N"
+                end
+                return
+            end
+        end
+        return  # absorb other keys on Saved — no fall-through
+    end
+    # ── Rules / Lines / Visual ───────────────────────────────────────────
     n_items = if m.config_tab == :lines
         length(CHART_LINE_KEYS)
     elseif m.config_tab == :visual
@@ -2657,64 +2728,8 @@ function _handle_config_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.last_event = "toggle $rid"
         end
         return
-    elseif evt.key == :char && (evt.char == 'S' || evt.char == 's' ||
-            evt.char == 'A' || evt.char == 'a' ||
-            evt.char == 'e' || evt.char == 'E')
-        # PR2 transitional: preserve path to presets page (Saved lands in PR3)
-        _open_presets_menu!(m)
-        return
     end
     return
-end
-
-"""Graph Presets full-page keys — only invoked while `view_mode == :presets`."""
-function _handle_presets_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
-    npre = length(m.graph_presets)
-    if npre >= 1
-        m.presets_selected = clamp(m.presets_selected, 1, npre)
-    end
-    if evt.key == :escape || (evt.key == :char && evt.char == 'q')
-        m.view_mode = :dashboard
-        m.pending_delete = false
-        m.last_event = "presets closed"
-        return
-    elseif evt.key == :up
-        if npre >= 1
-            m.presets_selected = max(1, m.presets_selected - 1)
-        end
-        _sync_presets_scroll!(m)
-        m.last_event = "presets sel $(m.presets_selected)"
-        return
-    elseif evt.key == :down
-        if npre >= 1
-            m.presets_selected = min(npre, m.presets_selected + 1)
-        end
-        _sync_presets_scroll!(m)
-        m.last_event = "presets sel $(m.presets_selected)"
-        return
-    elseif evt.key == :enter
-        _load_selected_preset!(m)
-        return
-    elseif evt.key == :char
-        c = evt.char
-        if c == 's' || c == 'S'
-            # Popup: name entry for saving current graph set
-            _open_prompt!(m, :save_graph_preset; seed = "")
-            return
-        elseif c == 'l' || c == 'L' || c == 'a' || c == 'A'
-            _load_selected_preset!(m)
-            return
-        elseif c == 'd' || c == 'D'
-            if npre < 1
-                m.last_event = "no presets to delete"
-            else
-                m.pending_delete = true
-                m.last_event = "confirm delete preset? y/N"
-            end
-            return
-        end
-    end
-    return  # absorb other keys — no fall-through
 end
 
 # ── Multi-plot pane selection + filters (GC-PR1 / GC-PR4) ───────────────
@@ -3400,7 +3415,7 @@ function _apply_prompt!(m::SPCWorkbenchModel)
         if err === nothing
             m.prompt_kind = nothing
             m.prompt_buf = ""
-            if m.view_mode === :presets
+            if m.view_mode === :presets || m.view_mode === :config
                 m.view_mode = :dashboard
             end
         else
@@ -3622,7 +3637,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     end
 
     # pending_delete: y confirms; any other key (incl Esc) clears — never quit
-    # Mode-local: tools → tool; presets → graph preset; library (or other) → chart.
+    # Mode-local: tools → tool; Config Saved (or legacy :presets) → graph preset; else chart.
     if m.pending_delete
         if evt.key == :char && (evt.char == 'y' || evt.char == 'Y')
             if m.view_mode == :tools
@@ -3635,7 +3650,9 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                 _sync_tools_scroll!(m)
                 m.last_event = ok ? "deleted tool" : "delete tool refused"
                 return
-            elseif m.view_mode == :presets
+            elseif m.view_mode == :presets ||
+                   (m.view_mode == :config && m.config_tab === :saved)
+                # KD-UC-15 CRITICAL: never fall through to chart-delete from Config Saved
                 npre = length(m.graph_presets)
                 if npre >= 1
                     m.presets_selected = clamp(m.presets_selected, 1, npre)
@@ -3830,15 +3847,9 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return  # absorb other keys — no fall-through
     end
 
-    # Full-page Config (Rules/Lines/Visual) — after prompt + pending_delete (KD-UC-7/14)
+    # Full-page Config (Rules/Lines/Visual/Saved) — after prompt + pending_delete (KD-UC-7/14)
     if m.view_mode == :config
         _handle_config_keys!(m, evt)
-        return
-    end
-
-    # Unified Graph Presets menu — Esc/q close without quit (PR2 bridge; folds into Config Saved in PR3)
-    if m.view_mode == :presets
-        _handle_presets_keys!(m, evt)
         return
     end
 
@@ -3872,8 +3883,8 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.last_event = "tools open"
             return
         elseif c == 'e' || c == 'E'
-            # Unified graph presets menu (save popup + load selected)
-            _open_presets_menu!(m)
+            # Open Config → Saved (named graph configs; replaces dedicated :presets page)
+            _open_config!(m; tab = :saved)
             return
         elseif c == 'd' || c == 'D'
             # SharedTable grid (P2-PR7 / KD-P2-20) — dashboard only; library/tools keep d=delete
@@ -4008,13 +4019,12 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         _update_library_mouse!(m, evt)
         return
     end
-    # Modal / tools / table / presets / config / prompt / pending_delete: keyboard-only (KD16)
+    # Modal / tools / table / config / prompt / pending_delete: keyboard-only (KD16)
     if m.config_open || m.editing !== nothing ||
        m.view_mode == :help || m.view_mode == :keymap ||
        m.view_mode == :builder ||
        m.view_mode == :tools ||
        m.view_mode == :table ||
-       m.view_mode == :presets ||
        m.view_mode == :config ||
        m.prompt_kind !== nothing || m.pending_delete
         m.last_event = string(evt.action, " ", evt.button, " (modal)")
@@ -4456,7 +4466,7 @@ function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
     return [
         (:section, "PAGES"),
         (:binds, [("m", "library"), ("x", "tools"), ("d", "table"), ("b", "builder")]),
-        (:binds, [("e", "presets"), ("f", "filter"), ("F", "clear"), ("h", "help")]),
+        (:binds, [("e", "saved cfg"), ("f", "filter"), ("F", "clear"), ("h", "help")]),
         (:binds, [("k", "keymap"), ("?", "less"), ("q", "quit")]),
         (:section, "NAV / LIVE"),
         (:binds, [("[ ]", "chart"), ("p", "pause"), ("g", "live"), ("←→", "pan")]),
@@ -4499,26 +4509,15 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
         ]
     elseif mode === :config
         compact && return [
-            (:binds, [("↑↓", "select"), ("↵/sp", "toggle"), ("Tab", "section"), ("←→", "style")]),
-            (:binds, [("c/v/o", "jump"), ("e", "presets"), ("Esc", "close"), ("q", "close")]),
+            (:binds, [("↑↓", "select"), ("↵/sp", "tog/load"), ("Tab", "section"), ("←→", "style")]),
+            (:binds, [("c/v/o/e", "jump"), ("s", "name-save"), ("Esc", "close"), ("q", "close")]),
         ]
         return [
             (:section, "CONFIG"),
-            (:binds, [("↑↓", "select"), ("↵/Space", "toggle"), ("1-N", "jump+toggle"), ("←/→", "style (lines)")]),
-            (:binds, [("Tab", "cycle section"), ("c", "rules"), ("v", "lines"), ("o", "visual")]),
-            (:binds, [("e", "presets menu"), ("s", "presets menu"), ("Esc", "close"), ("q", "close")]),
-            (:note, "toggles apply immediately · Esc/q only closes"),
-        ]
-    elseif mode === :presets
-        compact && return [
-            (:binds, [("↑↓", "select"), ("↵", "load"), ("l", "load"), ("s", "save")]),
-            (:binds, [("d", "delete"), ("Esc", "close"), ("q", "close")]),
-        ]
-        return [
-            (:section, "GRAPH PRESETS"),
-            (:binds, [("↑↓", "select"), ("↵/l", "load selected"), ("s", "save current")]),
-            (:binds, [("d", "delete"), ("Esc", "close"), ("q", "close")]),
-            (:note, "whole set: lines · styles · visual · WECO rules"),
+            (:binds, [("↑↓", "select"), ("↵/Space", "toggle · load(Saved)"), ("1-N", "jump+toggle"), ("←/→", "style (lines)")]),
+            (:binds, [("Tab", "cycle section"), ("c", "rules"), ("v", "lines"), ("o", "visual"), ("e", "saved")]),
+            (:binds, [("s", "name-save"), ("l/a", "load named"), ("d", "delete saved"), ("Esc/q", "close")]),
+            (:note, "toggles apply immediately · Saved load → dashboard · Esc/q only closes"),
         ]
     elseif mode === :table
         compact && return [
@@ -4577,7 +4576,6 @@ function _mode_keys_title(mode::Symbol)::String
     mode === :library && return "Keys  · Library"
     mode === :tools && return "Keys  · Tools"
     mode === :config && return "Keys  · Config"
-    mode === :presets && return "Keys  · Presets"
     mode === :table && return "Keys  · Table"
     mode === :builder && return "Keys  · Builder"
     mode === :help && return "Keys  · Help"
@@ -4881,9 +4879,6 @@ function view(m::SPCWorkbenchModel, f::Frame)
         return
     elseif m.view_mode == :config
         _render_config_page!(buf, area, m)
-        return
-    elseif m.view_mode == :presets
-        _render_presets_page!(buf, area, m)
         return
     elseif m.view_mode == :table
         _render_table_page!(buf, area, m)
@@ -5559,7 +5554,7 @@ function _render_tools_page!(buf, area, m)
     end
 end
 
-# ── Config full-page (view_mode=:config; Rules / Lines / Visual) ─────────
+# ── Config full-page (view_mode=:config; Rules / Lines / Visual / Saved) ─
 """Draw section body for Config page into `content` starting at row `y`. Returns next free y."""
 function _render_config_section_body!(buf, content, m; y::Int)
     bot = bottom(content)
@@ -5588,6 +5583,10 @@ function _render_config_section_body!(buf, content, m; y::Int)
                 idx == m.config_selected ? tstyle(:accent, bold=true) : tstyle(:text))
             y += 1
         end
+    elseif m.config_tab === :saved
+        # Track list area for scroll capacity (KD-UC-16)
+        m.presets_area = content
+        y = _render_presets_list_body!(buf, content, m; y = y)
     else
         for (idx, rid) in enumerate(["WECO-1","WECO-2","WECO-3","WECO-4","WECO-5","WECO-6","WECO-7","WECO-8"])
             y > bot && break
@@ -5602,27 +5601,36 @@ function _render_config_section_body!(buf, content, m; y::Int)
     return y
 end
 
-"""Full-page Config: Rules / Lines / Visual via `_split_mode_chrome` (no plot overlay)."""
+"""Full-page Config: Rules / Lines / Visual / Saved via `_split_mode_chrome`."""
 function _render_config_page!(buf, area, m)
     content, chrome = _split_mode_chrome(area)
     set_string!(buf, content.x + 1, content.y,
         "CONFIG  ·  Esc/q → dashboard", tstyle(:title, bold=true))
     y = content.y + 1
-    # Section strip — current tab bold; PR2 has three tabs only (no Saved)
+    # Section strip — current tab bold (four-way including Saved)
     rules_sty = m.config_tab == :weco ? tstyle(:accent, bold=true) : tstyle(:text_dim)
     lines_sty = m.config_tab == :lines ? tstyle(:accent, bold=true) : tstyle(:text_dim)
     visual_sty = m.config_tab == :visual ? tstyle(:accent, bold=true) : tstyle(:text_dim)
+    saved_sty = m.config_tab === :saved ? tstyle(:accent, bold=true) : tstyle(:text_dim)
     set_string!(buf, content.x + 2, y, "[Rules]", rules_sty)
     set_string!(buf, content.x + 12, y, "[Lines]", lines_sty)
     set_string!(buf, content.x + 22, y, "[Visual]", visual_sty)
-    set_string!(buf, content.x + 34, y, "Tab cycle · ←/→ style · e presets menu", tstyle(:text_dim))
+    set_string!(buf, content.x + 33, y, "[Saved]", saved_sty)
+    set_string!(buf, content.x + 44, y, "Tab cycle · ←/→ style · e saved", tstyle(:text_dim))
     y += 1
     tab_lbl = m.config_tab == :lines ? "Chart Lines" :
-              (m.config_tab == :visual ? "Visual Preferences" : "WECO Rules")
+              (m.config_tab == :visual ? "Visual Preferences" :
+               (m.config_tab === :saved ? "Saved Configs" : "WECO Rules"))
     chname = isempty(m.charts) ? "—" : current_chart(m).name
-    set_string!(buf, content.x + 2, y,
-        "Section: $tab_lbl   ·  Active chart: $chname   ·  toggles apply immediately",
-        tstyle(:text_dim))
+    if m.config_tab === :saved
+        set_string!(buf, content.x + 2, y,
+            "Section: $tab_lbl   ·  Enter/l/a/Space load → dashboard   ·  s name-save   ·  d delete",
+            tstyle(:text_dim))
+    else
+        set_string!(buf, content.x + 2, y,
+            "Section: $tab_lbl   ·  Active chart: $chname   ·  toggles apply immediately",
+            tstyle(:text_dim))
+    end
     y += 2
     _render_config_section_body!(buf, content, m; y = y)
     if chrome !== nothing
@@ -5631,7 +5639,7 @@ function _render_config_page!(buf, area, m)
     return nothing
 end
 
-# ── Unified Graph Presets page — save popup + load selected ─────────────
+# ── Named configs list body (Config → Saved) ────────────────────────────
 """Draw the named presets list body into `content` starting at row `y`. Returns next free y."""
 function _render_presets_list_body!(buf, content, m; y::Int)
     npre = length(m.graph_presets)
@@ -5639,7 +5647,7 @@ function _render_presets_list_body!(buf, content, m; y::Int)
         m.presets_selected = clamp(m.presets_selected, 1, npre)
     end
     set_string!(buf, content.x + 2, y,
-        "Presets: $npre   selected=$(m.presets_selected)   (whole set: lines · styles · visual · WECO)",
+        "Saved: $npre   selected=$(m.presets_selected)   (whole set: lines · styles · visual · WECO)",
         tstyle(:text_dim))
     y += 2
     capacity = _presets_visible_capacity(m)
@@ -5667,18 +5675,6 @@ function _render_presets_list_body!(buf, content, m; y::Int)
         end
     end
     return y
-end
-
-function _render_presets_page!(buf, area, m)
-    content, chrome = _split_mode_chrome(area)
-    m.presets_area = content
-    set_string!(buf, content.x + 1, content.y,
-        "GRAPH PRESETS  ·  Esc/q → dashboard", tstyle(:title, bold=true))
-    y = content.y + 2
-    _render_presets_list_body!(buf, content, m; y = y)
-    if chrome !== nothing
-        _render_mode_chrome!(buf, chrome, m; mode=:presets)
-    end
 end
 
 # ── Dedicated Help page — Keys-style chip sections ──────────────────────
@@ -5834,7 +5830,7 @@ function _live_may_advance(m::SPCWorkbenchModel)::Bool
     m.config_open && return false
     m.prompt_kind !== nothing && return false
     m.pending_delete && return false
-    m.view_mode in (:help, :keymap, :library, :builder, :tools, :table, :presets, :config) && return false
+    m.view_mode in (:help, :keymap, :library, :builder, :tools, :table, :config) && return false
     ch = current_chart(m)
     (isempty(ch.data.values) || !ch.live_enabled) && return false
     return true
