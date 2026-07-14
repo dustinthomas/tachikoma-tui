@@ -3276,6 +3276,153 @@ end
         end
     end
 
+    @testset "side stats WECO: H=36 boxed chips + digit_x=glyph_x + side_outer/geom (PR2)" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true)
+        tb = T.TestBackend(100, 36); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 36), [], []))
+        @test m.side_area.width > 0
+        @test m.side_outer.width > 0
+        @test m.side_outer.x <= m.side_area.x
+        @test m.side_outer.width >= m.side_area.width
+        @test m.weco_bubble_geom !== nothing
+        g = m.weco_bubble_geom
+        @test g.boxed === true
+        @test g.step == 3
+        @test g.n == 8
+        @test g.y > 0 && g.x0 > 0
+
+        found = _side_weco_bubbles(tb, m)
+        @test found !== nothing
+        if found !== nothing
+            # Brackets present on bubble row around glyphs
+            row_chars = Char[T.char_at(tb, x, found.y) for x in found.sa.x:T.right(found.sa)]
+            @test count(==('['), row_chars) >= 8
+            @test count(==(']'), row_chars) >= 8
+            # Glyph xs match geom centers: x0 + (i-1)*3 + 1
+            bubble_xs = Int[]
+            for x in found.sa.x:T.right(found.sa)
+                ch = T.char_at(tb, x, found.y)
+                (ch == '●' || ch == '○') && push!(bubble_xs, x)
+            end
+            @test length(bubble_xs) == 8
+            expected_xs = [g.x0 + (i - 1) * g.step + 1 for i in 1:8]
+            @test bubble_xs == expected_xs
+            # Digits under glyph centers (digit_x = glyph_x)
+            num_y = found.y + 1
+            digits = Char[T.char_at(tb, x, num_y) for x in bubble_xs]
+            @test digits == ['1', '2', '3', '4', '5', '6', '7', '8']
+            # Default no-hover: ON success, OFF dim (not warning)
+            @test m.hovered === nothing
+            @test T.style_at(tb, bubble_xs[1], found.y) == T.tstyle(:success)
+            @test T.style_at(tb, bubble_xs[6], found.y) == T.tstyle(:text_dim)
+        end
+    end
+
+    @testset "side stats WECO: hover multi-highlight + leave clears warning (PR2)" begin
+        # Same-index multi: 8 points above CL with last beyond +3σ → WECO-1 + WECO-4 at #8
+        cl, s = 0.0, 1.0
+        vals = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 3.5]
+        d = WorkbenchData(values = vals, cl = cl, sigma = s)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        ch = current_chart(m)
+        ch.limits_mode = :manual
+        ch.manual_cl = cl
+        ch.manual_ucl = cl + 3 * s
+        ch.manual_lcl = cl - 3 * s
+        ch.enabled_rules = Dict(
+            "WECO-1" => true, "WECO-2" => true, "WECO-3" => true, "WECO-4" => true,
+            "WECO-5" => true, "WECO-6" => false, "WECO-7" => false, "WECO-8" => false,
+        )
+        m.enabled_rules = ch.enabled_rules
+        ctx = resolve_chart_render_context(ch)
+        viols = weco_detect(ch.data.values, ctx.lz.cl, ctx.lz.sigma; enabled_rules=ch.enabled_rules)
+        rules8 = weco_rules_at_index(viols, 8)
+        @test "WECO-1" in rules8
+        @test "WECO-4" in rules8
+        @test length(rules8) >= 2
+
+        # No hover: enable-only styles
+        tb0 = T.TestBackend(100, 36); T.reset!(tb0.buf)
+        T.view(m, T.Frame(tb0.buf, T.Rect(1, 1, 100, 36), [], []))
+        found0 = _side_weco_bubbles(tb0, m)
+        @test found0 !== nothing
+        warn_sty = T.tstyle(:warning, bold=true)
+        if found0 !== nothing
+            bubble_xs0 = Int[]
+            for x in found0.sa.x:T.right(found0.sa)
+                ch = T.char_at(tb0, x, found0.y)
+                (ch == '●' || ch == '○') && push!(bubble_xs0, x)
+            end
+            @test length(bubble_xs0) == 8
+            @test T.style_at(tb0, bubble_xs0[1], found0.y) == T.tstyle(:success)
+            @test T.style_at(tb0, bubble_xs0[4], found0.y) == T.tstyle(:success)
+            @test T.style_at(tb0, bubble_xs0[1], found0.y) != warn_sty
+        end
+
+        # Hover multi-rule OOC at index 8 → ≥2 chips warning bold
+        m.hovered = 8
+        tb1 = T.TestBackend(100, 36); T.reset!(tb1.buf)
+        T.view(m, T.Frame(tb1.buf, T.Rect(1, 1, 100, 36), [], []))
+        found1 = _side_weco_bubbles(tb1, m)
+        @test found1 !== nothing
+        if found1 !== nothing
+            bubble_xs1 = Int[]
+            for x in found1.sa.x:T.right(found1.sa)
+                ch = T.char_at(tb1, x, found1.y)
+                (ch == '●' || ch == '○') && push!(bubble_xs1, x)
+            end
+            @test length(bubble_xs1) == 8
+            n_warn = count(i -> T.style_at(tb1, bubble_xs1[i], found1.y) == warn_sty, 1:8)
+            @test n_warn >= 2
+            # Rules that fire at 8 (at least 1 and 4) are warning
+            for rid in rules8
+                k = parse(Int, replace(rid, "WECO-" => ""))
+                @test T.style_at(tb1, bubble_xs1[k], found1.y) == warn_sty
+            end
+            # Non-firing ON chip (e.g. WECO-2 if not in rules8) stays success
+            for k in 1:5
+                rid = "WECO-$k"
+                if rid ∉ rules8
+                    @test T.style_at(tb1, bubble_xs1[k], found1.y) == T.tstyle(:success)
+                end
+            end
+        end
+
+        # Hover OK / non-viol index → no warning chips
+        m.hovered = 1
+        @test isempty(weco_rules_at_index(viols, 1))
+        tb_ok = T.TestBackend(100, 36); T.reset!(tb_ok.buf)
+        T.view(m, T.Frame(tb_ok.buf, T.Rect(1, 1, 100, 36), [], []))
+        found_ok = _side_weco_bubbles(tb_ok, m)
+        @test found_ok !== nothing
+        if found_ok !== nothing
+            bubble_xs_ok = Int[]
+            for x in found_ok.sa.x:T.right(found_ok.sa)
+                ch = T.char_at(tb_ok, x, found_ok.y)
+                (ch == '●' || ch == '○') && push!(bubble_xs_ok, x)
+            end
+            @test all(i -> T.style_at(tb_ok, bubble_xs_ok[i], found_ok.y) != warn_sty, 1:8)
+        end
+
+        # Leave hover → warning cleared
+        m.hovered = nothing
+        tb2 = T.TestBackend(100, 36); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 36), [], []))
+        found2 = _side_weco_bubbles(tb2, m)
+        @test found2 !== nothing
+        if found2 !== nothing
+            bubble_xs2 = Int[]
+            for x in found2.sa.x:T.right(found2.sa)
+                ch = T.char_at(tb2, x, found2.y)
+                (ch == '●' || ch == '○') && push!(bubble_xs2, x)
+            end
+            @test all(i -> T.style_at(tb2, bubble_xs2[i], found2.y) != warn_sty, 1:8)
+            @test T.style_at(tb2, bubble_xs2[1], found2.y) == T.tstyle(:success)
+        end
+    end
+
     # Side panel chart-line parameters (CL/±1/±2/±3/Specs) + configurable visibility
     function _side_rows_text(tb, m)
         sa = m.side_area

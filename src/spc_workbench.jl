@@ -1993,6 +1993,15 @@ end
 
 # ── Model (slice 2+) ────────────────────────────────────────────────────
 
+"""WECO chip row geometry for hit-testing (PR3) and hover paint (PR2)."""
+@kwdef mutable struct WecoBubbleGeom
+    y::Int = 0
+    x0::Int = 0          # first chip left edge
+    step::Int = 1        # 1 bare, 3 boxed
+    n::Int = 8
+    boxed::Bool = false
+end
+
 @kwdef mutable struct SPCWorkbenchModel <: Model
     quit::Bool = false
     tick::Int = 0
@@ -2005,6 +2014,10 @@ end
     paused::Bool = false
     plot_area::Rect = Rect(0, 0, 0, 0)
     side_area::Rect = Rect(0, 0, 0, 0)
+    # Layout side_rect (outer Block); side_area is Block inner. Paint-owned each view.
+    side_outer::Rect = Rect(0, 0, 0, 0)
+    # WECO chip geom (inner coords); cleared each side paint, set when bubbles draw.
+    weco_bubble_geom::Union{Nothing, WecoBubbleGeom} = nothing
     drag_start::Union{Nothing, NamedTuple{(:x, :y, :vp), Tuple{Int, Int, Viewport}}} = nothing
     last_event::String = ""
     live_max::Int = 200
@@ -6440,14 +6453,18 @@ function _side_line_keys(nb::Int; drop_sigma12::Bool)::Vector{Symbol}
 end
 
 """
-Render dashboard Side Stats into `side_rect` (outer). Sets `m.side_area` to Block inner.
+Render dashboard Side Stats into `side_rect` (outer). Sets `m.side_area` to Block inner
+and `m.side_outer` to the layout outer rect. Clears `m.weco_bubble_geom` each paint
+(re-set when WECO bubbles draw).
 `variant`: `:full` | `:empty_filter`
 """
 function _render_side_stats!(buf, side_rect, m::SPCWorkbenchModel;
                              variant::Symbol = :full)
     side_block = Block(title="Side Stats (chart $(m.active)/$(max(1,length(m.charts))) • dashboard)", border_style=tstyle(:border))
     side_inner = render(side_block, side_rect, buf)
+    m.side_outer = side_rect
     m.side_area = side_inner
+    m.weco_bubble_geom = nothing  # paint-owned; set in _side_sec_weco! when bubbles draw
     if variant === :empty_filter
         _side_sec_charts_empty!(buf, side_inner, m)
         return
@@ -6657,6 +6674,12 @@ end
 """
 ▸ WECO — bubbles → [digits if rem≥2 after bubbles] → Viols: N → msgs.
 Optional blank gap before chrome when tall (D5).
+
+KD-WB-1 hybrid chrome: bare ●/○ under compact_h11 / same-row / maxw<24;
+boxed `[●]` chips when tall, not same-row, and maxw≥24. Digits at glyph_x
+(chip center when boxed). Hover multi-highlight: rules in
+`weco_rules_at_index(viols, hovered)` paint center glyph `:warning bold`.
+Records `m.weco_bubble_geom` for PR3 hit-testing.
 """
 function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
                          m::SPCWorkbenchModel, act_ctx, act_ch, side_inner;
@@ -6687,29 +6710,60 @@ function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     end
     rem < 1 && return y
 
-    # 1) Bubble row
+    # Hoist viols once for Viols list + hover multi-highlight (KD-WB-1)
+    side_viols = weco_detect(act_ch.data.values, act_ctx.lz.cl, act_ctx.lz.sigma;
+                             enabled_rules = act_ch.enabled_rules)
+    hover_rules = if (hi = m.hovered) !== nothing
+        weco_rules_at_index(side_viols, hi)
+    else
+        String[]
+    end
+    hover_set = Set(hover_rules)
+
+    # KD-WB-1: boxed only when tall, not same-row, and width allows 8×3 chips
+    boxed = !compact_h11 && !same_row_label && maxw >= 24
+    step = boxed ? 3 : 1
+
+    # 1) Bubble row (bare or boxed hybrid)
     bx0 = same_row_label ? x + 5 : x
     if same_row_label
         set_string!(buf, x, y, "WECO ", tstyle(:text_dim))
     end
+    bubble_y = y
+    side_right = right(side_inner)
     for i in 1:8
         rid = "WECO-$i"
         on = get(act_ch.enabled_rules, rid, false)
-        bx = bx0 + i - 1
-        if bx <= right(side_inner)
-            set_char!(buf, bx, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
+        x_left = bx0 + (i - 1) * step
+        glyph_x = boxed ? x_left + 1 : x_left
+        # Hover fire overrides enable style on center glyph only
+        if rid in hover_set
+            sty = tstyle(:warning, bold=true)
+        else
+            sty = on ? tstyle(:success) : tstyle(:text_dim)
+        end
+        glyph = on ? '●' : '○'
+        if boxed
+            x_left <= side_right && set_char!(buf, x_left, y, '[', tstyle(:text_dim))
+            glyph_x <= side_right && set_char!(buf, glyph_x, y, glyph, sty)
+            (x_left + 2) <= side_right && set_char!(buf, x_left + 2, y, ']', tstyle(:text_dim))
+        else
+            glyph_x <= side_right && set_char!(buf, glyph_x, y, glyph, sty)
         end
     end
+    m.weco_bubble_geom = WecoBubbleGeom(y=bubble_y, x0=bx0, step=step, n=8, boxed=boxed)
     y += 1
     rem = bot - y + 1
 
     # 2) Digit row only if rem ≥ 2 after bubbles (need digits + Viols); else skip (D6).
     #    KD-SS-17 H≤11: always omit digits (D6 ≺ D17 Viols) — keep bubble + Viols tight.
+    #    digit_x = glyph_x (center of boxed chip); NOT x_left of brackets.
     if rem >= 2 && !compact_h11
         for i in 1:8
-            nx = bx0 + i - 1
-            if nx <= right(side_inner)
-                set_char!(buf, nx, y, Char('0' + i), tstyle(:text_dim))
+            x_left = bx0 + (i - 1) * step
+            digit_x = boxed ? x_left + 1 : x_left
+            if digit_x <= side_right
+                set_char!(buf, digit_x, y, Char('0' + i), tstyle(:text_dim))
             end
         end
         y += 1
@@ -6717,8 +6771,6 @@ function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     end
 
     # 3) Viols: N (D17) — prefer over digits when only one row left after bubbles
-    side_viols = weco_detect(act_ch.data.values, act_ctx.lz.cl, act_ctx.lz.sigma;
-                             enabled_rules = act_ch.enabled_rules)
     show_viols = _side_viol_msgs_by_index(side_viols; n = SIDE_VIOL_MSG_MAX)
     nv = length(side_viols)
     if y <= bot
