@@ -558,13 +558,7 @@ end
 
 # ── File browser listing + graph-config index (PR2 pure IO) ─────────────
 
-"""One directory or file row for the in-TUI file explorer (PR2 listing / PR3 UI)."""
-@kwdef struct FileBrowserEntry
-    name::String
-    path::String
-    is_dir::Bool
-    is_parent::Bool = false
-end
+# FileBrowserEntry is defined in spc_workbench.jl (model field type).
 
 """
     list_browser_entries(cwd; show_hidden=false, file_pred, max_entries=500)

@@ -30,7 +30,7 @@ export SS_FACTORS, subgroup_means_and_ranges, subgroup_means_and_s
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 export LINE_STYLE_KEYS, LINE_STYLE_LABELS, DEFAULT_CHART_LINE_STYLES
 export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS
-export GraphPreset, capture_graph_preset, apply_graph_preset!
+export GraphPreset, FileBrowserEntry, capture_graph_preset, apply_graph_preset!
 export save_named_graph_preset!, apply_named_graph_preset!
 export is_attribute_chart
 export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_type, chart_type_to_string

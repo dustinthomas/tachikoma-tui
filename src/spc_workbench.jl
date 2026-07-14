@@ -607,6 +607,14 @@ JSON files never embed it (see `graph_preset_to_dict(; include_path)`).
     path::String = ""  # local disk path; empty = memory/legacy only
 end
 
+"""One directory or file row for the in-TUI file explorer (PR2 listing / PR3 UI)."""
+@kwdef struct FileBrowserEntry
+    name::String
+    path::String
+    is_dir::Bool
+    is_parent::Bool = false
+end
+
 # ── Saved-list body chips (PR1 path-free polish; KD-SE-10) ───────────────
 """WECO chip from in-memory preset body: \"N/8\" enabled rules."""
 function _preset_weco_chip(p::GraphPreset)::String
@@ -1490,7 +1498,7 @@ export group_values_by_keys, subgroup_means_and_ranges_from_groups, subgroup_mea
 export DEFAULT_WECO_RULES, DEFAULT_CHART_LINES, CHART_LINE_KEYS
 export LINE_STYLE_KEYS, LINE_STYLE_LABELS, DEFAULT_CHART_LINE_STYLES
 export DEFAULT_VISUAL_PREFS, VISUAL_PREF_KEYS
-export GraphPreset
+export GraphPreset, FileBrowserEntry
 export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_type, chart_type_to_string
 export I_MR, Xbar_R, Xbar_S, p_chart, np_chart, c_chart, u_chart
 export SharedTable, mean_or_0, std_or_0, compute_chart_series, materialize_chart_from_table!
@@ -1850,10 +1858,25 @@ end
     # :import_csv | :export_csv | :save_workbench | :load_workbench | :rename_chart
     # :filter_tool | :filter_type | :filter_owner  (GC-PR4)
     # :tool_add_id | :tool_add_desc | :tool_edit_desc  (P2-PR4 tools registry)
-    # :save_graph_preset | :apply_graph_preset  (named graph config presets)
-    # :save_graph_config | :load_graph_config   (file path save/load; PR4)
+    # :save_graph_preset | :apply_graph_preset  (named graph config presets; programmatic)
+    # :save_graph_config | :load_graph_config   (typed path fallback; explorer is primary)
     prompt_buf::String = ""
     pending_delete::Bool = false
+    # Overwrite confirm for Save As when target file exists (KD-SE-8)
+    pending_overwrite::Bool = false
+    pending_overwrite_path::String = ""
+    # In-TUI file explorer modal (not a view_mode; KD-SE-2)
+    file_browser_open::Bool = false
+    file_browser_mode::Symbol = :load_graph_config  # :save_graph_config | :load_graph_config
+    file_browser_cwd::String = ""
+    file_browser_entries::Vector{FileBrowserEntry} = FileBrowserEntry[]
+    file_browser_selected::Int = 1
+    file_browser_scroll::Int = 0
+    file_browser_name_buf::String = ""
+    file_browser_focus::Symbol = :list  # :list | :name
+    file_browser_show_hidden::Bool = false
+    file_browser_error::String = ""
+    file_browser_truncated::Bool = false
     # Prefill only for export prompts — never silent write to default path
     last_export_path::String = ""
     # Seed policy when charts empty — NEVER flip default from :triple
@@ -1872,6 +1895,8 @@ end
     last_workbench_path::String = ""
     # Prefill only for graph-config file prompts — never silent write (KD-UC-8)
     last_graph_config_path::String = ""
+    # Injectable index path for tests; empty → default_graph_config_index_path() (KD-SE-5)
+    graph_config_index_path::String = ""
     # Session-ephemeral dashboard/library filters (GC-PR4) — NOT in JSON schema
     filter_tool::String = ""       # empty = no filter; match requires tool in ch.tools
     filter_type::String = ""       # wire form e.g. "I-MR"; empty = no filter (NOT Union{Nothing,ChartType})
@@ -2347,6 +2372,491 @@ end
 
 export capture_graph_preset, apply_graph_preset!, save_named_graph_preset!, apply_named_graph_preset!
 
+# ── File explorer + disk-first save/load helpers (PR3 / KD-SE-*) ─────────
+
+"""Path of the currently selected Saved entry, or \"\"."""
+function _selected_entry_path(m::SPCWorkbenchModel)::String
+    n = length(m.graph_presets)
+    n < 1 && return ""
+    m.presets_selected = clamp(m.presets_selected, 1, n)
+    return strip(m.graph_presets[m.presets_selected].path)
+end
+
+"""Effective durable index path (injectable for tests; empty → XDG default)."""
+function _effective_index_path(m::SPCWorkbenchModel)::String
+    isempty(strip(m.graph_config_index_path)) ?
+        default_graph_config_index_path() :
+        m.graph_config_index_path
+end
+
+"""Start directory for the file explorer (KD-SE-11)."""
+function _browser_start_dir(m::SPCWorkbenchModel, seed_path::AbstractString = "")::String
+    candidates = String[]
+    sp = strip(String(seed_path))
+    !isempty(sp) && push!(candidates, sp)
+    !isempty(strip(m.last_graph_config_path)) && push!(candidates, m.last_graph_config_path)
+    sel = _selected_entry_path(m)
+    !isempty(sel) && push!(candidates, sel)
+    for c in candidates
+        ap = abspath(expanduser(c))
+        if isfile(ap)
+            parent = dirname(ap)
+            isdir(parent) && return parent
+        elseif isdir(ap)
+            return ap
+        else
+            parent = dirname(ap)
+            isdir(parent) && return parent
+        end
+    end
+    pwd_dir = pwd()
+    isdir(pwd_dir) && return abspath(pwd_dir)
+    return abspath(homedir())
+end
+
+"""Seed filename buffer for Save As (empty for load mode) (KD-SE-11)."""
+function _browser_seed_name(
+    m::SPCWorkbenchModel,
+    mode::Symbol,
+    seed_path::AbstractString = "",
+)::String
+    mode === :load_graph_config && return ""
+    for c in (seed_path, m.last_graph_config_path, _selected_entry_path(m))
+        s = strip(String(c))
+        isempty(s) && continue
+        return basename(s)  # even if file missing
+    end
+    return "config.json"
+end
+
+"""Refresh `file_browser_entries` from `file_browser_cwd` (fail-closed)."""
+function _browser_refresh!(m::SPCWorkbenchModel)
+    result = list_browser_entries(
+        m.file_browser_cwd;
+        show_hidden = m.file_browser_show_hidden,
+    )
+    if result isa AbstractString
+        m.file_browser_entries = FileBrowserEntry[]
+        m.file_browser_error = String(result)
+        m.file_browser_truncated = false
+        m.file_browser_selected = 1
+        m.file_browser_scroll = 0
+        m.last_event = String(result)
+        return nothing
+    end
+    ents = result::Vector{FileBrowserEntry}
+    m.file_browser_entries = ents
+    # Cap is enforced in list_browser_entries; flag if max hit (500)
+    m.file_browser_truncated = length(ents) >= 500
+    if !isempty(m.file_browser_error) && startswith(m.file_browser_error, "browser err:")
+        m.file_browser_error = ""
+    end
+    n = length(ents)
+    m.file_browser_selected = n >= 1 ? clamp(m.file_browser_selected, 1, n) : 1
+    _sync_file_browser_scroll!(m)
+    return nothing
+end
+
+const FILE_BROWSER_LIST_VISIBLE = 8
+
+function _sync_file_browser_scroll!(m::SPCWorkbenchModel)
+    n = length(m.file_browser_entries)
+    n <= 0 && (m.file_browser_selected = 1; m.file_browser_scroll = 0; return)
+    m.file_browser_selected = clamp(m.file_browser_selected, 1, n)
+    vis = FILE_BROWSER_LIST_VISIBLE
+    max_scroll = max(0, n - vis)
+    scroll = clamp(m.file_browser_scroll, 0, max_scroll)
+    sel = m.file_browser_selected
+    if sel <= scroll
+        scroll = sel - 1
+    elseif sel > scroll + vis
+        scroll = sel - vis
+    end
+    m.file_browser_scroll = clamp(scroll, 0, max_scroll)
+    return nothing
+end
+
+function _close_file_browser!(m::SPCWorkbenchModel)
+    m.file_browser_open = false
+    m.file_browser_error = ""
+    return nothing
+end
+
+"""Open in-TUI file explorer (clears prompt/delete/overwrite — KD-SE-8)."""
+function _open_file_browser!(
+    m::SPCWorkbenchModel;
+    mode::Symbol,
+    seed_path::AbstractString = "",
+)
+    m.file_browser_open = true
+    m.file_browser_mode = mode
+    m.prompt_kind = nothing
+    m.prompt_buf = ""
+    m.pending_delete = false
+    m.pending_overwrite = false
+    m.pending_overwrite_path = ""
+    m.file_browser_cwd = _browser_start_dir(m, seed_path)
+    m.file_browser_name_buf = _browser_seed_name(m, mode, seed_path)
+    m.file_browser_focus = mode === :save_graph_config ? :name : :list
+    m.file_browser_selected = 1
+    m.file_browser_scroll = 0
+    m.file_browser_error = ""
+    m.file_browser_truncated = false
+    _browser_refresh!(m)
+    m.last_event = "file browser $(mode)"
+    return nothing
+end
+
+"""
+Normalize Save As filename (KD-SE-20).
+Returns `(ok::Bool, value::String)` — on failure `value` is `\"save err: …\"`.
+"""
+function _normalize_save_filename(name_buf::AbstractString)::Tuple{Bool,String}
+    n = strip(String(name_buf))
+    isempty(n) && return (false, "save err: empty filename")
+    (n == "." || n == "..") && return (false, "save err: invalid filename")
+    (occursin('/', n) || occursin('\\', n)) &&
+        return (false, "save err: filename must not contain path separators")
+    if !endswith(lowercase(n), ".json")
+        n = n * ".json"
+    end
+    return (true, n)
+end
+
+"""Arm overwrite confirm: close explorer first (KD-SE-8)."""
+function _arm_overwrite!(m::SPCWorkbenchModel, path::AbstractString)
+    m.file_browser_open = false
+    m.prompt_kind = nothing
+    m.prompt_buf = ""
+    m.pending_delete = false
+    m.pending_overwrite = true
+    m.pending_overwrite_path = abspath(expanduser(strip(String(path))))
+    m.last_event = "overwrite? y/N $(m.pending_overwrite_path)"
+    return nothing
+end
+
+"""Path-upsert index + write (no-op when index helpers unavailable)."""
+function _index_upsert_and_write!(m::SPCWorkbenchModel, p::GraphPreset)
+    raw = strip(p.path)
+    isempty(raw) && return nothing
+    try
+        idx_path = _effective_index_path(m)
+        entries = read_graph_config_index(idx_path)
+        e = graph_config_index_entry_from_preset(p)
+        e === nothing && return nothing
+        upsert_graph_config_index_entry!(entries, e)
+        err = write_graph_config_index(idx_path, entries)
+        if err !== nothing
+            # non-fatal — save already succeeded
+            m.file_browser_error = String(err)
+        end
+    catch
+        # index helpers may be absent in pure workbench include
+    end
+    return nothing
+end
+
+"""Touch last_used on load and write index."""
+function _index_touch_and_write!(m::SPCWorkbenchModel, p::GraphPreset)
+    raw = strip(p.path)
+    isempty(raw) && return nothing
+    try
+        idx_path = _effective_index_path(m)
+        entries = read_graph_config_index(idx_path)
+        e = graph_config_index_entry_from_preset(p)
+        e === nothing && return nothing
+        # Prefer keeping existing saved_at if present
+        i = findfirst(x -> abspath(expanduser(strip(x.path))) == e.path, entries)
+        if i !== nothing
+            e.saved_at = isempty(strip(entries[i].saved_at)) ? e.saved_at : entries[i].saved_at
+        end
+        upsert_graph_config_index_entry!(entries, e)
+        write_graph_config_index(idx_path, entries)
+    catch
+    end
+    return nothing
+end
+
+"""
+    _apply_save_graph_config_path!(m, path) -> Bool
+
+Write graph config to disk, path-upsert list + index, select entry, set
+`last_graph_config_path` (KD-SE-23). Stays on Config.
+"""
+function _apply_save_graph_config_path!(m::SPCWorkbenchModel, path::AbstractString)::Bool
+    path = abspath(expanduser(strip(String(path))))
+    if isempty(path)
+        m.last_event = "save err: empty path"
+        return false
+    end
+    name = _graph_config_name_from_path(path)
+    p = capture_graph_preset(m; name = name)
+    p.path = path
+    err = save_graph_preset(p, path)
+    if err !== nothing
+        m.last_event = startswith(String(err), "save err:") ? String(err) : "save err: $err"
+        return false
+    end
+    _upsert_graph_preset!(m, p)
+    idx = findfirst(
+        e -> !isempty(strip(e.path)) && abspath(expanduser(strip(e.path))) == path,
+        m.graph_presets,
+    )
+    if idx !== nothing
+        m.presets_selected = idx
+        _sync_presets_scroll!(m)
+    end
+    m.last_graph_config_path = path
+    _index_upsert_and_write!(m, p)
+    m.file_browser_open = false
+    m.prompt_kind = nothing
+    m.prompt_buf = ""
+    m.pending_overwrite = false
+    m.pending_overwrite_path = ""
+    m.last_event = "saved graph config $path"
+    return true
+end
+
+"""
+    _apply_load_graph_config_path!(m, path) -> Bool
+
+Load from disk, path-upsert, apply, go dashboard (R2). Final event
+`\"loaded graph config \$path\"` (KD-SE-16).
+"""
+function _apply_load_graph_config_path!(m::SPCWorkbenchModel, path::AbstractString)::Bool
+    path = abspath(expanduser(strip(String(path))))
+    if isempty(path)
+        m.last_event = "load err: empty path"
+        return false
+    end
+    result = load_graph_preset(path)
+    if result isa AbstractString
+        m.last_event = startswith(String(result), "load err:") ? String(result) : "load err: $result"
+        return false
+    end
+    p = result::GraphPreset
+    p.path = path
+    up_err = _upsert_graph_preset!(m, p)
+    if up_err !== nothing
+        m.last_event = String(up_err)
+        return false
+    end
+    apply_graph_preset!(m, p)  # sets "preset applied: …" briefly
+    m.last_graph_config_path = path
+    m.last_event = "loaded graph config $path"  # KD-SE-16 final
+    _index_touch_and_write!(m, p)
+    m.file_browser_open = false
+    m.prompt_kind = nothing
+    m.prompt_buf = ""
+    m.view_mode = :dashboard
+    return true
+end
+
+function _resolve_quick_save_path(m::SPCWorkbenchModel)::String
+    sel = _selected_entry_path(m)
+    !isempty(sel) && return abspath(expanduser(sel))
+    last = strip(m.last_graph_config_path)
+    !isempty(last) && return abspath(expanduser(last))
+    return ""
+end
+
+"""Quick Save (S): known path write without confirm, else open Save As (KD-SE-22)."""
+function _quick_save_graph_config!(m::SPCWorkbenchModel)
+    path = _resolve_quick_save_path(m)
+    if isempty(path)
+        _open_file_browser!(m; mode = :save_graph_config)
+        return nothing
+    end
+    _apply_save_graph_config_path!(m, path)
+    return nothing
+end
+
+"""Commit save path from explorer: overwrite confirm if exists, else write."""
+function _browser_commit_save_path!(m::SPCWorkbenchModel, path::AbstractString)
+    path = abspath(expanduser(strip(String(path))))
+    if isempty(path)
+        m.file_browser_error = "save err: empty path"
+        m.last_event = m.file_browser_error
+        return nothing
+    end
+    if isfile(path)
+        # Quick-save known path skips confirm; explorer Save As always confirms
+        # when the file exists (even if it matches last path).
+        _arm_overwrite!(m, path)
+        return nothing
+    end
+    _apply_save_graph_config_path!(m, path)
+    return nothing
+end
+
+"""Enter / confirm in file browser depending on focus + mode."""
+function _browser_confirm!(m::SPCWorkbenchModel)
+    mode = m.file_browser_mode
+    if m.file_browser_focus === :name
+        if mode === :save_graph_config
+            ok, val = _normalize_save_filename(m.file_browser_name_buf)
+            if !ok
+                m.file_browser_error = val
+                m.last_event = val
+                return nothing
+            end
+            path = joinpath(m.file_browser_cwd, val)
+            _browser_commit_save_path!(m, path)
+            return nothing
+        else
+            # load: join cwd + buf if non-empty
+            n = strip(m.file_browser_name_buf)
+            isempty(n) && return nothing
+            path = joinpath(m.file_browser_cwd, n)
+            if isdir(path)
+                m.file_browser_cwd = abspath(path)
+                m.file_browser_selected = 1
+                m.file_browser_scroll = 0
+                m.file_browser_error = ""
+                _browser_refresh!(m)
+                return nothing
+            end
+            ok = _apply_load_graph_config_path!(m, path)
+            if !ok
+                m.file_browser_error = m.last_event
+            end
+            return nothing
+        end
+    end
+    # list focus
+    n = length(m.file_browser_entries)
+    n < 1 && return nothing
+    m.file_browser_selected = clamp(m.file_browser_selected, 1, n)
+    e = m.file_browser_entries[m.file_browser_selected]
+    if e.is_dir
+        m.file_browser_cwd = abspath(e.path)
+        m.file_browser_selected = 1
+        m.file_browser_scroll = 0
+        m.file_browser_error = ""
+        _browser_refresh!(m)
+        return nothing
+    end
+    # file entry
+    if mode === :load_graph_config
+        ok = _apply_load_graph_config_path!(m, e.path)
+        if !ok
+            m.file_browser_error = m.last_event
+        end
+        return nothing
+    end
+    # save mode: seed name then commit that path
+    m.file_browser_name_buf = e.name
+    _browser_commit_save_path!(m, e.path)
+    return nothing
+end
+
+"""File explorer key handler (Esc never quits; q types in name focus)."""
+function _handle_file_browser_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
+    if evt.key == :escape
+        _close_file_browser!(m)
+        m.last_event = "file browser cancel"
+        return
+    end
+    if evt.key == :tab || (evt.key == :char && evt.char == '\t')
+        m.file_browser_focus = m.file_browser_focus === :list ? :name : :list
+        m.last_event = "file browser focus $(m.file_browser_focus)"
+        return
+    end
+    if evt.key == :enter
+        _browser_confirm!(m)
+        return
+    end
+    if evt.key == :up
+        n = length(m.file_browser_entries)
+        if n >= 1
+            m.file_browser_selected = max(1, m.file_browser_selected - 1)
+            _sync_file_browser_scroll!(m)
+            m.last_event = "file browser sel $(m.file_browser_selected)"
+        end
+        return
+    end
+    if evt.key == :down
+        n = length(m.file_browser_entries)
+        if n >= 1
+            m.file_browser_selected = min(n, m.file_browser_selected + 1)
+            _sync_file_browser_scroll!(m)
+            m.last_event = "file browser sel $(m.file_browser_selected)"
+        end
+        return
+    end
+    if evt.key == :pageup
+        n = length(m.file_browser_entries)
+        if n >= 1
+            m.file_browser_selected = max(1, m.file_browser_selected - FILE_BROWSER_LIST_VISIBLE)
+            _sync_file_browser_scroll!(m)
+        end
+        return
+    end
+    if evt.key == :pagedown
+        n = length(m.file_browser_entries)
+        if n >= 1
+            m.file_browser_selected = min(n, m.file_browser_selected + FILE_BROWSER_LIST_VISIBLE)
+            _sync_file_browser_scroll!(m)
+        end
+        return
+    end
+    if evt.key == :backspace
+        if m.file_browser_focus === :name
+            if !isempty(m.file_browser_name_buf)
+                m.file_browser_name_buf =
+                    m.file_browser_name_buf[1:prevind(m.file_browser_name_buf, end)]
+            end
+            m.last_event = "file browser name: $(m.file_browser_name_buf)"
+        else
+            # parent dir
+            parent = dirname(m.file_browser_cwd)
+            if parent != m.file_browser_cwd && isdir(parent)
+                m.file_browser_cwd = abspath(parent)
+                m.file_browser_selected = 1
+                m.file_browser_scroll = 0
+                m.file_browser_error = ""
+                _browser_refresh!(m)
+            end
+        end
+        return
+    end
+    if evt.key == :char
+        c = evt.char
+        if c == 'h' && m.file_browser_focus === :list
+            m.file_browser_show_hidden = !m.file_browser_show_hidden
+            _browser_refresh!(m)
+            m.last_event = "file browser hidden=$(m.file_browser_show_hidden)"
+            return
+        end
+        if c == '~'
+            home = abspath(homedir())
+            if isdir(home)
+                m.file_browser_cwd = home
+                m.file_browser_selected = 1
+                m.file_browser_scroll = 0
+                m.file_browser_error = ""
+                _browser_refresh!(m)
+                m.last_event = "file browser home"
+            end
+            return
+        end
+        # Printable (incl. q) — never quit; auto-focus name on save and append
+        if c >= ' ' && c != '\x7f'
+            if m.file_browser_mode === :save_graph_config
+                m.file_browser_focus = :name
+            elseif m.file_browser_focus !== :name
+                # load mode: switch to name to allow typing a path segment
+                m.file_browser_focus = :name
+            end
+            m.file_browser_name_buf *= c
+            m.last_event = "file browser name: $(m.file_browser_name_buf)"
+            return
+        end
+    end
+    # absorb other keys
+    return
+end
+
 # ── Pure chart library CRUD ─────────────────────────────────────────────
 
 """
@@ -2626,6 +3136,9 @@ function _open_config!(m::SPCWorkbenchModel; tab::Symbol = :weco)
     m.config_tab = tab
     m.config_selected = 1
     m.pending_delete = false
+    m.pending_overwrite = false
+    m.pending_overwrite_path = ""
+    m.file_browser_open = false
     m.prompt_kind = nothing
     m.prompt_buf = ""
     if tab === :saved
@@ -2647,7 +3160,7 @@ function _config_set_tab!(m::SPCWorkbenchModel, tab::Symbol)
     return nothing
 end
 
-"""Apply selected session preset and return to dashboard (visible graph)."""
+"""Load selected Saved entry: path re-read when set, else memory body (KD-SE-21)."""
 function _load_selected_preset!(m::SPCWorkbenchModel)::Bool
     n = length(m.graph_presets)
     if n < 1
@@ -2656,19 +3169,27 @@ function _load_selected_preset!(m::SPCWorkbenchModel)::Bool
     end
     m.presets_selected = clamp(m.presets_selected, 1, n)
     p = m.graph_presets[m.presets_selected]
+    if !isempty(strip(p.path))
+        return _apply_load_graph_config_path!(m, p.path)
+    end
+    # legacy path-less: memory body only
     apply_graph_preset!(m, p)
     m.view_mode = :dashboard
     m.prompt_kind = nothing
     m.prompt_buf = ""
+    # last_event remains "preset applied: …"
     return true
 end
 
-"""Config full-page keys — only invoked while `view_mode == :config` (after prompt + pending_delete)."""
+"""Config full-page keys — only invoked while `view_mode == :config` (after modals)."""
 function _handle_config_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
     # Close only with Esc/q (KD-UC-14) — never quit from Config
     if evt.key == :escape || (evt.key == :char && evt.char == 'q')
         m.view_mode = :dashboard
         m.pending_delete = false
+        m.pending_overwrite = false
+        m.pending_overwrite_path = ""
+        m.file_browser_open = false
         m.last_event = "config closed"
         return
     end
@@ -2700,16 +3221,23 @@ function _handle_config_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
         _config_set_tab!(m, next)
         return
     end
-    # Name-save available from any Config section
-    if evt.key == :char && (evt.char == 's' || evt.char == 'S')
-        _open_prompt!(m, :save_graph_preset; seed = "")
+    # Disk-first save/load — Config-wide (KD-SE-7 / KD-SE-18)
+    if evt.key == :char && evt.char == 's'
+        _open_file_browser!(m; mode = :save_graph_config)
         return
-    end
-    # File save/load path prompts from any Config section (KD-UC-8 / PR4)
-    if evt.key == :char && evt.char == 'w'
-        _open_prompt!(m, :save_graph_config; seed = m.last_graph_config_path)
+    elseif evt.key == :char && evt.char == 'w'
+        _open_file_browser!(m; mode = :save_graph_config)
+        return
+    elseif evt.key == :char && evt.char == 'S'
+        _quick_save_graph_config!(m)
         return
     elseif evt.key == :char && evt.char == 'W'
+        _open_file_browser!(m; mode = :load_graph_config)
+        return
+    elseif evt.key == :char && evt.char == 'p'
+        _open_prompt!(m, :save_graph_config; seed = m.last_graph_config_path)
+        return
+    elseif evt.key == :char && evt.char == 'P'
         _open_prompt!(m, :load_graph_config; seed = m.last_graph_config_path)
         return
     end
@@ -2748,6 +3276,11 @@ function _handle_config_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
                 if npre < 1
                     m.last_event = "no presets to delete"
                 else
+                    m.file_browser_open = false
+                    m.prompt_kind = nothing
+                    m.prompt_buf = ""
+                    m.pending_overwrite = false
+                    m.pending_overwrite_path = ""
                     m.pending_delete = true
                     m.last_event = "confirm delete preset? y/N"
                 end
@@ -3515,51 +4048,33 @@ function _apply_prompt!(m::SPCWorkbenchModel)
         end
         return
     elseif kind === :save_graph_config
-        # File write of current graph set (KD-UC-8 / KD-UC-17)
+        # Typed path fallback (p) — shared apply upserts list+index (KD-SE-23)
         path = strip(buf)
         if isempty(path)
             m.last_event = "save err: empty path"
             return  # keep prompt open; no last_graph_config_path update
         end
-        name = _graph_config_name_from_path(path)
-        p = capture_graph_preset(m; name = name)
-        err = save_graph_preset(p, path)
-        if err === nothing
-            m.last_graph_config_path = path
-            m.last_event = "saved graph config $path"
-            m.prompt_kind = nothing
-            m.prompt_buf = ""
-            # stay on Config (do not jump to dashboard)
-        else
+        ok = _apply_save_graph_config_path!(m, path)
+        if !ok
             # fail-closed: keep prompt open for path retry
-            m.last_event = startswith(String(err), "save err:") ? String(err) : "save err: $err"
+            # last_event already set by helper
         end
         return
     elseif kind === :load_graph_config
-        # File load → upsert payload by name → apply → dashboard (KD-UC-12 / R2)
+        # Typed path fallback (P) — re-read file, upsert, apply, dashboard (R2)
         path = strip(buf)
         if isempty(path)
             m.last_event = "load err: empty path"
             return  # keep prompt open; no upsert / apply
         end
-        result = load_graph_preset(path)
-        if result isa AbstractString
-            # fail-closed: no partial apply / no upsert; keep prompt for retry
-            m.last_event = startswith(String(result), "load err:") ? String(result) : "load err: $result"
-            return
+        ok = _apply_load_graph_config_path!(m, path)
+        if !ok
+            # fail-closed: keep prompt open for retry; last_event set by helper
+            # restore prompt kind if helper cleared it on failure (it doesn't)
+            if m.prompt_kind === nothing
+                m.prompt_kind = :load_graph_config
+            end
         end
-        p = result::GraphPreset
-        up_err = _upsert_graph_preset!(m, p)  # payload only — NOT save_named_graph_preset!
-        if up_err !== nothing
-            m.last_event = String(up_err)
-            return
-        end
-        apply_graph_preset!(m, p)  # sets "preset applied: …" briefly
-        m.last_graph_config_path = path
-        m.last_event = "loaded graph config $path"  # KD-UC-13: final string after apply
-        m.view_mode = :dashboard
-        m.prompt_kind = nothing
-        m.prompt_buf = ""
         return
     elseif kind === :filter_tool
         set_filter_tool!(m, buf)
@@ -3654,6 +4169,9 @@ function _open_prompt!(m::SPCWorkbenchModel, kind::Symbol; seed::AbstractString 
     m.prompt_kind = kind
     m.prompt_buf = String(seed)
     m.pending_delete = false
+    m.pending_overwrite = false
+    m.pending_overwrite_path = ""
+    m.file_browser_open = false
     # Clear stale dblclick so click → prompt → Esc → click cannot false-activate
     m.library_last_click = nothing
     m.last_event = "prompt $kind"
@@ -3687,7 +4205,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return
     end
 
-    # Config is full-page view_mode=:config (after prompt + pending_delete) — no overlay branch
+    # Config is full-page view_mode=:config — handled after modals (KD-SE-8 order)
 
     if m.editing !== nothing
         if evt.key == :char && evt.char == 'q'
@@ -3731,47 +4249,21 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return
     end
 
-    # Prompt SM (KD21): Esc cancels; q is a buffer character; never quit from prompt
-    if m.prompt_kind !== nothing
-        is_filter_prompt = m.prompt_kind === :filter_tool ||
-                           m.prompt_kind === :filter_type ||
-                           m.prompt_kind === :filter_owner
-        is_tool_prompt = m.prompt_kind === :tool_add_id ||
-                         m.prompt_kind === :tool_add_desc ||
-                         m.prompt_kind === :tool_edit_desc
-        if evt.key == :escape
-            m.prompt_kind = nothing
-            # Filters stay as last applied. Clear buf: next `f` reseeds from filter_*,
-            # not from the cancelled edit (comment previously overpromised re-edit).
-            m.prompt_buf = ""
-            if is_tool_prompt
-                m.tool_pending_id = ""
-            end
-            m.last_event = is_filter_prompt ? "filter edit cancel" : "prompt cancel"
-            return
-        elseif evt.key == :enter
-            _apply_prompt!(m)
-            return
-        elseif evt.key == :backspace
-            if !isempty(m.prompt_buf)
-                m.prompt_buf = m.prompt_buf[1:prevind(m.prompt_buf, end)]
-            end
-            m.last_event = "prompt $(m.prompt_kind): $(m.prompt_buf)"
-            return
-        elseif evt.key == :char
-            c = evt.char
-            # F while in filter prompt: clear all filters + cancel prompt (GC-PR4)
-            if c == 'F' && is_filter_prompt
-                clear_filters!(m)
-                return
-            end
-            if c >= ' ' && c != '\x7f'  # printable, not DEL (incl. 'q' / 'f')
-                m.prompt_buf *= c
-                m.last_event = "prompt $(m.prompt_kind): $(m.prompt_buf)"
-            end
-            return
+    # KD-SE-8 modal order: pending_overwrite → pending_delete → file_browser → prompt
+
+    # pending_overwrite: y confirms save; any other key cancels (explorer stays closed)
+    if m.pending_overwrite
+        if evt.key == :char && (evt.char == 'y' || evt.char == 'Y')
+            path = m.pending_overwrite_path
+            m.pending_overwrite = false
+            m.pending_overwrite_path = ""
+            _apply_save_graph_config_path!(m, path)
+        else
+            m.pending_overwrite = false
+            m.pending_overwrite_path = ""
+            m.last_event = "overwrite cancel"
         end
-        return  # left/right and other keys: no-op under prompt
+        return
     end
 
     # pending_delete: y confirms; any other key (incl Esc) clears — never quit
@@ -3819,6 +4311,55 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.last_event = "delete cancelled"
             return
         end
+    end
+
+    # File explorer modal (KD-SE-2)
+    if m.file_browser_open
+        _handle_file_browser_keys!(m, evt)
+        return
+    end
+
+    # Prompt SM (KD21): Esc cancels; q is a buffer character; never quit from prompt
+    if m.prompt_kind !== nothing
+        is_filter_prompt = m.prompt_kind === :filter_tool ||
+                           m.prompt_kind === :filter_type ||
+                           m.prompt_kind === :filter_owner
+        is_tool_prompt = m.prompt_kind === :tool_add_id ||
+                         m.prompt_kind === :tool_add_desc ||
+                         m.prompt_kind === :tool_edit_desc
+        if evt.key == :escape
+            m.prompt_kind = nothing
+            # Filters stay as last applied. Clear buf: next `f` reseeds from filter_*,
+            # not from the cancelled edit (comment previously overpromised re-edit).
+            m.prompt_buf = ""
+            if is_tool_prompt
+                m.tool_pending_id = ""
+            end
+            m.last_event = is_filter_prompt ? "filter edit cancel" : "prompt cancel"
+            return
+        elseif evt.key == :enter
+            _apply_prompt!(m)
+            return
+        elseif evt.key == :backspace
+            if !isempty(m.prompt_buf)
+                m.prompt_buf = m.prompt_buf[1:prevind(m.prompt_buf, end)]
+            end
+            m.last_event = "prompt $(m.prompt_kind): $(m.prompt_buf)"
+            return
+        elseif evt.key == :char
+            c = evt.char
+            # F while in filter prompt: clear all filters + cancel prompt (GC-PR4)
+            if c == 'F' && is_filter_prompt
+                clear_filters!(m)
+                return
+            end
+            if c >= ' ' && c != '\x7f'  # printable, not DEL (incl. 'q' / 'f')
+                m.prompt_buf *= c
+                m.last_event = "prompt $(m.prompt_kind): $(m.prompt_buf)"
+            end
+            return
+        end
+        return  # left/right and other keys: no-op under prompt
     end
 
     # Library mode (before global quit — Esc/q close mode, never quit)
@@ -4156,14 +4697,15 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         _update_library_mouse!(m, evt)
         return
     end
-    # Modal / tools / table / config / prompt / pending_delete: keyboard-only (KD16)
+    # Modal / tools / table / config / prompt / pending_* / explorer: keyboard-only (KD16)
     if m.editing !== nothing ||
        m.view_mode == :help || m.view_mode == :keymap ||
        m.view_mode == :builder ||
        m.view_mode == :tools ||
        m.view_mode == :table ||
        m.view_mode == :config ||
-       m.prompt_kind !== nothing || m.pending_delete
+       m.prompt_kind !== nothing || m.pending_delete ||
+       m.pending_overwrite || m.file_browser_open
         m.last_event = string(evt.action, " ", evt.button, " (modal)")
         m.hover_x = nothing
         m.hovered = nothing
@@ -4647,16 +5189,17 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
     elseif mode === :config
         compact && return [
             (:binds, [("↑↓", "select"), ("↵/sp", "tog/load"), ("Tab", "section"), ("←→", "style")]),
-            (:binds, [("c/v/o/e", "jump"), ("s", "name"), ("w/W", "file"), ("Esc", "close")]),
+            (:binds, [("c/v/o/e", "jump"), ("s/w", "Save As"), ("S", "Save"), ("W", "Load")]),
+            (:binds, [("p/P", "path"), ("Esc", "close")]),
         ]
         return [
             (:section, "CONFIG"),
             (:binds, [("↑↓", "select"), ("↵/Space", "toggle · load(Saved)"), ("1-N", "jump+toggle"), ("←/→", "style (lines)")]),
             (:binds, [("Tab", "cycle section"), ("c", "rules"), ("v", "lines"), ("o", "visual"), ("e", "saved")]),
-            (:binds, [("s", "name-save"), ("w", "file-save"), ("W", "file-load"), ("l/a", "load named")]),
-            (:binds, [("d", "delete saved"), ("Esc/q", "close")]),
-            (:note, "toggles apply immediately · named/file load → dashboard (R2)"),
-            (:note, "WECO apply: active chart + default_rules · Esc/q only closes"),
+            (:binds, [("s/w", "Save As"), ("S", "Quick Save"), ("W", "Load…"), ("l/a", "load selected")]),
+            (:binds, [("p", "type path save"), ("P", "type path load"), ("d", "remove saved"), ("Esc/q", "close")]),
+            (:note, "toggles apply immediately · load → dashboard (R2) · disk-first save"),
+            (:note, "s vs S case-sensitive · WECO: active chart + default_rules"),
         ]
     elseif mode === :table
         compact && return [
@@ -4692,7 +5235,7 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:binds, [("c", "config"), ("v", "lines"), ("o", "visual"), ("e", "saved cfg")]),
             (:section, "CONFIG (full page · c/v/o/e)"),
             (:note, "Rules · Lines · Visual · Saved · Tab cycle · Esc/q close only"),
-            (:note, "Saved: s name-save · w/W file · ↵/l/a/Space load → dash"),
+            (:note, "Saved: s/w Save As · S Save · W Load · p/P path · ↵ load → dash"),
             (:note, "WECO load → active chart + session defaults (not all charts)"),
             (:section, "VISUALS"),
             (:note, "◆ OOC (yellow) · ✕ OOS (red) · Cpk band colors · dashed σ zones"),
@@ -4700,7 +5243,7 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:note, "library: a/c/n/d · i/e/w/W session I/O · f/F filters"),
             (:note, "table: arrows · Enter edit · r rematerialize (never auto)"),
             (:note, "tools: master ids; assign on charts via builder"),
-            (:note, "mode-gated: dash s=clear specs · Config s=name-save · lib w≠config w"),
+            (:note, "mode-gated: dash s=clear specs · Config s=Save As · lib w≠config w"),
         ]
     elseif mode === :keymap
         return [
@@ -4711,7 +5254,7 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:binds, [("u/t/l", "specs"), ("1-8", "WECO"), ("h", "help"), ("k", "keymap")]),
             (:binds, [("[ ]", "chart"), ("←→", "pan"), ("r/z", "reset"), ("q/Esc", "quit/close")]),
             (:section, "CONFIG"),
-            (:note, "full page: Tab sections · s name · w/W file · load → dashboard"),
+            (:note, "full page: Tab · s/w Save As · S Save · W Load · p/P path · load → dash"),
             (:section, "MOUSE"),
             (:binds, [("move", "hover"), ("drag", "pan"), ("click", "select"), ("wheel", "zoom")]),
             (:note, "library: click select · double-click activate"),
@@ -4890,13 +5433,21 @@ function _render_message_panel!(buf, rect, m::SPCWorkbenchModel)
     bot = bottom(g1i)
     maxw = max(1, g1i.width - 1)
 
-    # Priority: pending delete → prompt → field edits → last_event
+    # Priority: pending delete → overwrite → prompt → field edits → last_event
+    # (Explorer paints its own frame while file_browser_open — not Message.)
     if m.pending_delete
         msg = isempty(m.last_event) ? "confirm delete? y/N" : m.last_event
         set_string!(buf, g1i.x, y, _side_trunc(msg, maxw), tstyle(:error, bold=true))
         y += 1
         if y <= bot
             set_string!(buf, g1i.x, y, _side_trunc("y confirm · any other cancel", maxw), tstyle(:text_dim))
+        end
+    elseif m.pending_overwrite
+        msg = isempty(m.last_event) ? "overwrite? y/N" : m.last_event
+        set_string!(buf, g1i.x, y, _side_trunc(msg, maxw), tstyle(:error, bold=true))
+        y += 1
+        if y <= bot
+            set_string!(buf, g1i.x, y, _side_trunc("y overwrite · any other cancel", maxw), tstyle(:text_dim))
         end
     elseif m.prompt_kind !== nothing
         kind = string(m.prompt_kind)
@@ -5786,6 +6337,10 @@ function _render_config_page!(buf, area, m)
     if chrome !== nothing
         _render_mode_chrome!(buf, chrome, m; mode=:config)
     end
+    # Explorer modal over Config (closed before overwrite confirm)
+    if m.file_browser_open
+        _render_file_browser!(buf, area, m)
+    end
     return nothing
 end
 
@@ -5852,7 +6407,7 @@ function _render_presets_list_body!(buf, content, m; y::Int)
         empty_lines = (
             ("│  ★  No saved configs yet", tstyle(:warning, bold=true)),
             ("│  Capture lines · styles · visual · WECO as a portable JSON.", tstyle(:text_dim)),
-            ("│  [s] name-save  ·  [w] file-save  ·  [W] file-load", tstyle(:text)),
+            ("│  [s]/[w] Save As  ·  [S] Quick Save  ·  [W] Load", tstyle(:text)),
         )
         for (raw, sty) in empty_lines
             y > bot && break
@@ -5889,11 +6444,86 @@ function _render_presets_list_body!(buf, content, m; y::Int)
     end
     if y <= bot
         set_string!(buf, x0, y,
-            _side_trunc("Actions: s name-save · w/W file · ↵ load · d del", maxw),
+            _side_trunc("Actions: s Save As · S Save · W Load · ↵ load · d del · p/P path", maxw),
             tstyle(:text_dim))
         y += 1
     end
     return y
+end
+
+"""Centered file-explorer modal over Config (only while `file_browser_open`)."""
+function _render_file_browser!(buf, area, m::SPCWorkbenchModel)
+    aw = area.width
+    ah = area.height
+    (aw < 24 || ah < 10) && return nothing
+    box_w = min(aw - 4, 62)
+    box_h = min(ah - 2, 16)
+    box_x = area.x + max(0, (aw - box_w) ÷ 2)
+    box_y = area.y + max(0, (ah - box_h) ÷ 2)
+    rect = Rect(box_x, box_y, box_w, box_h)
+    mode_lbl = m.file_browser_mode === :save_graph_config ? "SAVE GRAPH CONFIG" : "LOAD GRAPH CONFIG"
+    _clear_rect!(buf, rect)
+    inner = render(
+        Block(
+            title = mode_lbl,
+            border_style = tstyle(:border),
+            title_style = tstyle(:accent, bold = true),
+        ),
+        rect,
+        buf,
+    )
+    inner.width < 4 && return nothing
+    bot = bottom(inner)
+    maxw = max(1, inner.width - 1)
+    y = inner.y
+    hid = m.file_browser_show_hidden ? "on" : "off"
+    cwd_line = _side_trunc("$(m.file_browser_cwd)  [hidden:$hid]", maxw)
+    set_string!(buf, inner.x, y, cwd_line, tstyle(:text_dim))
+    y += 1
+    if !isempty(m.file_browser_error) && y <= bot
+        set_string!(buf, inner.x, y, _side_trunc(m.file_browser_error, maxw), tstyle(:error))
+        y += 1
+    end
+    # list window
+    n = length(m.file_browser_entries)
+    if n >= 1
+        m.file_browser_selected = clamp(m.file_browser_selected, 1, n)
+    end
+    _sync_file_browser_scroll!(m)
+    list_h = max(1, min(FILE_BROWSER_LIST_VISIBLE, bot - y - 2))  # leave room for name + help
+    first_i = m.file_browser_scroll + 1
+    last_i = n >= 1 ? min(n, m.file_browser_scroll + list_h) : 0
+    for i in first_i:last_i
+        y > bot && break
+        e = m.file_browser_entries[i]
+        marker = (i == m.file_browser_selected && m.file_browser_focus === :list) ? "▶" : " "
+        suffix = e.is_dir ? "/" : ""
+        line = "$marker $(e.name)$suffix"
+        sty = i == m.file_browser_selected ? tstyle(:accent, bold = true) : tstyle(:text)
+        set_string!(buf, inner.x, y, _side_trunc(line, maxw), sty)
+        y += 1
+    end
+    if y <= bot
+        name_mark = m.file_browser_focus === :name ? "_" : ""
+        set_string!(
+            buf,
+            inner.x,
+            y,
+            _side_trunc("Name: $(m.file_browser_name_buf)$name_mark", maxw),
+            m.file_browser_focus === :name ? tstyle(:accent, bold = true) : tstyle(:text),
+        )
+        y += 1
+    end
+    if y <= bot
+        set_string!(
+            buf,
+            inner.x,
+            y,
+            _side_trunc("Enter confirm · Tab focus · Esc cancel · ~ home · h hid", maxw),
+            tstyle(:text_dim),
+        )
+    end
+    return nothing
 end
 
 # ── Dedicated Help page — Keys-style chip sections ──────────────────────
@@ -6048,6 +6678,8 @@ function _live_may_advance(m::SPCWorkbenchModel)::Bool
     m.editing !== nothing && return false
     m.prompt_kind !== nothing && return false
     m.pending_delete && return false
+    m.pending_overwrite && return false
+    m.file_browser_open && return false
     m.view_mode in (:help, :keymap, :library, :builder, :tools, :table, :config) && return false
     ch = current_chart(m)
     (isempty(ch.data.values) || !ch.live_enabled) && return false

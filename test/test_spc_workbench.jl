@@ -5,6 +5,11 @@ using Statistics: mean, std
 
 # Pure logic: direct include of the workbench (no Tachikoma dep, per slice 1)
 include("../src/spc_workbench.jl")
+# IO helpers (list_browser_entries, save/load_graph_preset, index) — required once
+# Config disk-first keys open the explorer / apply paths from Main UI tests.
+# Package-module suites still prefer `using TachikomaTUI` for isolated types.
+using JSON
+include("../src/spc_workbench_io.jl")
 
 @testset "SPC Workbench (pure WECO + stats + generator; no UI/Tachikoma)" begin
 
@@ -3665,14 +3670,16 @@ end
         @test m.view_mode === :dashboard
         @test m.quit == false
 
-        # Config s → name-save prompt (stays on Config; not dashboard clear-specs)
+        # Config s → Save As explorer (stays on Config; not dashboard clear-specs)
         T.update!(m, T.KeyEvent('c'))
         @test m.view_mode === :config
         T.update!(m, T.KeyEvent('s'))
         @test m.view_mode === :config
-        @test m.prompt_kind === :save_graph_preset
-        T.update!(m, T.KeyEvent(:escape))  # cancel prompt
+        @test m.file_browser_open === true
+        @test m.file_browser_mode === :save_graph_config
         @test m.prompt_kind === nothing
+        T.update!(m, T.KeyEvent(:escape))  # cancel explorer
+        @test m.file_browser_open === false
         T.update!(m, T.KeyEvent(:escape))
         @test m.view_mode === :dashboard
 
@@ -3725,14 +3732,14 @@ end
         @test occursin("[Saved]", full) || occursin("Saved", full)
         @test !occursin("GRAPH PRESETS", full)
         @test occursin("No saved configs", full) || occursin("no saved", lowercase(full)) ||
-              occursin("name-save", full)
+              occursin("Save As", full)
         @test !occursin("Side Stats", full)  # dedicated page, no dashboard bleed
         # Esc closes without quit
         T.update!(m, T.KeyEvent(:escape))
         @test m.view_mode === :dashboard
         @test m.quit == false
 
-        # Config e jumps to Saved; s is name-save (not a separate page)
+        # Config e jumps to Saved; s opens Save As explorer (not a separate page)
         T.update!(m, T.KeyEvent('v'))
         @test m.view_mode === :config && m.config_tab == :lines
         tb2 = T.TestBackend(100, 24); T.reset!(tb2.buf)
@@ -3743,98 +3750,131 @@ end
         T.update!(m, T.KeyEvent('e'))
         @test m.view_mode === :config && m.config_tab === :saved
 
-        # Mutate live graph set, then save via popup (s → name prompt)
+        # Mutate live graph set, then disk-save via typed path fallback (p)
         m.show_chart_lines["specs"] = false
         m.chart_line_styles["cl"] = "long_dash"
         m.visual_prefs["secondary_canvas"] = false
         m.enabled_rules["WECO-6"] = true
         _sync_active_back!(m)
 
-        T.update!(m, T.KeyEvent('s'))
-        @test m.view_mode === :config && m.config_tab === :saved  # stay on Saved while popup open
-        @test m.prompt_kind === :save_graph_preset
-        # Message chrome shows the name popup
-        tb3 = T.TestBackend(100, 24); T.reset!(tb3.buf)
-        T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 100, 24), [], []))
-        full_p = join([string(T.row_text(tb3, i)) for i in 1:24 if T.row_text(tb3, i) !== nothing], "\n")
-        @test occursin("PROMPT", full_p)
-        @test occursin("save_graph_preset", full_p) || occursin("save", full_p)
-        for c in collect("my-preset")
-            T.update!(m, T.KeyEvent(c))
+        mktempdir() do dir
+            path1 = joinpath(dir, "my-preset.json")
+            T.update!(m, T.KeyEvent('p'))
+            @test m.view_mode === :config && m.config_tab === :saved
+            @test m.prompt_kind === :save_graph_config
+            @test m.file_browser_open === false
+            # Message chrome shows the path prompt
+            tb3 = T.TestBackend(100, 24); T.reset!(tb3.buf)
+            T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 100, 24), [], []))
+            full_p = join([string(T.row_text(tb3, i)) for i in 1:24 if T.row_text(tb3, i) !== nothing], "\n")
+            @test occursin("PROMPT", full_p)
+            @test occursin("save_graph_config", full_p) || occursin("save", full_p)
+            while !isempty(m.prompt_buf)
+                T.update!(m, T.KeyEvent(:backspace))
+            end
+            for c in collect(path1)
+                T.update!(m, T.KeyEvent(c))
+            end
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === nothing
+            @test m.view_mode === :config && m.config_tab === :saved  # after save, remain on Config Saved
+            @test length(m.graph_presets) == 1
+            @test m.graph_presets[1].name == "my-preset"
+            @test abspath(m.graph_presets[1].path) == abspath(path1)
+            @test m.graph_presets[1].show_chart_lines["specs"] === false
+            @test m.graph_presets[1].chart_line_styles["cl"] == "long_dash"
+            @test m.graph_presets[1].visual_prefs["secondary_canvas"] === false
+            @test m.graph_presets[1].enabled_rules["WECO-6"] === true
+            @test occursin("saved graph config", m.last_event)
+            @test isfile(path1)
+            # List shows the saved name
+            tb4 = T.TestBackend(100, 24); T.reset!(tb4.buf)
+            T.view(m, T.Frame(tb4.buf, T.Rect(1, 1, 100, 24), [], []))
+            full_list = join([string(T.row_text(tb4, i)) for i in 1:24 if T.row_text(tb4, i) !== nothing], "\n")
+            @test occursin("my-preset", full_list)
+
+            # empty filename in explorer → reject, no extra preset
+            T.update!(m, T.KeyEvent('s'))
+            @test m.file_browser_open === true
+            while !isempty(m.file_browser_name_buf)
+                T.update!(m, T.KeyEvent(:backspace))
+            end
+            T.update!(m, T.KeyEvent(:enter))  # name focus default on save
+            @test length(m.graph_presets) == 1
+            @test occursin("empty", m.last_event)
+            @test m.file_browser_open === true  # stay open on reject
+            T.update!(m, T.KeyEvent(:escape))
+            @test m.file_browser_open === false
+
+            # Mutate away, then load selected via Enter → dashboard (R2)
+            # Path-bearing → re-read file → "loaded graph config" (KD-SE-16)
+            m.show_chart_lines["specs"] = true
+            m.chart_line_styles["cl"] = "solid"
+            m.visual_prefs["secondary_canvas"] = true
+            m.enabled_rules["WECO-6"] = false
+            _sync_active_back!(m)
+            m.presets_selected = 1
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.show_chart_lines["specs"] === false
+            @test m.chart_line_styles["cl"] == "long_dash"
+            @test m.visual_prefs["secondary_canvas"] === false
+            @test m.enabled_rules["WECO-6"] === true
+            @test current_chart(m).enabled_rules["WECO-6"] === true
+            @test occursin("loaded graph config", m.last_event)
+            @test !occursin("preset applied", m.last_event)
+            # load returns to dashboard so the graph is visible
+            @test m.view_mode === :dashboard
+
+            # Second config via typed path + load via l key
+            T.update!(m, T.KeyEvent('e'))
+            @test m.view_mode === :config && m.config_tab === :saved
+            m.show_chart_lines["cl"] = false
+            m.chart_line_styles["specs"] = "dashed"
+            _sync_active_back!(m)
+            path2 = joinpath(dir, "second.json")
+            T.update!(m, T.KeyEvent('p'))
+            while !isempty(m.prompt_buf)
+                T.update!(m, T.KeyEvent(:backspace))
+            end
+            for c in collect(path2)
+                T.update!(m, T.KeyEvent(c))
+            end
+            T.update!(m, T.KeyEvent(:enter))
+            @test length(m.graph_presets) == 2
+            # select first, load with l
+            m.presets_selected = 1
+            m.show_chart_lines["specs"] = true
+            m.chart_line_styles["cl"] = "solid"
+            T.update!(m, T.KeyEvent('l'))
+            @test m.show_chart_lines["specs"] === false
+            @test m.chart_line_styles["cl"] == "long_dash"
+            @test m.view_mode === :dashboard
+            @test occursin("loaded graph config", m.last_event)
+
+            # Space on Saved also loads → dashboard
+            T.update!(m, T.KeyEvent('e'))
+            @test m.view_mode === :config && m.config_tab === :saved
+            m.show_chart_lines["specs"] = true
+            m.chart_line_styles["cl"] = "solid"
+            m.presets_selected = 1
+            T.update!(m, T.KeyEvent(' '))
+            @test m.show_chart_lines["specs"] === false
+            @test m.chart_line_styles["cl"] == "long_dash"
+            @test m.view_mode === :dashboard
+            @test occursin("loaded graph config", m.last_event)
         end
-        T.update!(m, T.KeyEvent(:enter))
-        @test m.prompt_kind === nothing
-        @test m.view_mode === :config && m.config_tab === :saved  # after save, remain on Config Saved
-        @test length(m.graph_presets) == 1
-        @test m.graph_presets[1].name == "my-preset"
-        @test m.graph_presets[1].show_chart_lines["specs"] === false
-        @test m.graph_presets[1].chart_line_styles["cl"] == "long_dash"
-        @test m.graph_presets[1].visual_prefs["secondary_canvas"] === false
-        @test m.graph_presets[1].enabled_rules["WECO-6"] === true
-        @test occursin("preset saved", m.last_event) || occursin("preset updated", m.last_event)
-        # List shows the saved name
-        tb4 = T.TestBackend(100, 24); T.reset!(tb4.buf)
-        T.view(m, T.Frame(tb4.buf, T.Rect(1, 1, 100, 24), [], []))
-        full_list = join([string(T.row_text(tb4, i)) for i in 1:24 if T.row_text(tb4, i) !== nothing], "\n")
-        @test occursin("my-preset", full_list)
 
-        # empty save name → no extra preset
-        T.update!(m, T.KeyEvent('s'))
-        @test m.prompt_kind === :save_graph_preset
-        T.update!(m, T.KeyEvent(:enter))
-        @test length(m.graph_presets) == 1
-        @test occursin("empty", m.last_event)
-
-        # Mutate away, then load selected via Enter → dashboard (R2)
-        m.show_chart_lines["specs"] = true
-        m.chart_line_styles["cl"] = "solid"
-        m.visual_prefs["secondary_canvas"] = true
-        m.enabled_rules["WECO-6"] = false
-        _sync_active_back!(m)
-        m.presets_selected = 1
-        T.update!(m, T.KeyEvent(:enter))
-        @test m.show_chart_lines["specs"] === false
-        @test m.chart_line_styles["cl"] == "long_dash"
-        @test m.visual_prefs["secondary_canvas"] === false
-        @test m.enabled_rules["WECO-6"] === true
-        @test current_chart(m).enabled_rules["WECO-6"] === true
-        @test occursin("preset applied", m.last_event)
-        # load returns to dashboard so the graph is visible
-        @test m.view_mode === :dashboard
-
-        # Second preset + load via l key with ↑↓ selection
+        # Legacy path-less load still yields "preset applied"
         T.update!(m, T.KeyEvent('e'))
-        @test m.view_mode === :config && m.config_tab === :saved
-        m.show_chart_lines["cl"] = false
-        m.chart_line_styles["specs"] = "dashed"
-        _sync_active_back!(m)
-        T.update!(m, T.KeyEvent('s'))
-        for c in collect("second")
-            T.update!(m, T.KeyEvent(c))
-        end
+        empty!(m.graph_presets)
+        push!(m.graph_presets, capture_graph_preset(m; name = "memory-only"))
+        m.graph_presets[1].show_chart_lines["specs"] = false
+        m.show_chart_lines["specs"] = true
+        m.presets_selected = 1
         T.update!(m, T.KeyEvent(:enter))
-        @test length(m.graph_presets) == 2
-        # select first, load with l
-        m.presets_selected = 1
-        # restore non-preset state then load
-        m.show_chart_lines["specs"] = true
-        m.chart_line_styles["cl"] = "solid"
-        T.update!(m, T.KeyEvent('l'))
         @test m.show_chart_lines["specs"] === false
-        @test m.chart_line_styles["cl"] == "long_dash"
-        @test m.view_mode === :dashboard
-
-        # Space on Saved also loads → dashboard (PR3 intentional expansion)
-        T.update!(m, T.KeyEvent('e'))
-        @test m.view_mode === :config && m.config_tab === :saved
-        m.show_chart_lines["specs"] = true
-        m.chart_line_styles["cl"] = "solid"
-        m.presets_selected = 1
-        T.update!(m, T.KeyEvent(' '))
-        @test m.show_chart_lines["specs"] === false
-        @test m.chart_line_styles["cl"] == "long_dash"
-        @test m.view_mode === :dashboard
         @test occursin("preset applied", m.last_event)
+        @test m.view_mode === :dashboard
 
         # q closes Config Saved without quit
         T.update!(m, T.KeyEvent('e'))
@@ -3904,7 +3944,7 @@ end
         @test occursin("cfg-20", full)
         @test !occursin("cfg-1  ", full)  # early entries scrolled away (exact pad, not cfg-10+)
         @test occursin("Actions:", full)  # action strip reserved in chrome budget (Issue 1/5)
-        @test occursin("name-save", full)
+        @test occursin("Save As", full) || occursin("Save", full)
         @test occursin("Name", full) && occursin("WECO", full)  # column header still present
         T.update!(m, T.KeyEvent(:escape))
     end
@@ -3914,7 +3954,7 @@ end
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
         _ensure_charts!(m)
 
-        # Empty Saved: hierarchy + boxed CTA + shipped key labels (no Path chrome)
+        # Empty Saved: hierarchy + boxed CTA + disk-first key labels (no Path chrome)
         T.update!(m, T.KeyEvent('e'))
         @test m.view_mode === :config && m.config_tab === :saved
         tb = T.TestBackend(100, 24); T.reset!(tb.buf)
@@ -3923,16 +3963,18 @@ end
         @test occursin("SAVED GRAPH CONFIGS", full0)
         @test occursin("0 saved", full0)
         @test occursin("No saved configs yet", full0) || occursin("No saved configs", full0)
-        @test occursin("name-save", full0)
+        @test occursin("Save As", full0)
         @test occursin("Actions:", full0)
         @test occursin("[★ Saved]", full0) || occursin("★ Saved", full0)
         @test !occursin("Path  ", full0)  # no Path column header (PR1 path-free)
         @test !occursin(" on disk", full0)
-        # s still name-save (not explorer rebind)
+        # s opens Save As explorer (KD-SE-7)
         T.update!(m, T.KeyEvent('s'))
-        @test m.prompt_kind === :save_graph_preset
-        T.update!(m, T.KeyEvent(:escape))
+        @test m.file_browser_open === true
+        @test m.file_browser_mode === :save_graph_config
         @test m.prompt_kind === nothing
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.file_browser_open === false
 
         # Two presets → column header + WECO/lines/styles chips from body
         p1 = capture_graph_preset(m; name = "fab-dense")
@@ -6855,7 +6897,7 @@ end
 
 end # module TestSPCWorkbenchJSON
 
-# PR4: Config w/W path prompts for graph config file save/load (package-module;
+# PR3/PR4: Config file save/load — typed path (p/P) + explorer keys (package-module;
 # avoids type redefinition vs pure include of spc_workbench.jl).
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -6882,9 +6924,9 @@ function _set_prompt_path!(m, path::AbstractString)
     end
 end
 
-@testset "PR4 Config file save/load path prompts (using TachikomaTUI)" begin
+@testset "PR3/PR4 Config file save/load (typed path + explorer keys)" begin
 
-    @testset "w file-save: basename name in JSON + last_event + prefill" begin
+    @testset "p typed path save: basename name in JSON + list upsert + prefill" begin
         d = generate_spc_workbench_data(12; seed = 21)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
         _ensure_charts!(m)
@@ -6897,19 +6939,25 @@ end
 
         mktempdir() do dir
             path = joinpath(dir, "fab-dense.json")
-            T.update!(m, T.KeyEvent('c'))  # Config (any section may open w)
+            T.update!(m, T.KeyEvent('c'))  # Config (any section may open p)
             @test m.view_mode === :config
-            T.update!(m, T.KeyEvent('w'))
+            T.update!(m, T.KeyEvent('p'))
             @test m.prompt_kind === :save_graph_config
+            @test m.file_browser_open === false
             @test m.prompt_buf == ""  # empty last path
             _set_prompt_path!(m, path)
             T.update!(m, T.KeyEvent(:enter))
             @test m.prompt_kind === nothing
             @test m.view_mode === :config  # stay on Config after file save
-            @test m.last_graph_config_path == path
+            @test abspath(m.last_graph_config_path) == abspath(path)
             @test occursin("saved graph config", m.last_event)
-            @test occursin(path, m.last_event)
+            @test occursin(abspath(path), m.last_event) || occursin(path, m.last_event)
             @test isfile(path)
+            # KD-SE-23: save upserts list + selects entry
+            @test length(m.graph_presets) == 1
+            @test abspath(m.graph_presets[1].path) == abspath(path)
+            @test m.graph_presets[1].name == "fab-dense"
+            @test m.presets_selected == 1
             # basename without extension is the written name (KD-UC-17)
             loaded = load_graph_preset(path)
             @test loaded isa GraphPreset
@@ -6921,17 +6969,25 @@ end
             raw = read(path, String)
             @test occursin("graph_preset", raw)  # write kind still graph_preset
             @test occursin("fab-dense", raw)
+            @test !occursin("\"path\"", raw)  # standalone file has no host path
 
-            # Prefill: reopen w seeds last_graph_config_path
-            T.update!(m, T.KeyEvent('w'))
+            # Prefill: reopen p seeds last_graph_config_path
+            T.update!(m, T.KeyEvent('p'))
             @test m.prompt_kind === :save_graph_config
-            @test m.prompt_buf == path
+            @test abspath(m.prompt_buf) == abspath(path) || m.prompt_buf == m.last_graph_config_path
             T.update!(m, T.KeyEvent(:escape))
             @test m.prompt_kind === nothing
+
+            # w opens Save As explorer (not typed prompt)
+            T.update!(m, T.KeyEvent('w'))
+            @test m.file_browser_open === true
+            @test m.file_browser_mode === :save_graph_config
+            @test m.prompt_kind === nothing
+            T.update!(m, T.KeyEvent(:escape))
         end
     end
 
-    @testset "W file-load: upsert by payload name, apply, dashboard, last_event" begin
+    @testset "P typed path load: upsert by path, apply, dashboard, last_event" begin
         d = generate_spc_workbench_data(12; seed = 22)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
         _ensure_charts!(m)
@@ -6966,30 +7022,32 @@ end
             path_b = joinpath(dir, "whatever-b.json")
             @test save_graph_preset(p_b, path_b) === nothing
 
-            # Load A via W
+            # Load A via P (typed path load fallback)
             T.update!(m, T.KeyEvent('e'))  # Config Saved
             @test m.view_mode === :config && m.config_tab === :saved
-            T.update!(m, T.KeyEvent('W'))
+            T.update!(m, T.KeyEvent('P'))
             @test m.prompt_kind === :load_graph_config
+            @test m.file_browser_open === false
             _set_prompt_path!(m, path_a)
             T.update!(m, T.KeyEvent(:enter))
             @test m.view_mode === :dashboard  # R2
             @test m.prompt_kind === nothing
-            @test m.last_graph_config_path == path_a
+            @test abspath(m.last_graph_config_path) == abspath(path_a)
             @test occursin("loaded graph config", m.last_event)
-            @test occursin(path_a, m.last_event)
-            @test !occursin("preset applied", m.last_event)  # final string overwritten (KD-UC-13)
+            @test occursin(abspath(path_a), m.last_event) || occursin(path_a, m.last_event)
+            @test !occursin("preset applied", m.last_event)  # final string overwritten (KD-SE-16)
             @test length(m.graph_presets) == 1
             @test m.graph_presets[1].name == "cfg-a"  # payload name wins over path basename
+            @test abspath(m.graph_presets[1].path) == abspath(path_a)
             @test m.show_chart_lines["cl"] === false
             @test m.chart_line_styles["cl"] == "long_dash"
             @test m.visual_prefs["secondary_canvas"] === false
             @test m.enabled_rules["WECO-6"] === true
             @test current_chart(m).enabled_rules["WECO-6"] === true
 
-            # Load B → second list entry (different payload name)
+            # Load B → second list entry (path-keyed; different paths)
             T.update!(m, T.KeyEvent('e'))
-            T.update!(m, T.KeyEvent('W'))
+            T.update!(m, T.KeyEvent('P'))
             _set_prompt_path!(m, path_b)
             T.update!(m, T.KeyEvent(:enter))
             @test m.view_mode === :dashboard
@@ -7000,21 +7058,27 @@ end
             @test m.enabled_rules["WECO-7"] === true
             @test occursin("loaded graph config", m.last_event)
 
-            # Reload A → same name upsert, length unchanged
-            # mutate live away from A first
+            # Reload A → same path upsert, length unchanged
             m.show_chart_lines["cl"] = true
             T.update!(m, T.KeyEvent('c'))
-            T.update!(m, T.KeyEvent('W'))
-            # prefill is last path (B); replace with A
+            T.update!(m, T.KeyEvent('P'))
             _set_prompt_path!(m, path_a)
             T.update!(m, T.KeyEvent(:enter))
             @test length(m.graph_presets) == 2  # upsert, not push
             @test m.show_chart_lines["cl"] === false
             @test occursin("loaded graph config", m.last_event)
+
+            # W opens Load explorer (not typed prompt)
+            T.update!(m, T.KeyEvent('e'))
+            T.update!(m, T.KeyEvent('W'))
+            @test m.file_browser_open === true
+            @test m.file_browser_mode === :load_graph_config
+            @test m.prompt_kind === nothing
+            T.update!(m, T.KeyEvent(:escape))
         end
     end
 
-    @testset "W fail-closed: invalid path leaves list + model unchanged" begin
+    @testset "P fail-closed: invalid path leaves list + model unchanged" begin
         d = generate_spc_workbench_data(10; seed = 23)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
         _ensure_charts!(m)
@@ -7028,7 +7092,7 @@ end
         prev_path = m.last_graph_config_path
 
         T.update!(m, T.KeyEvent('e'))
-        T.update!(m, T.KeyEvent('W'))
+        T.update!(m, T.KeyEvent('P'))
         @test m.prompt_kind === :load_graph_config
         bad = "/tmp/does_not_exist_graph_cfg_$(rand(UInt32)).json"
         _set_prompt_path!(m, bad)
@@ -7052,14 +7116,14 @@ end
         T.update!(m, T.KeyEvent(:escape))
     end
 
-    @testset "w fail-closed: unwritable path; last_graph_config_path unchanged" begin
+    @testset "p fail-closed: unwritable path; last_graph_config_path unchanged" begin
         d = generate_spc_workbench_data(10; seed = 24)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
         _ensure_charts!(m)
         m.last_graph_config_path = "/tmp/prev_cfg.json"
 
         T.update!(m, T.KeyEvent('c'))
-        T.update!(m, T.KeyEvent('w'))
+        T.update!(m, T.KeyEvent('p'))
         @test m.prompt_kind === :save_graph_config
         @test m.prompt_buf == "/tmp/prev_cfg.json"  # prefill
         bad = "/proc/no_write_cfg_$(rand(UInt32))/out.json"
@@ -7093,26 +7157,20 @@ end
             @test save_graph_preset(p, path) === nothing
 
             T.update!(m, T.KeyEvent('e'))
-            T.update!(m, T.KeyEvent('W'))
+            T.update!(m, T.KeyEvent('P'))
             _set_prompt_path!(m, path)
             T.update!(m, T.KeyEvent(:enter))
             @test length(m.graph_presets) == 1
             @test m.graph_presets[1].name == "from-file"
-            # Stored entry matches file payload (cl=false), not a post-apply re-capture
-            # under a wrong name. After apply, live also has cl=false — list entry
-            # must still be the loaded payload identity.
             @test m.graph_presets[1].show_chart_lines["cl"] === false
             @test m.show_chart_lines["cl"] === false
-            # If save_named_graph_preset! had been used, name would still match but
-            # a second call path would re-capture; assert no "preset saved/updated"
-            # final event and payload name from file.
             @test occursin("loaded graph config", m.last_event)
             @test !occursin("preset saved", m.last_event)
             @test !occursin("preset updated", m.last_event)
         end
     end
 
-    @testset "kind=graph_config file loadable via W prompt" begin
+    @testset "kind=graph_config file loadable via P typed path" begin
         d = generate_spc_workbench_data(8; seed = 26)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
         _ensure_charts!(m)
@@ -7126,7 +7184,7 @@ end
                     "enabled_rules":{"WECO-1":true,"WECO-2":true,"WECO-3":true,"WECO-4":true,"WECO-5":true,"WECO-6":false,"WECO-7":false,"WECO-8":false}}""")
             end
             T.update!(m, T.KeyEvent('c'))
-            T.update!(m, T.KeyEvent('W'))
+            T.update!(m, T.KeyEvent('P'))
             @test m.prompt_kind === :load_graph_config
             _set_prompt_path!(m, path)
             T.update!(m, T.KeyEvent(:enter))
@@ -7134,6 +7192,138 @@ end
             @test m.graph_presets[1].name == "alias-cfg"
             @test m.show_chart_lines["cl"] === false
             @test occursin("loaded graph config", m.last_event)
+        end
+    end
+
+    @testset "explorer Save As + overwrite + Quick Save + Load" begin
+        d = generate_spc_workbench_data(10; seed = 27)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        m.show_chart_lines["specs"] = false
+        _sync_active_back!(m)
+        # Isolate index writes
+        mktempdir() do dir
+            m.graph_config_index_path = joinpath(dir, "index.json")
+            path = joinpath(dir, "explorer-cfg.json")
+            # Open Save As from Lines tab (Config-wide KD-SE-18)
+            T.update!(m, T.KeyEvent('v'))
+            @test m.config_tab == :lines
+            T.update!(m, T.KeyEvent('s'))
+            @test m.file_browser_open === true
+            @test m.file_browser_mode === :save_graph_config
+            # Seed name + navigate: set cwd by typing absolute path is hard;
+            # use name buffer with basename after setting cwd via seed last path parent.
+            m.file_browser_cwd = dir
+            WB._browser_refresh!(m)
+            # Clear name and type basename without .json → auto-append
+            while !isempty(m.file_browser_name_buf)
+                T.update!(m, T.KeyEvent(:backspace))
+            end
+            for c in collect("explorer-cfg")
+                T.update!(m, T.KeyEvent(c))
+            end
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.file_browser_open === false
+            @test isfile(path)
+            @test occursin("saved graph config", m.last_event)
+            @test length(m.graph_presets) == 1
+            @test m.graph_presets[1].name == "explorer-cfg"
+            # Overwrite path: Save As again to same file → pending_overwrite
+            T.update!(m, T.KeyEvent('w'))
+            @test m.file_browser_open === true
+            m.file_browser_cwd = dir
+            WB._browser_refresh!(m)
+            while !isempty(m.file_browser_name_buf)
+                T.update!(m, T.KeyEvent(:backspace))
+            end
+            for c in collect("explorer-cfg.json")
+                T.update!(m, T.KeyEvent(c))
+            end
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.file_browser_open === false  # closed before overwrite
+            @test m.pending_overwrite === true
+            @test abspath(m.pending_overwrite_path) == abspath(path)
+            # cancel overwrite
+            T.update!(m, T.KeyEvent('n'))
+            @test m.pending_overwrite === false
+            @test occursin("overwrite cancel", m.last_event)
+            # re-arm and confirm y
+            T.update!(m, T.KeyEvent('s'))
+            m.file_browser_cwd = dir
+            WB._browser_refresh!(m)
+            while !isempty(m.file_browser_name_buf)
+                T.update!(m, T.KeyEvent(:backspace))
+            end
+            for c in collect("explorer-cfg.json")
+                T.update!(m, T.KeyEvent(c))
+            end
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.pending_overwrite === true
+            T.update!(m, T.KeyEvent('y'))
+            @test m.pending_overwrite === false
+            @test length(m.graph_presets) == 1  # upsert same path
+            @test occursin("saved graph config", m.last_event)
+            # Quick Save S rewrites known path without confirm
+            m.show_chart_lines["cl"] = false
+            _sync_active_back!(m)
+            T.update!(m, T.KeyEvent('S'))
+            @test m.pending_overwrite === false
+            @test m.file_browser_open === false
+            @test occursin("saved graph config", m.last_event)
+            loaded = load_graph_preset(path)
+            @test loaded isa GraphPreset
+            @test loaded.show_chart_lines["cl"] === false
+            # Load explorer: W → select file → Enter
+            m.show_chart_lines["cl"] = true
+            T.update!(m, T.KeyEvent('W'))
+            @test m.file_browser_open === true
+            @test m.file_browser_mode === :load_graph_config
+            m.file_browser_cwd = dir
+            WB._browser_refresh!(m)
+            # find explorer-cfg.json in entries
+            idx = findfirst(e -> e.name == "explorer-cfg.json" && !e.is_dir, m.file_browser_entries)
+            @test idx !== nothing
+            m.file_browser_selected = idx
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.view_mode === :dashboard
+            @test m.show_chart_lines["cl"] === false
+            @test occursin("loaded graph config", m.last_event)
+            # Modal exclusivity: browser + prompt not both open
+            T.update!(m, T.KeyEvent('e'))
+            T.update!(m, T.KeyEvent('s'))
+            @test m.file_browser_open === true
+            @test m.prompt_kind === nothing
+            T.update!(m, T.KeyEvent(:escape))
+            T.update!(m, T.KeyEvent('p'))
+            @test m.prompt_kind === :save_graph_config
+            @test m.file_browser_open === false
+            T.update!(m, T.KeyEvent(:escape))
+            # Filename reject separators
+            T.update!(m, T.KeyEvent('s'))
+            while !isempty(m.file_browser_name_buf)
+                T.update!(m, T.KeyEvent(:backspace))
+            end
+            for c in collect("bad/name")
+                T.update!(m, T.KeyEvent(c))
+            end
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.file_browser_open === true
+            @test occursin("separator", m.last_event) || occursin("save err", m.last_event)
+            T.update!(m, T.KeyEvent(:escape))
+            # Live gate with browser open
+            m.paused = false
+            current_chart(m).live_enabled = true
+            m.file_browser_open = true
+            @test WB._live_may_advance(m) === false
+            m.file_browser_open = false
+            m.view_mode = :dashboard
+            m.paused = true
+            # Dashboard s still clears specs
+            m.usl = 1.0
+            current_chart(m).usl = 1.0
+            T.update!(m, T.KeyEvent('s'))
+            @test m.usl === nothing
+            @test occursin("specs cleared", m.last_event)
         end
     end
 
