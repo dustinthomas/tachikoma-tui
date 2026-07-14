@@ -6273,6 +6273,44 @@ function view(m::SPCWorkbenchModel, f::Frame)
     end
 end
 
+# ── Side Stats section helpers (PR2 sectionize + height collapse) ─────────
+const SIDE_HEADER_COST = 1
+
+"""Paint ▸ header only if rem >= 1 + body_min; else headerless if rem >= body_min."""
+function _side_want_header(rem::Int, body_min::Int)::Bool
+    return rem >= SIDE_HEADER_COST + body_min
+end
+
+"""Paint `▸ TITLE` accent-bold; no-op if y > bot. Returns next free y."""
+function _side_section_header!(buf, x::Int, y::Int, bot::Int, maxw::Int, title::AbstractString)::Int
+    y > bot && return y
+    set_string!(buf, x, y, _side_trunc(string("▸ ", title), maxw), tstyle(:accent, bold=true))
+    return y + 1
+end
+
+"""Cpk band → style token (navy/unknown → :text)."""
+function _side_cpk_style(band::Symbol)
+    band == :green && return tstyle(:success, bold=true)
+    band == :red && return tstyle(:error, bold=true)
+    band == :amber && return tstyle(:warning, bold=true)
+    return tstyle(:text, bold=true)
+end
+
+"""
+Select line-body keys for available body rows (visual order).
+Drop order under pressure: ±1 → ±2 → Specs → ±3 → CL (header separate).
+`drop_sigma12`: force omit ±1/±2 (KD-SS-17 / compressed).
+"""
+function _side_line_keys(nb::Int; drop_sigma12::Bool)::Vector{Symbol}
+    nb < 2 && return Symbol[]
+    if drop_sigma12
+        return nb >= 3 ? [:cl, :sigma3, :specs] : [:cl, :sigma3]
+    end
+    nb >= 5 && return [:cl, :sigma1, :sigma2, :sigma3, :specs]
+    nb >= 3 && return [:cl, :sigma3, :specs]
+    return [:cl, :sigma3]
+end
+
 """
 Render dashboard Side Stats into `side_rect` (outer). Sets `m.side_area` to Block inner.
 `variant`: `:full` | `:empty_filter`
@@ -6283,12 +6321,7 @@ function _render_side_stats!(buf, side_rect, m::SPCWorkbenchModel;
     side_inner = render(side_block, side_rect, buf)
     m.side_area = side_inner
     if variant === :empty_filter
-        # Count line MUST remain: "Charts: 0/$nch" (KD-SS-14)
-        nch_all = length(m.charts)
-        set_string!(buf, side_inner.x, side_inner.y, "Charts: 0/$nch_all", tstyle(:text_dim))
-        if side_inner.y + 1 <= bottom(side_inner)
-            set_string!(buf, side_inner.x, side_inner.y + 1, " (no match)", tstyle(:warning))
-        end
+        _side_sec_charts_empty!(buf, side_inner, m)
         return
     end
     x = side_inner.x
@@ -6303,153 +6336,314 @@ function _render_side_stats!(buf, side_rect, m::SPCWorkbenchModel;
     return
 end
 
+"""Empty-filter body: optional ▸ CHARTS + required `Charts: 0/N` + ` (no match)` (KD-SS-14)."""
+function _side_sec_charts_empty!(buf, side_inner, m::SPCWorkbenchModel)
+    x = side_inner.x
+    y = side_inner.y
+    bot = bottom(side_inner)
+    maxw = max(1, side_inner.width)
+    nch_all = length(m.charts)
+    rem = bot - y + 1
+    if _side_want_header(rem, 1)
+        y = _side_section_header!(buf, x, y, bot, maxw, "CHARTS")
+    end
+    if y <= bot
+        set_string!(buf, x, y, "Charts: 0/$nch_all", tstyle(:text_dim))
+        y += 1
+    end
+    if y <= bot
+        set_string!(buf, x, y, " (no match)", tstyle(:warning))
+    end
+    return
+end
+
 """
-Full non-empty Side Stats body (flat stream; sectionize is PR2).
-Strings, order, styles, bottom checks, and viol maxw match the pre-extract view path.
+Full non-empty Side Stats body — sectionized with D1–D18 collapse (PR2).
+Order: STATS → HOVER → LINES → WECO → CHARTS.
 """
 function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
     x = side_inner.x
     y = side_inner.y
-    # Use the resolved ctx for active (canonical limits + band) to avoid duplication
+    bot = bottom(side_inner)
+    maxw = max(1, side_inner.width)
     act_ch = current_chart(m)
     act_ctx = resolve_chart_render_context(act_ch; sigma_method=:mr)
-    lz = act_ctx.lz
     n_primary = length(act_ctx.primary_values)
-    # Mode badge = effective gateway path (same predicate as resolve_chart_render_context)
-    mode_lbl = _manual_limits_effective(act_ch) ? "limits:manual" : "limits:auto"
-    set_string!(buf, x, y, "n=$n_primary $mode_lbl", tstyle(:text)); y += 1
-    # Secondary stats (Rbar/sbar/MRbar); dual secondary canvas under active plot when pref on
-    cl_sigma = "cl=$(round(lz.cl;digits=2)) σ=$(round(lz.sigma;digits=2))"
-    if act_ctx.secondary_bar !== nothing && !isempty(act_ctx.secondary_name)
-        sec_lbl = if act_ctx.secondary_name == "R"
-            "Rbar"
-        elseif act_ctx.secondary_name == "s"
-            "sbar"
-        elseif act_ctx.secondary_name == "MR"
-            "MRbar"
-        else
-            act_ctx.secondary_name
-        end
-        cl_sigma *= " $sec_lbl=$(round(act_ctx.secondary_bar; digits=2))"
+    hover_active = (hi = m.hovered) !== nothing && 1 <= hi <= n_primary
+    multi_or_filter = length(m.charts) > 1 || _any_filter_active(m)
+    # H≤11: reserve bubbles + Viols: N (KD-SS-17)
+    compact_h11 = side_inner.height <= 11
+    reserve_tail = compact_h11 ? 2 : 0
+    drop_sigma12 = compact_h11 && (hover_active || multi_or_filter)
+
+    y = _side_sec_summary!(buf, x, y, bot, maxw, m, act_ctx, n_primary;
+                           compact_h11=compact_h11, reserve_tail=reserve_tail,
+                           hover_active=hover_active)
+    y = _side_sec_hover!(buf, x, y, bot, maxw, m, act_ctx, act_ch, n_primary)
+    y = _side_sec_lines!(buf, x, y, bot, maxw, m, act_ctx;
+                         reserve_tail=reserve_tail, drop_sigma12=drop_sigma12,
+                         compact_h11=compact_h11)
+    y = _side_sec_weco!(buf, x, y, bot, maxw, m, act_ctx, act_ch, side_inner;
+                        compact_h11=compact_h11)
+    y = _side_sec_charts!(buf, x, y, bot, maxw, m)
+    return y
+end
+
+"""▸ STATS — n/limits, cl/σ, Cpk·band, optional T= (KD-SS-11 / D14)."""
+function _side_sec_summary!(buf, x::Int, y::Int, bot::Int, maxw::Int,
+                            m::SPCWorkbenchModel, act_ctx, n_primary::Int;
+                            compact_h11::Bool, reserve_tail::Int, hover_active::Bool)::Int
+    rem = bot - y + 1
+    rem <= 0 && return y
+    body_min = 3
+    if _side_want_header(rem, body_min)
+        y = _side_section_header!(buf, x, y, bot, maxw, "STATS")
     end
-    set_string!(buf, x, y, cl_sigma, tstyle(:text_dim)); y += 1
-    cpk_s = act_ctx.cpk === nothing ? "—" : _fmt(act_ctx.cpk)
-    band = act_ctx.band
-    cpk_st = band == :green ? tstyle(:success, bold=true) : (band == :red ? tstyle(:error, bold=true) : (band == :amber ? tstyle(:warning, bold=true) : tstyle(:text)))
-    set_string!(buf, x, y, "Cpk=$cpk_s", cpk_st); y += 1
-    if act_ctx.cpk !== nothing
-        set_string!(buf, x, y, "band:$(band) $(cpk_color_for_band(band))", tstyle(:text_dim)); y += 1
-    end
-    if m.usl !== nothing || m.lsl !== nothing
-        set_string!(buf, x, y, "USL=$(m.usl===nothing ? "—" : round(m.usl;digits=1)) T=$(m.target===nothing ? "—" : round(m.target;digits=1)) LSL=$(m.lsl===nothing ? "—" : round(m.lsl;digits=1))", tstyle(:text_dim)); y += 1
-    end
-    # Hover first (priority over long line list when side is short) — primary series index
-    if (hi = m.hovered) !== nothing && 1 <= hi <= n_primary
-        if y <= bottom(side_inner) - 1
-            v = act_ctx.primary_values[hi]
-            st = point_status(hi, act_ctx, act_ch)
-            stat = st == :oos ? "OOS" : (st == :ooc ? "OOC" : "OK")
-            set_string!(buf, x, y, "h[$hi]=$(round(v;digits=2)) $stat", tstyle(:accent, bold=true))
-            y += 1
-        end
-    end
-    # Chart line parameters (●/○ = draw on chart; [v] config). Compact: header + 5 value rows.
-    if y <= bottom(side_inner) - 1
-        set_string!(buf, x, y, "Lines [v]", tstyle(:text_dim)); y += 1
-    end
-    usl_s = m.usl === nothing ? "—" : string(round(m.usl; digits=1))
-    lsl_s = m.lsl === nothing ? "—" : string(round(m.lsl; digits=1))
-    line_rows = (
-        ("CL", "cl", string(round(lz.cl; digits=2))),
-        ("±1σ", "sigma1", "$(round(lz.ucl1; digits=2))/$(round(lz.lcl1; digits=2))"),
-        ("±2σ", "sigma2", "$(round(lz.ucl2; digits=2))/$(round(lz.lcl2; digits=2))"),
-        ("±3σ", "sigma3", "UCL=$(round(lz.ucl; digits=2)) LCL=$(round(lz.lcl; digits=2))"),
-        ("Specs", "specs", "USL=$usl_s LSL=$lsl_s"),
-    )
-    for (label, key, valstr) in line_rows
-        if y > bottom(side_inner) - 1
-            break
-        end
-        on = _line_on(m, key)
-        set_char!(buf, x, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
-        set_string!(buf, x + 2, y, "$label=$valstr", tstyle(:text_dim))
+    lz = act_ctx.lz
+    # Core top-first while room (never drop while n>0 and rem≥1)
+    if y <= bot
+        mode_lbl = _manual_limits_effective(current_chart(m)) ? "limits:manual" : "limits:auto"
+        set_string!(buf, x, y, _side_trunc("n=$n_primary $mode_lbl", maxw), tstyle(:text))
         y += 1
     end
-    # WECO on/off bubbles: ● green when enabled, ○ dim when off (rules 1–8)
-    # Optional blank gap after Specs when there is room for gap + WECO row.
-    # Numbers 1–8 under each bubble when a second row fits.
-    bot = bottom(side_inner)
-    if y + 1 <= bot  # at least one row left for WECO bubbles
-        # blank spacer only if Specs→WECO gap and bubble row both fit
-        if y + 2 <= bot
-            y += 1
+    if y <= bot
+        cl_sigma = "cl=$(round(lz.cl; digits=2)) σ=$(round(lz.sigma; digits=2))"
+        if act_ctx.secondary_bar !== nothing && !isempty(act_ctx.secondary_name)
+            sec_lbl = if act_ctx.secondary_name == "R"
+                "Rbar"
+            elseif act_ctx.secondary_name == "s"
+                "sbar"
+            elseif act_ctx.secondary_name == "MR"
+                "MRbar"
+            else
+                act_ctx.secondary_name
+            end
+            cl_sigma *= " $sec_lbl=$(round(act_ctx.secondary_bar; digits=2))"
         end
-        if y <= bot
-            set_string!(buf, x, y, "WECO ", tstyle(:text_dim))
-            bx0 = x + 5
-            bx = bx0
-            for i in 1:8
-                rid = "WECO-$i"
-                on = get(act_ch.enabled_rules, rid, false)
-                if bx <= right(side_inner)
-                    set_char!(buf, bx, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
-                end
-                bx += 1
+        set_string!(buf, x, y, _side_trunc(cl_sigma, maxw), tstyle(:text_dim))
+        y += 1
+    end
+    if y <= bot
+        cpk_s = act_ctx.cpk === nothing ? "—" : _fmt(act_ctx.cpk)
+        band = act_ctx.band
+        cpk_st = act_ctx.cpk === nothing ? tstyle(:text_dim) : _side_cpk_style(band)
+        # KD-SS-5: merge band name as dim suffix; drop hex row
+        cpk_line = "Cpk=$cpk_s"
+        set_string!(buf, x, y, _side_trunc(cpk_line, maxw), cpk_st)
+        if act_ctx.cpk !== nothing
+            suffix = " · $(band)"
+            # paint suffix dim after value when width allows
+            sx = x + length(cpk_line)
+            if sx <= x + maxw - 1 && sx + length(suffix) - 1 <= right_of_maxw(x, maxw)
+                set_string!(buf, sx, y, _side_trunc(suffix, max(0, maxw - length(cpk_line))), tstyle(:text_dim))
             end
+        end
+        y += 1
+    end
+    # Target on STATS (KD-SS-11); D14 drops before hover body under pressure
+    if m.target !== nothing && y <= bot
+        paint_t = true
+        if compact_h11
+            # After T= need: hover? + lines min(2) + reserve_tail
+            rem_after_t = bot - y  # rows remaining after painting T at y
+            need_rest = (hover_active ? 1 : 0) + 2 + reserve_tail
+            paint_t = rem_after_t >= need_rest
+        end
+        if paint_t
+            set_string!(buf, x, y, _side_trunc("T=$(round(m.target; digits=1))", maxw), tstyle(:text_dim))
             y += 1
-            # digit row under bubbles when space remains
-            if y <= bot
-                for i in 1:8
-                    nx = bx0 + i - 1
-                    if nx <= right(side_inner)
-                        set_char!(buf, nx, y, Char('0' + i), tstyle(:text_dim))
-                    end
-                end
-                y += 1
-            end
         end
     end
-    # Last-N WECO msgs by sample index (most recent); chart-scoped data/rules (PR5 / P1.8)
-    side_viols = weco_detect(act_ch.data.values, lz.cl, lz.sigma; enabled_rules = act_ch.enabled_rules)
+    return y
+end
+
+# max x for a left-aligned run of maxw cells starting at x
+right_of_maxw(x::Int, maxw::Int) = x + maxw - 1
+
+"""▸ HOVER — only when hovered; headerless if rem < 2 (D15/D18)."""
+function _side_sec_hover!(buf, x::Int, y::Int, bot::Int, maxw::Int,
+                          m::SPCWorkbenchModel, act_ctx, act_ch, n_primary::Int)::Int
+    hi = m.hovered
+    (hi === nothing || hi < 1 || hi > n_primary) && return y
+    rem = bot - y + 1
+    rem < 1 && return y
+    if _side_want_header(rem, 1)
+        y = _side_section_header!(buf, x, y, bot, maxw, "HOVER")
+    end
+    if y <= bot
+        v = act_ctx.primary_values[hi]
+        st = point_status(hi, act_ctx, act_ch)
+        stat = st == :oos ? "OOS" : (st == :ooc ? "OOC" : "OK")
+        set_string!(buf, x, y, _side_trunc("h[$hi]=$(round(v; digits=2)) $stat", maxw),
+                    tstyle(:accent, bold=true))
+        y += 1
+    end
+    return y
+end
+
+"""▸ LINES [v] — ●/○ rows; leaves reserve_tail unpainted; drop ±1/±2 under pressure."""
+function _side_sec_lines!(buf, x::Int, y::Int, bot::Int, maxw::Int,
+                          m::SPCWorkbenchModel, act_ctx;
+                          reserve_tail::Int, drop_sigma12::Bool, compact_h11::Bool)::Int
+    effective_bot = bot - reserve_tail
+    rem = effective_bot - y + 1
+    rem < 2 && return y  # Lines omitted when rem - reserve_tail < 2
+
+    # Prefer header only if body still has ≥2 rows after (KD-SS-7 / body_min=2)
+    use_header = _side_want_header(rem, 2)
+    # At H≤11 prefer headerless (KD-SS-17 rule 3)
+    if compact_h11
+        use_header = false
+    end
+    body_budget = use_header ? rem - 1 : rem
+    keys = _side_line_keys(body_budget; drop_sigma12=drop_sigma12)
+    isempty(keys) && return y
+    if use_header && length(keys) >= 2
+        y = _side_section_header!(buf, x, y, effective_bot, maxw, "LINES [v]")
+    elseif use_header
+        # header would leave only 1 body row — skip header, recompute keys
+        keys = _side_line_keys(rem; drop_sigma12=drop_sigma12)
+    end
+
+    lz = act_ctx.lz
+    usl_s = m.usl === nothing ? "—" : string(round(m.usl; digits=1))
+    lsl_s = m.lsl === nothing ? "—" : string(round(m.lsl; digits=1))
+    rowmap = Dict{Symbol,Tuple{String,String,String}}(
+        :cl => ("CL", "cl", string(round(lz.cl; digits=2))),
+        :sigma1 => ("±1σ", "sigma1", "$(round(lz.ucl1; digits=2))/$(round(lz.lcl1; digits=2))"),
+        :sigma2 => ("±2σ", "sigma2", "$(round(lz.ucl2; digits=2))/$(round(lz.lcl2; digits=2))"),
+        :sigma3 => ("±3σ", "sigma3", "UCL=$(round(lz.ucl; digits=2)) LCL=$(round(lz.lcl; digits=2))"),
+        :specs => ("Specs", "specs", "USL=$usl_s LSL=$lsl_s"),
+    )
+    for k in keys
+        y > effective_bot && break
+        label, key, valstr = rowmap[k]
+        on = _line_on(m, key)
+        set_char!(buf, x, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
+        set_string!(buf, x + 2, y, _side_trunc("$label=$valstr", max(1, maxw - 2)), tstyle(:text_dim))
+        y += 1
+    end
+    return y
+end
+
+"""
+▸ WECO — bubbles → [digits if rem≥2 after bubbles] → Viols: N → msgs.
+Optional blank gap before chrome when tall (D5).
+"""
+function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
+                         m::SPCWorkbenchModel, act_ctx, act_ch, side_inner;
+                         compact_h11::Bool)::Int
+    rem = bot - y + 1
+    rem < 1 && return y
+
+    # D5 blank gap before WECO when room (H=24 Specs–WECO contract: gap ≥ 1)
+    # Need gap + bubbles + Viols at minimum (and preferably digits) → rem ≥ 4 non-compact
+    if !compact_h11 && rem >= 4
+        y += 1
+        rem = bot - y + 1
+    end
+    rem < 1 && return y
+
+    # Header: body_min=2 so header does not steal Viols when rem==2 (bubbles+Viols)
+    # KD-SS-17: prefer headerless at H≤11
+    use_header = !compact_h11 && _side_want_header(rem, 2)
+    same_row_label = false
+    if use_header
+        y = _side_section_header!(buf, x, y, bot, maxw, "WECO")
+        rem = bot - y + 1
+    elseif rem == 1 || (compact_h11 && rem <= 2)
+        # Compact same-row "WECO " + bubbles when only 1–2 rows (H=18)
+        same_row_label = true
+    end
+    rem < 1 && return y
+
+    # 1) Bubble row
+    bx0 = same_row_label ? x + 5 : x
+    if same_row_label
+        set_string!(buf, x, y, "WECO ", tstyle(:text_dim))
+    end
+    for i in 1:8
+        rid = "WECO-$i"
+        on = get(act_ch.enabled_rules, rid, false)
+        bx = bx0 + i - 1
+        if bx <= right(side_inner)
+            set_char!(buf, bx, y, on ? '●' : '○', on ? tstyle(:success) : tstyle(:text_dim))
+        end
+    end
+    y += 1
+    rem = bot - y + 1
+
+    # 2) Digit row only if rem ≥ 2 after bubbles (need digits + Viols); else skip (D6).
+    #    KD-SS-17 H≤11: always omit digits (D6 ≺ D17 Viols) — keep bubble + Viols tight.
+    if rem >= 2 && !compact_h11
+        for i in 1:8
+            nx = bx0 + i - 1
+            if nx <= right(side_inner)
+                set_char!(buf, nx, y, Char('0' + i), tstyle(:text_dim))
+            end
+        end
+        y += 1
+        rem = bot - y + 1
+    end
+
+    # 3) Viols: N (D17) — prefer over digits when only one row left after bubbles
+    side_viols = weco_detect(act_ch.data.values, act_ctx.lz.cl, act_ctx.lz.sigma;
+                             enabled_rules = act_ch.enabled_rules)
     show_viols = _side_viol_msgs_by_index(side_viols; n = SIDE_VIOL_MSG_MAX)
     nv = length(side_viols)
     if y <= bot
-        set_string!(buf, x, y, "Viols: $nv", nv > 0 ? tstyle(:warning) : tstyle(:text_dim))
+        set_string!(buf, x, y, _side_trunc("Viols: $nv", maxw),
+                    nv > 0 ? tstyle(:warning) : tstyle(:text_dim))
         y += 1
     end
+
+    # 4) Viol messages (D2) — lowest WECO text
     if !isempty(show_viols)
-        maxw = max(4, side_inner.width - 1)
+        viol_maxw = max(4, side_inner.width - 1)
         for v in show_viols
             y > bot && break
-            line = _side_trunc("$(v.rule) $(v.msg)", maxw)
+            line = _side_trunc("$(v.rule) $(v.msg)", viol_maxw)
             set_string!(buf, x, y, line, tstyle(:warning))
             y += 1
         end
     end
-    # dashboard multi hint (lowest priority when cramped) — filtered list (GC-PR4)
+    return y
+end
+
+"""▸ CHARTS — count line keeps `Charts:` prefix; names lowest priority (D1/D4)."""
+function _side_sec_charts!(buf, x::Int, y::Int, bot::Int, maxw::Int,
+                           m::SPCWorkbenchModel)::Int
     side_vis = visible_charts(m)
     nch_all = length(m.charts)
     nvis_side = length(side_vis)
-    if nch_all > 1 || _any_filter_active(m)
-        if y <= bottom(side_inner) - 1
-            cnt = _any_filter_active(m) ? "Charts: $nvis_side/$nch_all" : "Charts: $nch_all"
-            set_string!(buf, x, y, cnt, tstyle(:text_dim))
+    (nch_all > 1 || _any_filter_active(m)) || return y
+    rem = bot - y + 1
+    rem < 1 && return y
+
+    # Header only if rem leaves room for count line
+    if _side_want_header(rem, 1)
+        y = _side_section_header!(buf, x, y, bot, maxw, "CHARTS")
+    end
+    if y <= bot
+        cnt = _any_filter_active(m) ? "Charts: $nvis_side/$nch_all" : "Charts: $nch_all"
+        set_string!(buf, x, y, _side_trunc(cnt, maxw), tstyle(:text_dim))
+        y += 1
+    end
+    if nvis_side == 0 && _any_filter_active(m)
+        if y <= bot
+            set_string!(buf, x, y, " (no match)", tstyle(:warning))
             y += 1
         end
-        if nvis_side == 0 && _any_filter_active(m)
-            if y <= bottom(side_inner) - 1
-                set_string!(buf, x, y, " (no match)", tstyle(:warning))
-                y += 1
-            end
-        else
-            act_id = current_chart(m).id
-            for c in side_vis
-                if y > bottom(side_inner) - 1; break; end
-                cctx = resolve_chart_render_context(c; sigma_method=:mr)
-                is_act = c.id == act_id
-                set_string!(buf, x, y, " $(is_act ? "▶" : " ") $(c.name[1:min(8,length(c.name))]) cpk=$(_fmt(cctx.cpk))", tstyle(is_act ? :accent : :text_dim))
-                y += 1
-            end
+    else
+        act_id = current_chart(m).id
+        for c in side_vis
+            y > bot && break
+            cctx = resolve_chart_render_context(c; sigma_method=:mr)
+            is_act = c.id == act_id
+            set_string!(buf, x, y,
+                _side_trunc(" $(is_act ? "▶" : " ") $(c.name[1:min(8, length(c.name))]) cpk=$(_fmt(cctx.cpk))", maxw),
+                tstyle(is_act ? :accent : :text_dim))
+            y += 1
         end
     end
     return y
