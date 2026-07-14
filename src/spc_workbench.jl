@@ -2494,10 +2494,13 @@ end
 
 # ── Graph presets menu scroll helpers ───────────────────────────────────
 
+"""Visible list-row capacity for Config Saved. `presets_area` is the remaining
+body rect (from list body start), not full page content — subtract the list's
+own header rows (`Saved: N` + blank = 2) so rows do not paint into chrome."""
 function _presets_visible_capacity(m::SPCWorkbenchModel)::Int
     a = m.presets_area
     h = (a.height > 0) ? a.height : 20
-    return max(1, h - 4)
+    return max(1, h - 2)
 end
 
 function _sync_presets_scroll!(m::SPCWorkbenchModel, n::Int = length(m.graph_presets),
@@ -5584,8 +5587,9 @@ function _render_config_section_body!(buf, content, m; y::Int)
             y += 1
         end
     elseif m.config_tab === :saved
-        # Track list area for scroll capacity (KD-UC-16)
-        m.presets_area = content
+        # Remaining body only (below Config title/strip/help) — accurate scroll capacity
+        rem_h = max(1, bottom(content) - y + 1)
+        m.presets_area = Rect(content.x, y, content.width, rem_h)
         y = _render_presets_list_body!(buf, content, m; y = y)
     else
         for (idx, rid) in enumerate(["WECO-1","WECO-2","WECO-3","WECO-4","WECO-5","WECO-6","WECO-7","WECO-8"])
@@ -5653,7 +5657,7 @@ function _render_presets_list_body!(buf, content, m; y::Int)
     capacity = _presets_visible_capacity(m)
     _sync_presets_scroll!(m, npre, capacity)
     if npre == 0
-        set_string!(buf, content.x + 2, y, "No presets — s · save current graph set", tstyle(:warning, bold=true))
+        set_string!(buf, content.x + 2, y, "No saved configs — s · name-save current graph set", tstyle(:warning, bold=true))
         y += 1
         set_string!(buf, content.x + 2, y,
             "  Capture lines on/off, styles, visual prefs, and WECO rules under a name.",

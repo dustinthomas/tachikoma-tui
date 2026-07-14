@@ -3550,8 +3550,8 @@ end
         @test occursin("CONFIG", full)
         @test occursin("[Saved]", full) || occursin("Saved", full)
         @test !occursin("GRAPH PRESETS", full)
-        @test occursin("No presets", full) || occursin("no presets", full) ||
-              occursin("s · save", full) || occursin("s save", full) || occursin("name-save", full)
+        @test occursin("No saved configs", full) || occursin("no saved", lowercase(full)) ||
+              occursin("name-save", full)
         @test !occursin("Side Stats", full)  # dedicated page, no dashboard bleed
         # Esc closes without quit
         T.update!(m, T.KeyEvent(:escape))
@@ -3702,6 +3702,35 @@ end
         @test !occursin("drop-me", full)
         T.update!(m, T.KeyEvent(:escape))
         @test m.view_mode === :dashboard
+    end
+
+    @testset "Config Saved: scroll capacity uses remaining body (not full content)" begin
+        d = generate_spc_workbench_data(12; seed = 3)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        for i in 1:20
+            push!(m.graph_presets, capture_graph_preset(m; name = "cfg-$i"))
+        end
+        T.update!(m, T.KeyEvent('e'))
+        @test m.view_mode === :config && m.config_tab === :saved
+        tb = T.TestBackend(100, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
+        # Area is remaining body; capacity reserves list header rows
+        @test m.presets_area.height > 0
+        cap = _presets_visible_capacity(m)
+        @test cap >= 1
+        @test cap < m.presets_area.height
+        # Selecting last entry advances scroll so capacity stays honest
+        m.presets_selected = 20
+        _sync_presets_scroll!(m)
+        @test m.presets_scroll > 0
+        # re-render: last name visible, first name scrolled off
+        tb2 = T.TestBackend(100, 24); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 24), [], []))
+        full = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("cfg-20  (", full)
+        @test !occursin("cfg-1  (", full)  # early entries scrolled away (exact name, not cfg-10+)
+        T.update!(m, T.KeyEvent(:escape))
     end
 
     @testset "chart line styles: primary buffer density solid ≫ dotted" begin
