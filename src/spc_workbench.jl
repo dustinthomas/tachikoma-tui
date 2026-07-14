@@ -839,6 +839,132 @@ function weco_detect(
     out
 end
 
+# ── WECO explain helpers (pure; bubble/popup content assembly) ───────────
+
+const WECO_POPUP_MAX_BODY = 5
+
+# Short names (1-based index) — Config Rules section + side panel + explain
+const WECO_RULE_DESCS = [
+    "1 point beyond 3σ",
+    "2 of 3 consec. zone A (>2σ)",
+    "4 of 5 consec. zone B (>1σ)",
+    "8 in a row same side CL",
+    "6 in a row trending",
+    "14 alternating",
+    "15 inside 1σ",
+    "8 outside 1σ",
+]
+
+"""How: one-liners for WECO-1…8 explain popup (concise calculation copy)."""
+const WECO_EXPLAIN_HOW = Dict{String,String}(
+    "WECO-1" => "Flag if point is beyond CL ± 3σ (control limits).",
+    "WECO-2" => "Flag if ≥2 of 3 points end in zone A (±2σ), same side.",
+    "WECO-3" => "Flag if ≥4 of 5 points end in zone B (±1σ), same side.",
+    "WECO-4" => "Flag if 8 consecutive points sit on one side of CL.",
+    "WECO-5" => "Flag if 6 consecutive points strictly trend up or down.",
+    "WECO-6" => "Flag if 14 consecutive points alternate up/down.",
+    "WECO-7" => "Flag if 15 consecutive points stay inside ±1σ.",
+    "WECO-8" => "Flag if 8 consecutive points stay outside ±1σ.",
+)
+
+"""
+    weco_rules_at_index(viols, index) -> Vector{String}
+
+Unique rule ids (e.g. \"WECO-1\") that list `index` in `viols`, stable
+rule-number order WECO-1…8.
+"""
+function weco_rules_at_index(
+    viols::AbstractVector{WECOViolation},
+    index::Int,
+)::Vector{String}
+    index < 1 && return String[]
+    rules = String[]
+    seen = Set{String}()
+    for v in viols
+        v.index == index || continue
+        v.rule in seen && continue
+        push!(seen, v.rule)
+        push!(rules, v.rule)
+    end
+    sort!(rules; by = r -> something(tryparse(Int, replace(r, "WECO-" => "")), 99))
+    return rules
+end
+
+"""First violation matching `rule` and `index`, or `nothing`."""
+function _first_viol(
+    viols::AbstractVector{WECOViolation},
+    rule::String,
+    index::Int,
+)::Union{Nothing,WECOViolation}
+    for v in viols
+        v.rule == rule && v.index == index && return v
+    end
+    return nothing
+end
+
+"""
+    weco_explain_content(mode; rule, enabled, viols, index, rules_at) -> NamedTuple{(:title,:lines)}
+
+Pure popup content assembly (KD-WB-14).
+
+- `mode === :rule`  — bubble click or single-rule open; title has WECO-N and ON/OFF;
+  body has short desc, `How:`, optional `At:` only if a viol exists at `index` for `rule`.
+- `mode === :point` — multi/single from point open; title `WECO · #i`; ≤4 rule lines;
+  `+N more` if more than 4 rules_at.
+
+`lines` length is capped at `WECO_POPUP_MAX_BODY` (5). No separate State: body line
+(state lives in the title only for `:rule`).
+"""
+function weco_explain_content(
+    mode::Symbol;
+    rule::String = "WECO-1",
+    enabled::Bool = true,
+    viols::AbstractVector{WECOViolation} = WECOViolation[],
+    index::Union{Nothing,Int} = nothing,
+    rules_at::Vector{String} = String[],
+)::NamedTuple{(:title, :lines), Tuple{String, Vector{String}}}
+    state = enabled ? "ON" : "OFF"
+    if mode === :point
+        i = something(index, 0)
+        title = "WECO · #$i"
+        lines = String[]
+        shown = rules_at[1:min(end, 4)]
+        for r in shown
+            ridx = something(tryparse(Int, replace(r, "WECO-" => "")), 1)
+            short = (1 <= ridx <= length(WECO_RULE_DESCS)) ? WECO_RULE_DESCS[ridx] : r
+            v = _first_viol(viols, r, i)
+            if v !== nothing
+                push!(lines, _side_trunc("$r: $(v.msg)", 80))
+            else
+                push!(lines, "$r: $short")
+            end
+        end
+        extra = length(rules_at) - length(shown)
+        extra > 0 && push!(lines, "+$extra more")
+        length(lines) > WECO_POPUP_MAX_BODY && (lines = lines[1:WECO_POPUP_MAX_BODY])
+        return (; title, lines)
+    else
+        # :rule (default for unknown modes)
+        ridx = something(tryparse(Int, replace(rule, "WECO-" => "")), 1)
+        short = (1 <= ridx <= length(WECO_RULE_DESCS)) ? WECO_RULE_DESCS[ridx] : rule
+        title = "$rule · $state"
+        lines = String[
+            short,
+            "How: " * get(WECO_EXPLAIN_HOW, rule, ""),
+        ]
+        v = if index !== nothing
+            _first_viol(viols, rule, index)
+        else
+            nothing
+        end
+        if v !== nothing
+            push!(lines, "At: " * v.msg)
+        end
+        length(lines) > WECO_POPUP_MAX_BODY && (lines = lines[1:WECO_POPUP_MAX_BODY])
+        return (; title, lines)
+    end
+end
+
 """
     compute_limits_and_zones(values; corrected=true, sigma_method=:std)
 
@@ -1546,7 +1672,9 @@ end
 
 # Exports (for direct include in tests; later slices will re-export via TachikomaTUI)
 export WECOViolation, WorkbenchData, LimitsAndZones, CapabilityResult
-export weco_detect, compute_limits_and_zones, compute_capability, generate_spc_workbench_data
+export weco_detect, weco_rules_at_index, weco_explain_content
+export WECO_RULE_DESCS, WECO_EXPLAIN_HOW, WECO_POPUP_MAX_BODY
+export compute_limits_and_zones, compute_capability, generate_spc_workbench_data
 export detect_oos, cpk_band, cpk_color_for_band
 export compute_fit_y_range, y_extras_from_limits, fit_viewport_y!, auto_fit_viewport_y!
 export ChartRenderContext, resolve_chart_render_context, point_status, auto_limits
@@ -7247,17 +7375,7 @@ end
 # Enhance footer with current chart + mode
 # (footer render already at end of view; header now mentions keys)
 
-# WECO rule descs (Config Rules section + side panel)
-const WECO_RULE_DESCS = [
-    "1 point beyond 3σ",
-    "2 of 3 consec. zone A (>2σ)",
-    "4 of 5 consec. zone B (>1σ)",
-    "8 in a row same side CL",
-    "6 in a row trending",
-    "14 alternating",
-    "15 inside 1σ",
-    "8 outside 1σ",
-]
+# WECO_RULE_DESCS / WECO_EXPLAIN_HOW live in pure section (near weco_detect)
 
 # ── Live (slice 6) — PR3: per-chart live_enabled + modal gates ─────────
 

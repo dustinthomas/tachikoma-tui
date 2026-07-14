@@ -490,13 +490,124 @@ include("../src/spc_workbench_io.jl")
 
     @testset "Rule enable/disable and combined violations" begin
         cl, s = 0.0, 1.0
-        vals = [3.5, 2.2, 2.1]  # W1 at1 + W2 at3
+        vals = [3.5, 2.2, 2.1]  # W1 at1 + W2 at3 (different indices — enable-filter only)
         vboth = weco_detect(vals, cl, s; enabled_rules=Dict("WECO-1"=>true, "WECO-2"=>true))
         @test any(x->x.rule=="WECO-1" && x.index==1, vboth)
         @test any(x->x.rule=="WECO-2" && x.index==3, vboth)
 
         v1only = weco_detect(vals, cl, s; enabled_rules=Dict("WECO-1"=>true, "WECO-2"=>false))
         @test length(v1only) == 1 && v1only[1].rule == "WECO-1"
+    end
+
+    @testset "weco_rules_at_index + explain content (pure)" begin
+        # empty / out-of-range index
+        @test isempty(weco_rules_at_index(WECOViolation[], 1))
+        @test isempty(weco_rules_at_index(WECOViolation[], 0))
+        @test isempty(weco_rules_at_index(WECOViolation[], -1))
+
+        # single rule at index
+        viols_one = [WECOViolation("WECO-1", 3, "#3 = 3.5 beyond +3σ (UCL 3.0)")]
+        @test weco_rules_at_index(viols_one, 3) == ["WECO-1"]
+        @test isempty(weco_rules_at_index(viols_one, 1))
+        @test isempty(weco_rules_at_index(viols_one, 2))
+
+        # synthetic same-index multi fixture (NOT the L491 different-index series)
+        viols_multi = [
+            WECOViolation("WECO-1", 8, "#8 = 3.5 beyond +3σ (UCL 3.0)"),
+            WECOViolation("WECO-4", 8, "8 in a row ending #8 above CL"),
+            WECOViolation("WECO-2", 3, "2 of 3 ending #3 in zone A (+ 2σ side)"),
+        ]
+        @test weco_rules_at_index(viols_multi, 8) == ["WECO-1", "WECO-4"]
+        @test weco_rules_at_index(viols_multi, 3) == ["WECO-2"]
+        @test isempty(weco_rules_at_index(viols_multi, 1))
+
+        # stable order by rule number even if insertion is unsorted
+        viols_unsorted = [
+            WECOViolation("WECO-5", 2, "msg5"),
+            WECOViolation("WECO-1", 2, "msg1"),
+            WECOViolation("WECO-3", 2, "msg3"),
+        ]
+        @test weco_rules_at_index(viols_unsorted, 2) == ["WECO-1", "WECO-3", "WECO-5"]
+
+        # dedupe same rule+index
+        viols_dup = [
+            WECOViolation("WECO-1", 4, "first"),
+            WECOViolation("WECO-1", 4, "second"),
+        ]
+        @test weco_rules_at_index(viols_dup, 4) == ["WECO-1"]
+
+        # _first_viol
+        @test _first_viol(viols_multi, "WECO-1", 8) !== nothing
+        @test _first_viol(viols_multi, "WECO-1", 8).msg == "#8 = 3.5 beyond +3σ (UCL 3.0)"
+        @test _first_viol(viols_multi, "WECO-4", 3) === nothing
+        @test _first_viol(viols_dup, "WECO-1", 4).msg == "first"
+
+        # WECO_EXPLAIN_HOW catalog: all 8 keys, non-empty
+        @test length(WECO_EXPLAIN_HOW) == 8
+        for k in 1:8
+            rid = "WECO-$k"
+            @test haskey(WECO_EXPLAIN_HOW, rid)
+            @test !isempty(WECO_EXPLAIN_HOW[rid])
+        end
+        @test length(WECO_RULE_DESCS) == 8
+        @test WECO_POPUP_MAX_BODY == 5
+
+        # :rule content contracts — ON + At when viol present
+        c_on = weco_explain_content(:rule; rule="WECO-1", enabled=true,
+            viols=viols_multi, index=8)
+        @test occursin("WECO-1", c_on.title)
+        @test occursin("ON", c_on.title)
+        @test any(l -> startswith(l, "How:"), c_on.lines)
+        @test any(l -> startswith(l, "At:"), c_on.lines)
+        @test length(c_on.lines) <= WECO_POPUP_MAX_BODY
+        @test c_on.lines[1] == WECO_RULE_DESCS[1]
+        @test occursin(WECO_EXPLAIN_HOW["WECO-1"], c_on.lines[2])
+
+        # :rule OFF — title OFF; How present; no At without matching viol
+        c_off = weco_explain_content(:rule; rule="WECO-6", enabled=false,
+            viols=viols_multi, index=8)
+        @test occursin("WECO-6", c_off.title)
+        @test occursin("OFF", c_off.title)
+        @test any(l -> startswith(l, "How:"), c_off.lines)
+        @test !any(l -> startswith(l, "At:"), c_off.lines)
+        @test !any(l -> occursin("State:", l), c_off.lines)
+
+        # :rule with index but no viol for that rule — no At
+        c_noat = weco_explain_content(:rule; rule="WECO-1", enabled=true,
+            viols=viols_multi, index=3)
+        @test !any(l -> startswith(l, "At:"), c_noat.lines)
+
+        # :rule with index=nothing — no At
+        c_ni = weco_explain_content(:rule; rule="WECO-1", enabled=true,
+            viols=viols_multi, index=nothing)
+        @test !any(l -> startswith(l, "At:"), c_ni.lines)
+
+        # :point content contracts
+        rules8 = weco_rules_at_index(viols_multi, 8)
+        c_pt = weco_explain_content(:point; index=8, viols=viols_multi, rules_at=rules8)
+        @test c_pt.title == "WECO · #8"
+        @test length(c_pt.lines) <= WECO_POPUP_MAX_BODY
+        @test any(l -> occursin("WECO-1", l), c_pt.lines)
+        @test any(l -> occursin("WECO-4", l), c_pt.lines)
+        @test any(l -> occursin("beyond +3σ", l) || occursin("above CL", l), c_pt.lines)
+
+        # :point with >4 rules → ≤4 rule lines + "+N more"
+        rules_many = ["WECO-1", "WECO-2", "WECO-3", "WECO-4", "WECO-5", "WECO-6"]
+        viols_many = [WECOViolation(r, 9, "msg $r") for r in rules_many]
+        c_more = weco_explain_content(:point; index=9, viols=viols_many, rules_at=rules_many)
+        @test c_more.title == "WECO · #9"
+        @test length(c_more.lines) <= WECO_POPUP_MAX_BODY
+        @test count(l -> startswith(l, "WECO-"), c_more.lines) <= 4
+        @test any(l -> occursin("more", l), c_more.lines)
+        @test any(l -> l == "+2 more", c_more.lines)
+
+        # :point without viol msgs falls back to short desc
+        c_fb = weco_explain_content(:point; index=1, viols=WECOViolation[],
+            rules_at=["WECO-2"])
+        @test c_fb.title == "WECO · #1"
+        @test length(c_fb.lines) == 1
+        @test occursin("WECO-2", c_fb.lines[1])
+        @test occursin(WECO_RULE_DESCS[2], c_fb.lines[1])
     end
 
     @testset "compute_limits_and_zones" begin
