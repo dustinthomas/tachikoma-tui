@@ -2451,7 +2451,13 @@ function _effective_index_path(m::SPCWorkbenchModel)::String
         m.graph_config_index_path
 end
 
-"""Start directory for the file explorer (KD-SE-11)."""
+"""Start directory for the file explorer (KD-SE-11).
+
+Ordered candidates: seed → last_graph_config_path → selected → first
+path-bearing list entry (cheap; merge already MRU-orders the list) →
+**index MRU** (fallback when explorer opens without visiting Saved, so
+`graph_presets` may still be empty) → pwd → home.
+"""
 function _browser_start_dir(m::SPCWorkbenchModel, seed_path::AbstractString = "")::String
     candidates = String[]
     sp = strip(String(seed_path))
@@ -2459,10 +2465,21 @@ function _browser_start_dir(m::SPCWorkbenchModel, seed_path::AbstractString = ""
     !isempty(strip(m.last_graph_config_path)) && push!(candidates, m.last_graph_config_path)
     sel = _selected_entry_path(m)
     !isempty(sel) && push!(candidates, sel)
-    # Prefer first path-bearing list entry (merge already MRU-ordered; no index re-read)
+    # Prefer first path-bearing list entry (merge already MRU-ordered)
     for p in m.graph_presets
         raw = strip(p.path)
         !isempty(raw) && (push!(candidates, raw); break)
+    end
+    # Index MRU fallback (KD-SE-11): explorer may open from any Config tab
+    # without Saved merge, so list can be empty while durable index has paths.
+    try
+        ents = read_graph_config_index(_effective_index_path(m))
+        if !isempty(ents)
+            _, mi = findmax(e -> e.last_used_at, ents)
+            !isempty(strip(ents[mi].path)) && push!(candidates, ents[mi].path)
+        end
+    catch
+        # fail-closed: skip index candidate
     end
     for c in candidates
         ap = abspath(expanduser(c))
