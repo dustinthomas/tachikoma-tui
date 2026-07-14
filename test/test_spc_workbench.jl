@@ -3538,29 +3538,32 @@ end
         @test m.hovered === h1
         @test m.drag_start === nothing
 
-        # Other bubble retargets; OFF chip (e.g. 6) still opens
+        # Other bubble stacks below first; OFF chip (e.g. 6) still opens
         bx6 = g.x0 + (6 - 1) * g.step + (g.boxed ? 1 : 0)
         T.update!(m, T.MouseEvent(bx, by, T.mouse_left, T.mouse_press, false, false, false))
         @test m.weco_explain_rule == "WECO-1"
+        @test m.weco_explain_stack == ["WECO-1"]
         T.update!(m, T.MouseEvent(bx6, by, T.mouse_left, T.mouse_press, false, false, false))
         @test m.weco_explain_open === true
-        @test m.weco_explain_rule == "WECO-6"
+        @test m.weco_explain_stack == ["WECO-1", "WECO-6"]
+        @test m.weco_explain_rule == "WECO-6"  # last pressed
         @test m.hovered === h1
         @test m.drag_start === nothing
 
-        # Plot press while explain open: pan/select armed; explain stays open (KD-WB-13)
+        # Plot press while explain open: pan/select armed; explain stack stays open (KD-WB-13)
         T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_press, false, false, false))
         @test m.weco_explain_open === true
-        @test m.weco_explain_rule == "WECO-6"
+        @test m.weco_explain_stack == ["WECO-1", "WECO-6"]
         @test m.drag_start !== nothing
         T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_release, false, false, false))
         @test m.drag_start === nothing
         @test m.weco_explain_open === true
 
-        # Outside chrome press closes explain
+        # Outside chrome press closes explain (full stack)
         T.update!(m, T.MouseEvent(ox, oy, T.mouse_left, T.mouse_press, false, false, false))
         @test m.weco_explain_open === false
         @test m.weco_explain_rule === nothing
+        @test isempty(m.weco_explain_stack)
         @test m.hovered === nothing
 
         # Pure hit-test helper: miss y / off-row
@@ -3707,6 +3710,94 @@ end
         help_flat = join([string(e) for e in help_e], " ")
         @test occursin("explain", help_flat)
         @test occursin("dash w", help_flat) || occursin("WECO explain", help_flat)
+    end
+
+    @testset "WECO bubble stack: consecutive presses stack tips below first" begin
+        # :single → taller primary plot_area so 3 stacked tips fit (triple primary is ~7 rows)
+        d = generate_spc_workbench_data(18; seed=42)
+        n = length(d.values)
+        m = SPCWorkbenchModel(data=d, paused=true, viewport=Viewport(x0=1, x1=n),
+            seed_demos=:single)
+        W, H = 100, 36
+        tb = T.TestBackend(W, H)
+        function re_view!()
+            T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, W, H), [], []))
+        end
+        re_view!()
+        @test m.weco_bubble_geom !== nothing
+        g = m.weco_bubble_geom
+        @test m.plot_area.width >= 16
+        @test m.plot_area.height >= 12  # room for 3× ~4-row tips
+        @test isempty(m.weco_explain_stack)
+
+        bx1 = g.x0 + (g.boxed ? 1 : 0)
+        bx2 = g.x0 + (2 - 1) * g.step + (g.boxed ? 1 : 0)
+        bx3 = g.x0 + (3 - 1) * g.step + (g.boxed ? 1 : 0)
+        by = g.y
+        @test _weco_bubble_at(m, bx1, by) == 1
+        @test _weco_bubble_at(m, bx2, by) == 2
+        @test _weco_bubble_at(m, bx3, by) == 3
+
+        # First press opens single tip
+        T.update!(m, T.MouseEvent(bx1, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === true
+        @test m.weco_explain_mode === :rule
+        @test m.weco_explain_stack == ["WECO-1"]
+        @test m.weco_explain_rule == "WECO-1"
+        re_view!()
+        @test length(m.weco_popup_rects) == 1
+        @test m.weco_popup_rects[1].width > 0 && m.weco_popup_rects[1].height > 0
+        r1 = m.weco_popup_rects[1]
+        @test T.find_text(tb, "WECO-1") !== nothing
+        @test T.find_text(tb, "How:") !== nothing
+
+        # Second consecutive press stacks below first (does not replace)
+        T.update!(m, T.MouseEvent(bx2, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_stack == ["WECO-1", "WECO-2"]
+        @test m.weco_explain_rule == "WECO-2"
+        re_view!()
+        @test length(m.weco_popup_rects) == 2
+        r1b, r2 = m.weco_popup_rects[1], m.weco_popup_rects[2]
+        @test r2.y >= r1b.y + r1b.height  # second tip starts at or below first bottom
+        @test T.find_text(tb, "WECO-1") !== nothing
+        @test T.find_text(tb, "WECO-2") !== nothing
+        # Count How: lines — both rule bodies should paint
+        how_hits = 0
+        for y in 1:H
+            row = join(Char[T.char_at(tb, x, y) for x in 1:W])
+            occursin("How:", row) && (how_hits += 1)
+        end
+        @test how_hits >= 2
+
+        # Third press stacks further below
+        T.update!(m, T.MouseEvent(bx3, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_stack == ["WECO-1", "WECO-2", "WECO-3"]
+        re_view!()
+        @test length(m.weco_popup_rects) == 3
+        r1c, r2c, r3 = m.weco_popup_rects[1], m.weco_popup_rects[2], m.weco_popup_rects[3]
+        @test r2c.y >= r1c.y + r1c.height
+        @test r3.y >= r2c.y + r2c.height
+        @test T.find_text(tb, "WECO-3") !== nothing
+
+        # Re-press middle chip removes only that tip; others stay stacked
+        T.update!(m, T.MouseEvent(bx2, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_stack == ["WECO-1", "WECO-3"]
+        @test m.weco_explain_open === true
+        re_view!()
+        @test length(m.weco_popup_rects) == 2
+        @test T.find_text(tb, "WECO-1") !== nothing
+        @test T.find_text(tb, "WECO-3") !== nothing
+
+        # Re-press remaining chips one by one closes stack
+        T.update!(m, T.MouseEvent(bx1, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_stack == ["WECO-3"]
+        T.update!(m, T.MouseEvent(bx3, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test isempty(m.weco_explain_stack)
+        @test m.weco_explain_open === false
+        re_view!()
+        @test isempty(m.weco_popup_rects) || all(r -> r.width == 0, m.weco_popup_rects)
+        @test m.weco_popup_rect.width == 0
     end
 
     @testset "WECO plot double-click explain :point (PR4 / KD-WB-10)" begin

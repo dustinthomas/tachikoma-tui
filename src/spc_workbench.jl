@@ -2045,7 +2045,10 @@ end
     weco_explain_mode::Symbol = :rule       # :rule | :point
     weco_explain_rule::Union{Nothing, String} = nothing
     weco_explain_index::Union{Nothing, Int} = nothing
-    weco_popup_rect::Rect = Rect(0, 0, 0, 0)
+    # Ordered rule tips for bubble multi-open (top → bottom). Empty when :point or closed.
+    weco_explain_stack::Vector{String} = String[]
+    weco_popup_rect::Rect = Rect(0, 0, 0, 0)  # bounding/hit rect (union of stacked tips)
+    weco_popup_rects::Vector{Rect} = Rect[]   # per-tip paint rects (stack order)
     # Plot dblclick state (PR4 / KD-WB-10): press arm + last completed click-release
     plot_press::Union{Nothing, NamedTuple{(:idx, :x, :y, :tick, :dragged), Tuple{Int, Int, Int, Int, Bool}}} = nothing
     plot_last_click::Union{Nothing, NamedTuple{(:idx, :tick), Tuple{Int, Int}}} = nothing
@@ -5224,13 +5227,30 @@ function _weco_bubble_at(m::SPCWorkbenchModel, x::Int, y::Int)::Union{Nothing,In
     return nothing
 end
 
-"""Clear WECO explain flags (and popup rect). Paint-owned geom is left alone."""
+"""Clear WECO explain flags (and popup rects / rule stack). Paint-owned geom is left alone."""
 function _clear_weco_explain!(m::SPCWorkbenchModel)
     m.weco_explain_open = false
     m.weco_explain_mode = :rule
     m.weco_explain_rule = nothing
     m.weco_explain_index = nothing
+    empty!(m.weco_explain_stack)
     m.weco_popup_rect = Rect(0, 0, 0, 0)
+    empty!(m.weco_popup_rects)
+    return nothing
+end
+
+"""Sync open/rule flags from `weco_explain_stack` after bubble add/remove (:rule only)."""
+function _sync_weco_rule_stack_flags!(m::SPCWorkbenchModel)
+    if isempty(m.weco_explain_stack)
+        m.weco_explain_open = false
+        m.weco_explain_mode = :rule
+        m.weco_explain_rule = nothing
+        m.weco_explain_index = nothing
+    else
+        m.weco_explain_open = true
+        m.weco_explain_mode = :rule
+        m.weco_explain_rule = m.weco_explain_stack[end]
+    end
     return nothing
 end
 
@@ -5250,6 +5270,7 @@ function _weco_try_open_point_explain!(m::SPCWorkbenchModel, idx::Int)::Bool
     viols = weco_detect(ch.data.values, ctx.lz.cl, ctx.lz.sigma; enabled_rules = ch.enabled_rules)
     rules_at = weco_rules_at_index(viols, idx)
     isempty(rules_at) && return false
+    empty!(m.weco_explain_stack)  # :point is a single card, not a rule stack
     m.weco_explain_open = true
     m.weco_explain_mode = :point
     m.weco_explain_rule = rules_at[1]
@@ -5285,6 +5306,7 @@ function _weco_key_toggle!(m::SPCWorkbenchModel)
     viols = weco_detect(ch.data.values, ctx.lz.cl, ctx.lz.sigma; enabled_rules = ch.enabled_rules)
     rules_at = m.hovered === nothing ? String[] : weco_rules_at_index(viols, m.hovered)
     if length(rules_at) >= 2
+        empty!(m.weco_explain_stack)
         m.weco_explain_open = true
         m.weco_explain_mode = :point
         m.weco_explain_rule = rules_at[1]
@@ -5292,17 +5314,21 @@ function _weco_key_toggle!(m::SPCWorkbenchModel)
         m.last_event = "weco explain #$(m.hovered)"
     elseif length(rules_at) == 1
         rid = rules_at[1]
+        m.weco_explain_stack = [rid]
         m.weco_explain_open = true
         m.weco_explain_mode = :rule
         m.weco_explain_rule = rid
         m.weco_explain_index = m.hovered
         m.last_event = "weco explain $rid"
     else
-        rid = if m.weco_explain_rule !== nothing
+        rid = if !isempty(m.weco_explain_stack)
+            m.weco_explain_stack[end]
+        elseif m.weco_explain_rule !== nothing
             m.weco_explain_rule
         else
             _weco_first_enabled_rule(ch)
         end
+        m.weco_explain_stack = [rid]
         m.weco_explain_open = true
         m.weco_explain_mode = :rule
         m.weco_explain_rule = rid
@@ -5312,89 +5338,66 @@ function _weco_key_toggle!(m::SPCWorkbenchModel)
     return nothing
 end
 
-"""Open/retarget/toggle rule explain from bubble press (does not touch drag/hover)."""
+"""
+Open/stack/toggle rule explain from bubble press (does not touch drag/hover).
+
+Consecutive presses of *different* chips append tips (stack top→bottom).
+Re-press of an open chip removes only that tip. Same single-chip re-press closes.
+"""
 function _weco_bubble_press!(m::SPCWorkbenchModel, k::Int)
     rid = "WECO-$k"
-    if m.weco_explain_open && m.weco_explain_mode === :rule && m.weco_explain_rule == rid
-        _clear_weco_explain!(m)
-        m.last_event = "weco explain closed"
-    else
+    # Replace :point card with a rule stack starting at this chip
+    if m.weco_explain_open && m.weco_explain_mode === :point
+        m.weco_explain_stack = [rid]
         m.weco_explain_open = true
         m.weco_explain_mode = :rule
         m.weco_explain_rule = rid
-        m.weco_explain_index = m.hovered  # may be nothing
+        m.weco_explain_index = m.hovered
         m.last_event = "weco explain $rid"
+        return nothing
     end
+    if m.weco_explain_open && m.weco_explain_mode === :rule
+        # Migrate legacy single-open (stack empty but rule set) into stack
+        if isempty(m.weco_explain_stack) && m.weco_explain_rule !== nothing
+            push!(m.weco_explain_stack, m.weco_explain_rule)
+        end
+        idx = findfirst(==(rid), m.weco_explain_stack)
+        if idx !== nothing
+            deleteat!(m.weco_explain_stack, idx)
+            if isempty(m.weco_explain_stack)
+                _clear_weco_explain!(m)
+                m.last_event = "weco explain closed"
+            else
+                _sync_weco_rule_stack_flags!(m)
+                m.weco_explain_index = m.hovered
+                m.last_event = "weco explain $(m.weco_explain_rule)"
+            end
+        else
+            push!(m.weco_explain_stack, rid)
+            m.weco_explain_open = true
+            m.weco_explain_mode = :rule
+            m.weco_explain_rule = rid
+            m.weco_explain_index = m.hovered
+            m.last_event = "weco explain $rid"
+        end
+        return nothing
+    end
+    # Fresh open
+    m.weco_explain_stack = [rid]
+    m.weco_explain_open = true
+    m.weco_explain_mode = :rule
+    m.weco_explain_rule = rid
+    m.weco_explain_index = m.hovered  # may be nothing
+    m.last_event = "weco explain $rid"
     return nothing
 end
 
 """
-Paint WECO explain popup right-anchored over primary `plot_area` (KD-WB-2/14).
-Sets `m.weco_popup_rect` for hit-test; skips when plot too narrow (<16).
-Re-queries viols each paint so At-line stays live.
+Paint one WECO explain card into `rect` (already sized). Returns nothing.
 """
-function _render_weco_explain_popup!(buf, plot_area::Rect, m::SPCWorkbenchModel)
-    if !m.weco_explain_open
-        m.weco_popup_rect = Rect(0, 0, 0, 0)
-        return nothing
-    end
-    if plot_area.width < 16 || plot_area.height < 4
-        m.weco_popup_rect = Rect(0, 0, 0, 0)
-        m.last_event = isempty(m.last_event) ? "popup too narrow" : m.last_event
-        return nothing
-    end
-    _ensure_charts!(m)
-    isempty(m.charts) && return nothing
-    ch = current_chart(m)
-    ctx = resolve_chart_render_context(ch; sigma_method = :mr)
-    viols = weco_detect(ch.data.values, ctx.lz.cl, ctx.lz.sigma; enabled_rules = ch.enabled_rules)
-    rule = something(m.weco_explain_rule, "WECO-1")
-    enabled = get(ch.enabled_rules, rule, false)
-    mode = m.weco_explain_mode  # :rule | :point
-    rules_at = m.weco_explain_index === nothing ? String[] :
-        weco_rules_at_index(viols, m.weco_explain_index)
-    content = weco_explain_content(mode; rule, enabled, viols,
-        index = m.weco_explain_index, rules_at)
-
-    avail = max(0, plot_area.width - 1)
-    avail < 16 && (m.weco_popup_rect = Rect(0, 0, 0, 0); return nothing)
-    desired = 36
-    box_w = clamp(desired, min(28, max(12, avail)), min(48, avail))
-    body_maxw = max(4, box_w - 2)
-    body_lines = [_side_trunc(ln, body_maxw) for ln in content.lines]
-    box_h = 2 + length(body_lines)   # Block borders + body (no footer row)
-    box_h = min(box_h, plot_area.height)
-    box_h < 3 && (m.weco_popup_rect = Rect(0, 0, 0, 0); return nothing)
-
-    # Right edge at side_outer.x - 2 (gap ≥1 before side), else side_area.x - 2
-    anchor_right = if m.side_outer.width > 0
-        m.side_outer.x - 2
-    elseif m.side_area.width > 0
-        m.side_area.x - 2
-    else
-        plot_area.x + plot_area.width - 1
-    end
-    box_x = anchor_right - box_w + 1
-    box_x = max(plot_area.x, box_x)
-    # If still overflows plot right, clamp left and shrink width
-    if box_x + box_w - 1 > plot_area.x + plot_area.width - 1
-        box_w = max(12, plot_area.x + plot_area.width - box_x)
-        body_maxw = max(4, box_w - 2)
-        body_lines = [_side_trunc(ln, body_maxw) for ln in content.lines]
-        box_h = min(2 + length(body_lines), plot_area.height)
-    end
-
-    # Vertical: prefer centered on bubble row; clamp into plot_area
-    cy = m.weco_bubble_geom !== nothing ? m.weco_bubble_geom.y :
-        (plot_area.y + plot_area.height ÷ 2)
-    box_y = cy - box_h ÷ 2
-    max_y = plot_area.y + plot_area.height - box_h
-    box_y = clamp(box_y, plot_area.y, max(plot_area.y, max_y))
-
-    rect = Rect(box_x, box_y, box_w, box_h)
-    m.weco_popup_rect = rect
+function _paint_weco_explain_card!(buf, rect::Rect, content)
     _clear_rect!(buf, rect)
-    title_s = _side_trunc(content.title, max(4, box_w - 2))
+    title_s = _side_trunc(content.title, max(4, rect.width - 2))
     inner = render(
         Block(
             title = title_s,
@@ -5410,11 +5413,124 @@ function _render_weco_explain_popup!(buf, plot_area::Rect, m::SPCWorkbenchModel)
     maxw = max(1, inner.width)
     bot = bottom(inner)
     y = inner.y
-    for ln in body_lines
+    body_maxw = max(4, rect.width - 2)
+    for ln in content.lines
         y > bot && break
-        set_string!(buf, inner.x, y, _side_trunc(ln, maxw), tstyle(:text))
+        set_string!(buf, inner.x, y, _side_trunc(ln, min(maxw, body_maxw)), tstyle(:text))
         y += 1
     end
+    return nothing
+end
+
+"""Horizontal box geometry for WECO explain cards (shared across stack)."""
+function _weco_popup_hgeom(plot_area::Rect, m::SPCWorkbenchModel)
+    avail = max(0, plot_area.width - 1)
+    avail < 16 && return nothing
+    desired = 36
+    box_w = clamp(desired, min(28, max(12, avail)), min(48, avail))
+    anchor_right = if m.side_outer.width > 0
+        m.side_outer.x - 2
+    elseif m.side_area.width > 0
+        m.side_area.x - 2
+    else
+        plot_area.x + plot_area.width - 1
+    end
+    box_x = max(plot_area.x, anchor_right - box_w + 1)
+    if box_x + box_w - 1 > plot_area.x + plot_area.width - 1
+        box_w = max(12, plot_area.x + plot_area.width - box_x)
+    end
+    return (box_x = box_x, box_w = box_w, body_maxw = max(4, box_w - 2))
+end
+
+"""
+Paint WECO explain popup(s) right-anchored over primary `plot_area` (KD-WB-2/14).
+
+:rule with a non-empty stack paints one card per rule, stacked top→bottom
+(first press on top; each consecutive press below the previous).
+:point paints a single multi-rule card. Sets `m.weco_popup_rects` + bounding
+`m.weco_popup_rect` for hit-test; skips when plot too narrow (<16).
+Re-queries viols each paint so At-line stays live.
+"""
+function _render_weco_explain_popup!(buf, plot_area::Rect, m::SPCWorkbenchModel)
+    empty!(m.weco_popup_rects)
+    if !m.weco_explain_open
+        m.weco_popup_rect = Rect(0, 0, 0, 0)
+        return nothing
+    end
+    if plot_area.width < 16 || plot_area.height < 4
+        m.weco_popup_rect = Rect(0, 0, 0, 0)
+        m.last_event = isempty(m.last_event) ? "popup too narrow" : m.last_event
+        return nothing
+    end
+    _ensure_charts!(m)
+    isempty(m.charts) && (m.weco_popup_rect = Rect(0, 0, 0, 0); return nothing)
+    ch = current_chart(m)
+    ctx = resolve_chart_render_context(ch; sigma_method = :mr)
+    viols = weco_detect(ch.data.values, ctx.lz.cl, ctx.lz.sigma; enabled_rules = ch.enabled_rules)
+    hgeom = _weco_popup_hgeom(plot_area, m)
+    hgeom === nothing && (m.weco_popup_rect = Rect(0, 0, 0, 0); return nothing)
+    box_x, box_w, body_maxw = hgeom.box_x, hgeom.box_w, hgeom.body_maxw
+
+    mode = m.weco_explain_mode  # :rule | :point
+    index = m.weco_explain_index
+    rules_at = index === nothing ? String[] : weco_rules_at_index(viols, index)
+
+    # Build ordered content cards
+    contents = NamedTuple{(:title, :lines), Tuple{String, Vector{String}}}[]
+    if mode === :point
+        rule = something(m.weco_explain_rule, "WECO-1")
+        enabled = get(ch.enabled_rules, rule, false)
+        push!(contents, weco_explain_content(:point; rule, enabled, viols, index, rules_at))
+    else
+        stack = if !isempty(m.weco_explain_stack)
+            copy(m.weco_explain_stack)
+        elseif m.weco_explain_rule !== nothing
+            String[m.weco_explain_rule]
+        else
+            String["WECO-1"]
+        end
+        for rule in stack
+            enabled = get(ch.enabled_rules, rule, false)
+            push!(contents, weco_explain_content(:rule; rule, enabled, viols, index, rules_at))
+        end
+    end
+    isempty(contents) && (m.weco_popup_rect = Rect(0, 0, 0, 0); return nothing)
+
+    # Heights per card for vertical stack placement (clamp each at paint time)
+    heights = [min(2 + length(c.lines), plot_area.height) for c in contents]
+    # Prefer first card centered on bubble row; subsequent cards stack below
+    cy = m.weco_bubble_geom !== nothing ? m.weco_bubble_geom.y :
+        (plot_area.y + plot_area.height ÷ 2)
+    h0 = max(3, heights[1])
+    first_y = cy - h0 ÷ 2
+    # If stack would overflow bottom, shift whole stack up so more tips fit
+    total_h = sum(max(3, h) for h in heights)
+    max_first = plot_area.y + plot_area.height - min(total_h, plot_area.height)
+    first_y = clamp(first_y, plot_area.y, max(plot_area.y, max_first))
+
+    y_cursor = first_y
+    plot_bot = plot_area.y + plot_area.height - 1
+    for content in contents
+        rem_h = plot_bot - y_cursor + 1
+        rem_h < 3 && break
+        body_lines = [_side_trunc(ln, body_maxw) for ln in content.lines]
+        box_h = min(2 + length(body_lines), rem_h)
+        box_h < 3 && break
+        content_draw = (title = content.title, lines = body_lines)
+        rect = Rect(box_x, y_cursor, box_w, box_h)
+        push!(m.weco_popup_rects, rect)
+        _paint_weco_explain_card!(buf, rect, content_draw)
+        y_cursor = y_cursor + box_h  # next tip directly below
+    end
+
+    if isempty(m.weco_popup_rects)
+        m.weco_popup_rect = Rect(0, 0, 0, 0)
+        return nothing
+    end
+    # Bounding rect for hit-test (includes gaps between stacked tips)
+    r0 = m.weco_popup_rects[1]
+    rN = m.weco_popup_rects[end]
+    m.weco_popup_rect = Rect(r0.x, r0.y, r0.width, rN.y + rN.height - r0.y)
     return nothing
 end
 
@@ -6770,6 +6886,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
         _render_weco_explain_popup!(buf, m.plot_area, m)
     else
         m.weco_popup_rect = Rect(0, 0, 0, 0)
+        empty!(m.weco_popup_rects)
     end
 
     # Bottom panels: Message center (left) + Keys (right) — no status footer strip
