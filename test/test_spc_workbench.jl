@@ -3423,6 +3423,98 @@ end
         end
     end
 
+    @testset "WECO mouse regions: side_outer preserve hover + bubble press flags (PR3a gates 1–4)" begin
+        d = generate_spc_workbench_data(18; seed=42)
+        n = length(d.values)
+        m = SPCWorkbenchModel(data=d, paused=true, viewport=Viewport(x0=1, x1=n))
+        tb = T.TestBackend(100, 36); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 36), [], []))
+        pa = m.plot_area
+        so = m.side_outer
+        @test pa.width > 5 && so.width > 0
+        @test m.weco_bubble_geom !== nothing
+        g = m.weco_bubble_geom
+
+        # Seed hover via plot move
+        cx = pa.x + pa.width ÷ 2
+        cy = pa.y + pa.height ÷ 2
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_move, false, false, false))
+        @test m.hovered !== nothing
+        h0 = m.hovered
+
+        # Gate 1: move from plot onto side_outer → hovered unchanged
+        sx = so.x + so.width ÷ 2
+        sy = so.y + so.height ÷ 2
+        @test T.contains(so, sx, sy)
+        @test !T.contains(pa, sx, sy)
+        T.update!(m, T.MouseEvent(sx, sy, T.mouse_left, T.mouse_move, false, false, false))
+        @test m.hovered === h0
+
+        # Gate 2: move outside both plot and side_outer → hovered cleared
+        ox, oy = 1, 1  # terminal chrome / header corner
+        @test !T.contains(pa, ox, oy)
+        @test !T.contains(so, ox, oy)
+        T.update!(m, T.MouseEvent(ox, oy, T.mouse_left, T.mouse_move, false, false, false))
+        @test m.hovered === nothing
+
+        # Re-seed hover for bubble press gates
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_move, false, false, false))
+        @test m.hovered !== nothing
+        h1 = m.hovered
+        vp_x0, vp_x1 = m.viewport.x0, m.viewport.x1
+
+        # Gate 3+4: press on bubble → explain flags; hover preserved; no drag_start / no pan
+        bx = g.x0 + (g.boxed ? 1 : 0)  # glyph cell of chip 1 (also in bare chip span)
+        by = g.y
+        @test _weco_bubble_at(m, bx, by) == 1
+        m.drag_start = nothing
+        T.update!(m, T.MouseEvent(bx, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === true
+        @test m.weco_explain_mode === :rule
+        @test m.weco_explain_rule == "WECO-1"
+        @test m.weco_explain_index === h1
+        @test m.hovered === h1
+        @test m.drag_start === nothing
+        @test m.viewport.x0 == vp_x0 && m.viewport.x1 == vp_x1
+        @test occursin("weco explain WECO-1", m.last_event)
+
+        # Same bubble re-press toggles closed (still no drag)
+        T.update!(m, T.MouseEvent(bx, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === false
+        @test m.weco_explain_rule === nothing
+        @test m.hovered === h1
+        @test m.drag_start === nothing
+
+        # Other bubble retargets; OFF chip (e.g. 6) still opens
+        bx6 = g.x0 + (6 - 1) * g.step + (g.boxed ? 1 : 0)
+        T.update!(m, T.MouseEvent(bx, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_rule == "WECO-1"
+        T.update!(m, T.MouseEvent(bx6, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === true
+        @test m.weco_explain_rule == "WECO-6"
+        @test m.hovered === h1
+        @test m.drag_start === nothing
+
+        # Plot press while explain open: pan/select armed; explain stays open (KD-WB-13)
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === true
+        @test m.weco_explain_rule == "WECO-6"
+        @test m.drag_start !== nothing
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.drag_start === nothing
+        @test m.weco_explain_open === true
+
+        # Outside chrome press closes explain
+        T.update!(m, T.MouseEvent(ox, oy, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === false
+        @test m.weco_explain_rule === nothing
+        @test m.hovered === nothing
+
+        # Pure hit-test helper: miss y / off-row
+        @test _weco_bubble_at(m, bx, by + 5) === nothing
+        @test _clear_weco_explain!(m) === nothing
+    end
+
     # Side panel chart-line parameters (CL/±1/±2/±3/Specs) + configurable visibility
     function _side_rows_text(tb, m)
         sa = m.side_area

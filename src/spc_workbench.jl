@@ -2018,6 +2018,12 @@ end
     side_outer::Rect = Rect(0, 0, 0, 0)
     # WECO chip geom (inner coords); cleared each side paint, set when bubbles draw.
     weco_bubble_geom::Union{Nothing, WecoBubbleGeom} = nothing
+    # WECO explain popup flags (session-ephemeral; PR3a sets flags, PR3b paints)
+    weco_explain_open::Bool = false
+    weco_explain_mode::Symbol = :rule       # :rule | :point
+    weco_explain_rule::Union{Nothing, String} = nothing
+    weco_explain_index::Union{Nothing, Int} = nothing
+    weco_popup_rect::Rect = Rect(0, 0, 0, 0)
     drag_start::Union{Nothing, NamedTuple{(:x, :y, :vp), Tuple{Int, Int, Viewport}}} = nothing
     last_event::String = ""
     live_max::Int = 200
@@ -5146,6 +5152,47 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     end
 end
 
+"""Return 1-based WECO chip index under (x,y), or nothing if miss / no geom."""
+function _weco_bubble_at(m::SPCWorkbenchModel, x::Int, y::Int)::Union{Nothing,Int}
+    g = m.weco_bubble_geom
+    g === nothing && return nothing
+    y != g.y && return nothing
+    for i in 1:g.n
+        x_left = g.x0 + (i - 1) * g.step
+        x_right = x_left + g.step - 1
+        if x_left <= x <= x_right
+            return i
+        end
+    end
+    return nothing
+end
+
+"""Clear WECO explain flags (and popup rect). Paint-owned geom is left alone."""
+function _clear_weco_explain!(m::SPCWorkbenchModel)
+    m.weco_explain_open = false
+    m.weco_explain_mode = :rule
+    m.weco_explain_rule = nothing
+    m.weco_explain_index = nothing
+    m.weco_popup_rect = Rect(0, 0, 0, 0)
+    return nothing
+end
+
+"""Open/retarget/toggle rule explain from bubble press (does not touch drag/hover)."""
+function _weco_bubble_press!(m::SPCWorkbenchModel, k::Int)
+    rid = "WECO-$k"
+    if m.weco_explain_open && m.weco_explain_mode === :rule && m.weco_explain_rule == rid
+        _clear_weco_explain!(m)
+        m.last_event = "weco explain closed"
+    else
+        m.weco_explain_open = true
+        m.weco_explain_mode = :rule
+        m.weco_explain_rule = rid
+        m.weco_explain_index = m.hovered  # may be nothing
+        m.last_event = "weco explain $rid"
+    end
+    return nothing
+end
+
 function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     _ensure_charts!(m)
     # Library: hit-test select / double-click activate (KD-P2-19); not blanket keyboard-only
@@ -5177,15 +5224,55 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     end
 
     pa = m.plot_area
-    if !contains(pa, evt.x, evt.y)
+    so = m.side_outer
+    pop = m.weco_popup_rect
+    in_plot = pa.width > 0 && pa.height > 0 && contains(pa, evt.x, evt.y)
+    in_side = so.width > 0 && so.height > 0 && contains(so, evt.x, evt.y)
+    in_popup = m.weco_explain_open && pop.width > 0 && pop.height > 0 &&
+               contains(pop, evt.x, evt.y)
+
+    # §5.1 priority: popup rect (consume press; preserve hover; no pan) — PR3a flags only
+    if in_popup
+        if evt.action == mouse_release
+            m.drag_start = nothing
+        end
+        # move/press/drag: preserve hovered; do not arm drag
+        return
+    end
+
+    # §5.2: side_outer — preserve hover; bubble press opens explain flags (no drag)
+    if in_side
+        if evt.action == mouse_press && evt.button == mouse_left
+            k = _weco_bubble_at(m, evt.x, evt.y)
+            if k !== nothing
+                _weco_bubble_press!(m, k)
+                # do NOT set drag_start; do NOT clear hover
+                return
+            end
+            # non-bubble side: preserve hover; no explain change (v1)
+            return
+        end
+        if evt.action == mouse_release
+            m.drag_start = nothing
+        end
+        # move / drag over side: preserve hovered; ignore pan
+        return
+    end
+
+    # Outside plot ∪ side_outer: clear hover; chrome press closes explain (KD-WB-4/11/13)
+    if !in_plot
         if evt.action == mouse_release
             m.drag_start = nothing
         end
         m.hover_x = nothing
         m.hovered = nothing
+        if evt.action == mouse_press && m.weco_explain_open
+            _clear_weco_explain!(m)
+        end
         return
     end
 
+    # §5.3 plot_area: pan / select / hover as today; never auto-close explain (KD-WB-13)
     n = length(m.data.values)
     if n <= 0
         return
