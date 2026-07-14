@@ -3266,6 +3266,8 @@ end
         @test m.view_mode === :dashboard
 
         # Tab switches WECO → Lines → Visual → Saved → WECO (four-way)
+        # Isolate empty index so Saved land does not inject host XDG (Issue 4)
+        m.graph_config_index_path = joinpath(tempdir(), "spc_wb_empty_idx_$(rand(UInt32)).json")
         T.update!(m, T.KeyEvent('c'))
         @test m.view_mode === :config && m.config_tab == :weco
         T.update!(m, T.KeyEvent(:tab))
@@ -3633,6 +3635,8 @@ end
         d = generate_spc_workbench_data(16; seed = 11)
         m = SPCWorkbenchModel(data = d, paused = true)
         _ensure_charts!(m)
+        # Isolate empty index before any Saved land (Issue 4 / KD-SE-5)
+        m.graph_config_index_path = joinpath(tempdir(), "spc_wb_empty_idx_$(rand(UInt32)).json")
 
         # Dashboard c opens Rules (open only — re-pressing c from dashboard re-opens)
         T.update!(m, T.KeyEvent('c'))
@@ -7529,8 +7533,18 @@ end
             T.update!(m, T.KeyEvent('e'))
             @test any(p -> abspath(p.path) == abspath(only_list), m.graph_presets)
             loaded_idx = read_graph_config_index(idx_path)
-            @test any(e -> abspath(e.path) == abspath(only_list), loaded_idx)
+            lo_ent = findfirst(e -> abspath(e.path) == abspath(only_list), loaded_idx)
+            @test lo_ent !== nothing
+            # Backfill uses conservative TS — does not outrank real last_used_at (Issue 3)
+            @test loaded_idx[lo_ent].last_used_at == "1970-01-01T00:00:00" ||
+                  loaded_idx[lo_ent].last_used_at < "2026-01-01T00:00:00"
             @test mtime(idx_path) >= before_mtime
+            # Second open: list-only stays behind MRU present/gone (not promoted to front)
+            T.update!(m, T.KeyEvent(:escape))
+            T.update!(m, T.KeyEvent('e'))
+            @test m.graph_presets[1].name == "present"
+            @test any(p -> abspath(p.path) == abspath(only_list), m.graph_presets)
+            @test findfirst(p -> abspath(p.path) == abspath(only_list), m.graph_presets) > 1
 
             # Delete removes list + index entry; file remains on disk (KD-SE-9)
             n_before = length(m.graph_presets)
@@ -7590,6 +7604,71 @@ end
             short = WB._display_path(longp; maxw = 20)
             @test length(short) <= 20
             @test occursin("…", short) || length(longp) <= 20
+
+            # Issue 2: multi-byte UTF-8 home prefix — byte-safe chop (not length())
+            utf_home = joinpath("/tmp", "café_home_$(rand(UInt32))")
+            utf_path = joinpath(utf_home, "cfg", "x.json")
+            @test startswith(utf_path, utf_home * "/")
+            # Old bug: length(home) codepoints → wrong slice / StringIndexError
+            @test length(utf_home) != ncodeunits(utf_home)  # café has multi-byte é
+            bad_chop = try
+                "~" * utf_path[length(utf_home) + 1:end]
+            catch
+                "threw"
+            end
+            good_chop = "~" * utf_path[ncodeunits(utf_home) + 1:end]
+            @test good_chop == "~/cfg/x.json"
+            @test bad_chop != good_chop  # demonstrates length() is wrong for UTF-8 home
+
+            # Issue 1: index write failure rolls back list delete (no resurrection)
+            m_del = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+            _ensure_charts!(m_del)
+            mktempdir() do d2
+                cfg = joinpath(d2, "will-keep.json")
+                p = capture_graph_preset(m_del; name = "will-keep")
+                p.path = cfg
+                @test save_graph_preset(p, cfg) === nothing
+                WB._upsert_graph_preset!(m_del, p)
+                e = graph_config_index_entry_from_preset(p)
+                # Pre-seed index, then make parent dir read-only so rewrite fails
+                locked = joinpath(d2, "locked")
+                mkpath(locked)
+                locked_idx = joinpath(locked, "graph_config_index.json")
+                @test write_graph_config_index(locked_idx, GraphConfigIndexEntry[e]) === nothing
+                m_del.graph_config_index_path = locked_idx
+                chmod(locked, 0o555)
+                try
+                    T.update!(m_del, T.KeyEvent('e'))
+                    @test length(m_del.graph_presets) >= 1
+                    sel = findfirst(x -> abspath(x.path) == abspath(cfg), m_del.graph_presets)
+                    @test sel !== nothing
+                    m_del.presets_selected = sel
+                    n_before = length(m_del.graph_presets)
+                    T.update!(m_del, T.KeyEvent('d'))
+                    T.update!(m_del, T.KeyEvent('y'))
+                    # Must report delete err and keep list entry (Issue 1 rollback)
+                    @test occursin("delete err", m_del.last_event)
+                    @test !occursin("deleted preset", m_del.last_event)
+                    @test length(m_del.graph_presets) == n_before
+                    @test any(x -> abspath(x.path) == abspath(cfg), m_del.graph_presets)
+                    chmod(locked, 0o755)
+                    still = read_graph_config_index(locked_idx)
+                    @test any(x -> abspath(x.path) == abspath(cfg), still)
+                finally
+                    try; chmod(locked, 0o755); catch; end
+                end
+            end
+
+            # Issue 8: selection preserved by path across merge reorder
+            m_sel = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+            _ensure_charts!(m_sel)
+            m_sel.graph_config_index_path = idx_path
+            empty!(m_sel.graph_presets)
+            push!(m_sel.graph_presets, GraphPreset(name = "list-only", path = abspath(only_list)))
+            push!(m_sel.graph_presets, GraphPreset(name = "gone", path = abspath(gone)))
+            m_sel.presets_selected = 1  # list-only
+            T.update!(m_sel, T.KeyEvent('e'))
+            @test abspath(m_sel.graph_presets[m_sel.presets_selected].path) == abspath(only_list)
         end
     end
 

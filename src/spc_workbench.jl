@@ -633,7 +633,14 @@ function _preset_styles_chip(p::GraphPreset)::String
     return length(styles) == 1 ? String(first(styles)) : "mixed"
 end
 
-"""True when preset body equals DEFAULT_* (index-only / not yet loaded)."""
+"""
+True when preset body equals DEFAULT_* (index-only / not yet loaded).
+
+v1 heuristic (KD-SE-25 optional body_loaded not used): a real disk config that
+intentionally matches defaults is also treated as lazy when an index summary is
+present — chips prefer summary until the next save/load refreshes it. Acceptable
+for v1; chips still match after load/save touch.
+"""
 function _is_lazy_default_body(p::GraphPreset)::Bool
     return p.show_chart_lines == DEFAULT_CHART_LINES &&
            p.chart_line_styles == DEFAULT_CHART_LINE_STYLES &&
@@ -644,6 +651,9 @@ end
 """
 Path display for Saved list Path column: `~/…` when under homedir, else
 absolute; middle-elide when longer than `maxw` (KD-SE-26 — no mtime).
+
+Home chop is **byte-safe** (`ncodeunits(home)`), not `length(home)` codepoints —
+multi-byte UTF-8 home names must not corrupt the remainder.
 """
 function _display_path(path::AbstractString; maxw::Int = 28)::String
     raw = strip(String(path))
@@ -658,8 +668,11 @@ function _display_path(path::AbstractString; maxw::Int = 28)::String
     catch
         ""
     end
-    display = if !isempty(home) && (ap == home || startswith(ap, home * "/"))
-        "~" * ap[length(home) + 1:end]
+    display = if !isempty(home) && ap == home
+        "~"
+    elseif !isempty(home) && startswith(ap, home * "/")
+        # Byte-safe: String indices are codeunit positions (Issue 2)
+        "~" * ap[ncodeunits(home) + 1:end]
     else
         ap
     end
@@ -2446,14 +2459,10 @@ function _browser_start_dir(m::SPCWorkbenchModel, seed_path::AbstractString = ""
     !isempty(strip(m.last_graph_config_path)) && push!(candidates, m.last_graph_config_path)
     sel = _selected_entry_path(m)
     !isempty(sel) && push!(candidates, sel)
-    # Index MRU path when available (PR4)
-    try
-        ents = read_graph_config_index(_effective_index_path(m))
-        if !isempty(ents)
-            _, mi = findmax(e -> e.last_used_at, ents)
-            !isempty(strip(ents[mi].path)) && push!(candidates, ents[mi].path)
-        end
-    catch
+    # Prefer first path-bearing list entry (merge already MRU-ordered; no index re-read)
+    for p in m.graph_presets
+        raw = strip(p.path)
+        !isempty(raw) && (push!(candidates, raw); break)
     end
     for c in candidates
         ap = abspath(expanduser(c))
@@ -2680,6 +2689,10 @@ function _index_remove_and_write!(m::SPCWorkbenchModel, path::AbstractString)::U
     end
 end
 
+# Conservative timestamp for index backfill only (Issue 3): recovered paths must
+# not jump to MRU front on the next open. Real load/save use `_index_timestamp()`.
+const INDEX_BACKFILL_TS = "1970-01-01T00:00:00"
+
 """
     _merge_graph_config_index!(m) -> nothing
 
@@ -2688,8 +2701,12 @@ Merge durable index ↔ session Saved list (KD-SE-25):
 2. For each index entry (MRU by `last_used_at`): keep list body on path match;
    else append path + DEFAULT body (display-only until load).
 3. Backfill index from path-bearing list entries missing from index; write only if changed.
+   Backfill timestamps use `INDEX_BACKFILL_TS` so recovered rows do not outrank real use.
 4. Path-less legacy entries stay at end (no index backfill).
 5. Cache missing-file flags + summaries (stat once — not per frame).
+
+Assignments to `m.graph_presets` / caches happen only after locals are complete
+(fail-closed: exception mid-build leaves model unchanged).
 """
 function _merge_graph_config_index!(m::SPCWorkbenchModel)::Nothing
     try
@@ -2707,17 +2724,23 @@ function _merge_graph_config_index!(m::SPCWorkbenchModel)::Nothing
                 push!(pathless, p)
             else
                 ap = abspath(expanduser(raw))
+                # Normalize path on a copy-ish mutation only after we commit list
+                # (path string rewrite is applied onto the GraphPreset we keep).
                 p.path = ap
                 if !haskey(by_path, ap)
                     by_path[ap] = p
                     push!(list_path_order, ap)
+                else
+                    # Duplicate path: prefer non-lazy body (KD-SE-25 / Issue 6)
+                    if _is_lazy_default_body(by_path[ap]) && !_is_lazy_default_body(p)
+                        by_path[ap] = p
+                    end
                 end
             end
         end
 
-        empty!(m.preset_path_missing)
-        empty!(m.preset_index_summary)
-
+        new_missing = Dict{String,Bool}()
+        new_summary = Dict{String,Dict{String,Any}}()
         new_list = GraphPreset[]
         seen = Set{String}()
         index_paths = Set{String}()
@@ -2728,8 +2751,8 @@ function _merge_graph_config_index!(m::SPCWorkbenchModel)::Nothing
             push!(index_paths, ap)
             ap in seen && continue
             push!(seen, ap)
-            m.preset_index_summary[ap] = Dict{String,Any}(String(k) => v for (k, v) in e.summary)
-            m.preset_path_missing[ap] = !isfile(ap)
+            new_summary[ap] = Dict{String,Any}(String(k) => v for (k, v) in e.summary)
+            new_missing[ap] = !isfile(ap)
             if haskey(by_path, ap)
                 push!(new_list, by_path[ap])  # prefer existing list body (non-lazy)
             else
@@ -2744,31 +2767,50 @@ function _merge_graph_config_index!(m::SPCWorkbenchModel)::Nothing
             ap in seen && continue
             push!(seen, ap)
             push!(new_list, by_path[ap])
-            m.preset_path_missing[ap] = !isfile(ap)
+            new_missing[ap] = !isfile(ap)
         end
 
         # Path-less legacy at end
         append!(new_list, pathless)
-        m.graph_presets = new_list
 
-        # Backfill index from list paths missing from index; write only if changed
+        # Backfill index from list paths missing from index (conservative TS — Issue 3)
         backfill_changed = false
-        for p in m.graph_presets
+        backfill_warn = nothing
+        for p in new_list
             raw = strip(p.path)
             isempty(raw) && continue
             ap = abspath(expanduser(raw))
             ap in index_paths && continue
-            e = graph_config_index_entry_from_preset(p)
+            e = graph_config_index_entry_from_preset(p; now = INDEX_BACKFILL_TS)
             e === nothing && continue
             upsert_graph_config_index_entry!(index_entries, e)
-            m.preset_index_summary[ap] = e.summary
+            new_summary[ap] = e.summary
             backfill_changed = true
         end
         if backfill_changed
-            write_graph_config_index(idx_path, index_entries)
+            werr = write_graph_config_index(idx_path, index_entries)
+            if werr !== nothing
+                backfill_warn = String(werr)
+            end
+        end
+
+        # Commit model only after full build (Issue 5)
+        m.graph_presets = new_list
+        empty!(m.preset_path_missing)
+        empty!(m.preset_index_summary)
+        for (k, v) in new_missing
+            m.preset_path_missing[k] = v
+        end
+        for (k, v) in new_summary
+            m.preset_index_summary[k] = v
+        end
+        if backfill_warn !== nothing
+            # Non-fatal: list/caches already honest; surface once (Issue 9)
+            base = isempty(strip(m.last_event)) ? "config index" : m.last_event
+            m.last_event = "$base · $backfill_warn"
         end
     catch
-        # fail-closed: leave list as-is
+        # fail-closed: leave list + caches as-is (no partial commit)
     end
     return nothing
 end
@@ -3320,9 +3362,20 @@ end
 """Clamp presets_selected + sync scroll. Call on every entry into :saved (KD-UC-16).
 
 Also merges durable index ↔ list (KD-SE-25) so Saved open / tab land refreshes
-path chrome and recovers drift.
+path chrome and recovers drift. Selection is preserved by abspath (or path-less
+name) across merge reorder when possible (Issue 8).
 """
 function _init_saved_selection!(m::SPCWorkbenchModel)
+    # Capture selection identity before merge reorders
+    prev_path = ""
+    prev_name = ""
+    n0 = length(m.graph_presets)
+    if n0 >= 1
+        sel0 = clamp(m.presets_selected, 1, n0)
+        prev = m.graph_presets[sel0]
+        prev_path = strip(prev.path)
+        prev_name = prev.name
+    end
     _merge_graph_config_index!(m)
     n = length(m.graph_presets)
     if n < 1
@@ -3330,7 +3383,22 @@ function _init_saved_selection!(m::SPCWorkbenchModel)
         m.presets_scroll = 0
         return nothing
     end
-    m.presets_selected = clamp(m.presets_selected, 1, n)
+    # Restore selection by path, else path-less name, else clamp
+    new_sel = nothing
+    if !isempty(prev_path)
+        ap = abspath(expanduser(prev_path))
+        new_sel = findfirst(
+            p -> !isempty(strip(p.path)) && abspath(expanduser(strip(p.path))) == ap,
+            m.graph_presets,
+        )
+    end
+    if new_sel === nothing && !isempty(prev_name) && isempty(prev_path)
+        new_sel = findfirst(
+            p -> p.name == prev_name && isempty(strip(p.path)),
+            m.graph_presets,
+        )
+    end
+    m.presets_selected = new_sel === nothing ? clamp(m.presets_selected, 1, n) : new_sel
     _sync_presets_scroll!(m)
     return nothing
 end
@@ -4493,17 +4561,31 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                 return
             elseif m.view_mode == :config && m.config_tab === :saved
                 # KD-UC-15 CRITICAL: never fall through to chart-delete from Config Saved
-                # KD-SE-9: remove list + index entry by path; never rm the file
+                # KD-SE-9: remove list + index entry by path; never rm the file.
+                # Index remove+write is transactional with list delete (Issue 1):
+                # on index write failure, re-insert the removed preset so the next
+                # merge cannot resurrect a half-deleted path.
                 npre = length(m.graph_presets)
                 if npre >= 1
                     m.presets_selected = clamp(m.presets_selected, 1, npre)
-                    del_path = strip(m.graph_presets[m.presets_selected].path)
-                    deleteat!(m.graph_presets, m.presets_selected)
+                    sel = m.presets_selected
+                    removed = m.graph_presets[sel]
+                    del_path = strip(removed.path)
+                    deleteat!(m.graph_presets, sel)
                     if !isempty(del_path)
-                        _index_remove_and_write!(m, del_path)
+                        idx_err = _index_remove_and_write!(m, del_path)
+                        if idx_err !== nothing
+                            # roll back list delete
+                            insert!(m.graph_presets, min(sel, length(m.graph_presets) + 1), removed)
+                            m.presets_selected = clamp(sel, 1, length(m.graph_presets))
+                            _sync_presets_scroll!(m)
+                            m.last_event = "delete err: $idx_err"
+                            m.pending_delete = false
+                            return
+                        end
                     end
                     n2 = length(m.graph_presets)
-                    m.presets_selected = n2 >= 1 ? clamp(m.presets_selected, 1, n2) : 1
+                    m.presets_selected = n2 >= 1 ? clamp(sel, 1, n2) : 1
                     _sync_presets_scroll!(m)
                     m.last_event = "deleted preset"
                 else
