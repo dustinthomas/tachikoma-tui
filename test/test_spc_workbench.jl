@@ -2467,7 +2467,7 @@ end
         @test m.viewport.x1 - m.viewport.x0 < n
     end
 
-    @testset "Small terminal guard + config overlay no-bleed" begin
+    @testset "Small terminal guard + full-page Config no-bleed" begin
         m = SPCWorkbenchModel(data=generate_spc_workbench_data(5;seed=2), paused=true)
         tb = T.TestBackend(18,5)
         T.reset!(tb.buf)
@@ -3484,12 +3484,34 @@ end
         @test m.view_mode === :dashboard
         @test m.quit == false
 
-        # Config e → :presets (PR2 transitional)
+        # Config e/s/a → :presets (PR2 transitional; any case)
         T.update!(m, T.KeyEvent('c'))
         @test m.view_mode === :config
         T.update!(m, T.KeyEvent('e'))
         @test m.view_mode === :presets
         @test m.config_open == false
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
+        T.update!(m, T.KeyEvent('c'))
+        T.update!(m, T.KeyEvent('s'))  # lowercase s from Config → presets (not dashboard clear-specs)
+        @test m.view_mode === :presets
+        T.update!(m, T.KeyEvent(:escape))
+        T.update!(m, T.KeyEvent('c'))
+        T.update!(m, T.KeyEvent('a'))  # lowercase a from Config → presets
+        @test m.view_mode === :presets
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
+
+        # Mouse modal gate: press while Config open does not pan/hover
+        T.update!(m, T.KeyEvent('c'))
+        @test m.view_mode === :config
+        m.hovered = 1
+        m.hover_x = 5
+        T.update!(m, T.MouseEvent(20, 10, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.view_mode === :config
+        @test occursin("modal", m.last_event)
+        @test m.hover_x === nothing
+        @test m.hovered === nothing
         T.update!(m, T.KeyEvent(:escape))
         @test m.view_mode === :dashboard
 

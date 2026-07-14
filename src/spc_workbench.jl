@@ -5813,7 +5813,7 @@ end
 # Enhance footer with current chart + mode
 # (footer render already at end of view; header now mentions keys)
 
-# WECO rule descs (for overlay)
+# WECO rule descs (Config Rules section + side panel)
 const WECO_RULE_DESCS = [
     "1 point beyond 3σ",
     "2 of 3 consec. zone A (>2σ)",
