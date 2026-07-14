@@ -3656,6 +3656,141 @@ end
         @test occursin("dash w", help_flat) || occursin("WECO explain", help_flat)
     end
 
+    @testset "WECO plot double-click explain :point (PR4 / KD-WB-10)" begin
+        # Multi-rule viol at #8 (same fixture as hover multi-highlight)
+        cl, s = 0.0, 1.0
+        vals = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 3.5]
+        d = WorkbenchData(values = vals, cl = cl, sigma = s)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single,
+            viewport = Viewport(x0 = 1, x1 = length(vals)))
+        _ensure_charts!(m)
+        ch = current_chart(m)
+        ch.limits_mode = :manual
+        ch.manual_cl = cl
+        ch.manual_ucl = cl + 3 * s
+        ch.manual_lcl = cl - 3 * s
+        ch.enabled_rules = Dict(
+            "WECO-1" => true, "WECO-2" => true, "WECO-3" => true, "WECO-4" => true,
+            "WECO-5" => true, "WECO-6" => false, "WECO-7" => false, "WECO-8" => false,
+        )
+        m.enabled_rules = ch.enabled_rules
+        ctx = resolve_chart_render_context(ch)
+        viols = weco_detect(ch.data.values, ctx.lz.cl, ctx.lz.sigma; enabled_rules = ch.enabled_rules)
+        rules8 = weco_rules_at_index(viols, 8)
+        @test length(rules8) >= 2
+        @test isempty(weco_rules_at_index(viols, 1))
+
+        W, H = 100, 36
+        tb = T.TestBackend(W, H)
+        function re_view!()
+            T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, W, H), [], []))
+        end
+        re_view!()
+        pa = m.plot_area
+        @test pa.width > 0 && pa.height > 0
+
+        # Cell under viol index 8 / non-viol index 1 (mid-row of plot)
+        x_viol = data_index_to_cell(8, pa, m.viewport)
+        x_ok = data_index_to_cell(1, pa, m.viewport)
+        cy = pa.y + max(1, pa.height ÷ 2)
+        @test T.contains(pa, x_viol, cy)
+        @test T.contains(pa, x_ok, cy)
+
+        function click_release!(x, y)
+            T.update!(m, T.MouseEvent(x, y, T.mouse_left, T.mouse_press, false, false, false))
+            T.update!(m, T.MouseEvent(x, y, T.mouse_left, T.mouse_release, false, false, false))
+        end
+
+        # --- Double click-release same viol idx within WECO_DBLCLICK_TICKS → :point ---
+        @test m.weco_explain_open === false
+        click_release!(x_viol, cy)
+        @test m.selected == 8
+        @test m.plot_last_click !== nothing
+        @test m.plot_last_click.idx == 8
+        @test m.weco_explain_open === false  # first click selects only
+        re_view!()  # advance tick (library-style discipline)
+        @test (m.tick - m.plot_last_click.tick) <= WECO_DBLCLICK_TICKS
+        click_release!(x_viol, cy)
+        @test m.selected == 8
+        @test m.weco_explain_open === true
+        @test m.weco_explain_mode === :point
+        @test m.weco_explain_index == 8
+        @test m.weco_explain_rule in rules8
+        @test occursin("weco explain #8", m.last_event)
+        @test m.plot_last_click === nothing
+        re_view!()
+        @test T.find_text(tb, "WECO · #8") !== nothing || T.find_text(tb, "#8") !== nothing
+        # multi-rule body present (both rules or How-style lines)
+        body_ok = any(r -> T.find_text(tb, r) !== nothing, rules8)
+        @test body_ok
+
+        # Close for next scenarios
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.weco_explain_open === false
+
+        # --- Drag between (dx ≥ WECO_DRAG_SLOP) → no explain; select may update ---
+        # Drag left so pointer stays inside plot_area (index 8 is at right edge).
+        m.plot_last_click = nothing
+        m.plot_press = nothing
+        re_view!()
+        T.update!(m, T.MouseEvent(x_viol, cy, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.plot_press !== nothing && m.plot_press.dragged === false
+        x_drag = x_viol - WECO_DRAG_SLOP
+        @test T.contains(pa, x_drag, cy)
+        T.update!(m, T.MouseEvent(x_drag, cy, T.mouse_left, T.mouse_drag, false, false, false))
+        @test m.plot_press !== nothing && m.plot_press.dragged === true
+        @test m.plot_last_click === nothing
+        T.update!(m, T.MouseEvent(x_drag, cy, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.weco_explain_open === false
+        @test m.plot_press === nothing
+        # Even after a prior single-click memory + drag, no open:
+        m.plot_last_click = (idx = 8, tick = m.tick)
+        T.update!(m, T.MouseEvent(x_viol, cy, T.mouse_left, T.mouse_press, false, false, false))
+        T.update!(m, T.MouseEvent(x_viol - WECO_DRAG_SLOP, cy, T.mouse_left, T.mouse_drag, false, false, false))
+        T.update!(m, T.MouseEvent(x_viol - WECO_DRAG_SLOP, cy, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.weco_explain_open === false
+
+        # --- Non-viol double click-release → select only; no explain ---
+        m.plot_last_click = nothing
+        m.plot_press = nothing
+        re_view!()
+        # Restore viewport after pan from drag tests
+        m.viewport.x0 = 1
+        m.viewport.x1 = length(vals)
+        re_view!()
+        pa = m.plot_area
+        x_ok = data_index_to_cell(1, pa, m.viewport)
+        x_viol = data_index_to_cell(8, pa, m.viewport)
+        click_release!(x_ok, cy)
+        @test m.selected == 1
+        @test m.plot_last_click !== nothing && m.plot_last_click.idx == 1
+        @test m.weco_explain_open === false
+        re_view!()
+        click_release!(x_ok, cy)
+        @test m.selected == 1
+        @test m.weco_explain_open === false  # non-viol: no explain
+        @test m.plot_last_click !== nothing && m.plot_last_click.idx == 1
+
+        # Slow second click (Δtick > WECO_DBLCLICK_TICKS) must NOT open even on viol
+        m.plot_last_click = nothing
+        re_view!()
+        click_release!(x_viol, cy)
+        @test m.plot_last_click !== nothing
+        first_tick = m.plot_last_click.tick
+        m.tick = first_tick + WECO_DBLCLICK_TICKS + 1
+        @test (m.tick - m.plot_last_click.tick) > WECO_DBLCLICK_TICKS
+        click_release!(x_viol, cy)
+        @test m.weco_explain_open === false
+        @test m.selected == 8
+
+        # Help notes mention dblclick viol explain
+        entries = _contextual_key_entries(m; expanded = true)
+        flat = join([string(e) for e in entries], " ")
+        @test occursin("dblclick", flat) || occursin("double", lowercase(flat))
+        @test occursin("explain", flat)
+    end
+
     # Side panel chart-line parameters (CL/±1/±2/±3/Specs) + configurable visibility
     function _side_rows_text(tb, m)
         sa = m.side_area

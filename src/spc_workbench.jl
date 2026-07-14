@@ -2024,6 +2024,9 @@ end
     weco_explain_rule::Union{Nothing, String} = nothing
     weco_explain_index::Union{Nothing, Int} = nothing
     weco_popup_rect::Rect = Rect(0, 0, 0, 0)
+    # Plot dblclick state (PR4 / KD-WB-10): press arm + last completed click-release
+    plot_press::Union{Nothing, NamedTuple{(:idx, :x, :y, :tick, :dragged), Tuple{Int, Int, Int, Int, Bool}}} = nothing
+    plot_last_click::Union{Nothing, NamedTuple{(:idx, :tick), Tuple{Int, Int}}} = nothing
     drag_start::Union{Nothing, NamedTuple{(:x, :y, :vp), Tuple{Int, Int, Viewport}}} = nothing
     last_event::String = ""
     live_max::Int = 200
@@ -3576,6 +3579,7 @@ end
 """Open full-page Config (Rules / Lines / Visual / Saved)."""
 function _open_config!(m::SPCWorkbenchModel; tab::Symbol = :weco)
     _clear_weco_explain!(m)
+    _clear_plot_click_memory!(m)
     m.view_mode = :config
     m.config_tab = tab
     m.config_selected = 1
@@ -4261,6 +4265,12 @@ end
 
 """Max tick delta (via re-view) between presses to count as double-click (KD-P2-19)."""
 const LIBRARY_DBLCLICK_TICKS = 8
+
+"""Max tick delta between click-releases for plot WECO explain dblclick (KD-WB-10)."""
+const WECO_DBLCLICK_TICKS = 8
+
+"""Cell slop: |dx| or |dy| ≥ this marks plot press as dragged (no dblclick)."""
+const WECO_DRAG_SLOP = 1
 
 """Rows available for the chart list (title/summary reserved; footer is mode chrome)."""
 function _library_visible_capacity(m::SPCWorkbenchModel)::Int
@@ -5013,6 +5023,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         if c == 'm' || c == 'M'
             # Open chart library (GC-PR2)
             _clear_weco_explain!(m)
+            _clear_plot_click_memory!(m)
             m.view_mode = :library
             m.library_selected = clamp(m.active, 1, max(1, length(m.charts)))
             m.pending_delete = false
@@ -5024,6 +5035,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         elseif c == 'x' || c == 'X'
             # Open tools registry (P2-PR4 / KD-P2-6)
             _clear_weco_explain!(m)
+            _clear_plot_click_memory!(m)
             m.view_mode = :tools
             ntools = length(m.tools)
             m.tools_selected = ntools >= 1 ? clamp(m.tools_selected, 1, ntools) : 1
@@ -5040,6 +5052,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         elseif c == 'd' || c == 'D'
             # SharedTable grid (P2-PR7 / KD-P2-20) — dashboard only; library/tools keep d=delete
             _clear_weco_explain!(m)
+            _clear_plot_click_memory!(m)
             m.view_mode = :table
             m.table_editing = false
             m.table_buf = ""
@@ -5128,17 +5141,20 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             return
         elseif c == 'h' || c == 'H'
             _clear_weco_explain!(m)
+            _clear_plot_click_memory!(m)
             m.view_mode = :help
             m.last_event = "help open"
             return
         elseif c == 'k' || c == 'K'
             _clear_weco_explain!(m)
+            _clear_plot_click_memory!(m)
             m.view_mode = :keymap
             m.last_event = "keymap open"
             return
         elseif c == 'b' || c == 'B'
             # PR6: open chart builder for active chart (manual limits + mapping)
             _clear_weco_explain!(m)
+            _clear_plot_click_memory!(m)
             m.view_mode = :builder
             m.builder_selected = 1
             m.builder_editing = false
@@ -5194,6 +5210,30 @@ function _clear_weco_explain!(m::SPCWorkbenchModel)
     m.weco_explain_index = nothing
     m.weco_popup_rect = Rect(0, 0, 0, 0)
     return nothing
+end
+
+"""Clear plot dblclick memory (mode enter / load / zoom). Not used on Esc/q explain close."""
+function _clear_plot_click_memory!(m::SPCWorkbenchModel)
+    m.plot_press = nothing
+    m.plot_last_click = nothing
+    return nothing
+end
+
+"""Open :point WECO explain at index if any enabled rules fire; return true if opened."""
+function _weco_try_open_point_explain!(m::SPCWorkbenchModel, idx::Int)::Bool
+    _ensure_charts!(m)
+    (isempty(m.charts) || length(m.data.values) == 0) && return false
+    ch = current_chart(m)
+    ctx = resolve_chart_render_context(ch; sigma_method = :mr)
+    viols = weco_detect(ch.data.values, ctx.lz.cl, ctx.lz.sigma; enabled_rules = ch.enabled_rules)
+    rules_at = weco_rules_at_index(viols, idx)
+    isempty(rules_at) && return false
+    m.weco_explain_open = true
+    m.weco_explain_mode = :point
+    m.weco_explain_rule = rules_at[1]
+    m.weco_explain_index = idx
+    m.last_event = "weco explain #$idx"
+    return true
 end
 
 """First enabled WECO rule id on chart (WECO-1…8 order), else \"WECO-1\"."""
@@ -5394,10 +5434,21 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     in_popup = m.weco_explain_open && pop.width > 0 && pop.height > 0 &&
                contains(pop, evt.x, evt.y)
 
+    # Plot dblclick: drag slop vs original press cell, even if pointer left plot (KD-WB-10)
+    if evt.action == mouse_drag && m.plot_press !== nothing && evt.button == mouse_left
+        pp = m.plot_press
+        if !pp.dragged &&
+           (abs(evt.x - pp.x) >= WECO_DRAG_SLOP || abs(evt.y - pp.y) >= WECO_DRAG_SLOP)
+            m.plot_press = (idx = pp.idx, x = pp.x, y = pp.y, tick = pp.tick, dragged = true)
+            m.plot_last_click = nothing
+        end
+    end
+
     # §5.1 priority: popup rect (consume press; preserve hover; no pan) — PR3a flags only
     if in_popup
         if evt.action == mouse_release
             m.drag_start = nothing
+            m.plot_press = nothing  # cancel plot click if released over popup
         end
         # move/press/drag: preserve hovered; do not arm drag
         return
@@ -5417,6 +5468,7 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         end
         if evt.action == mouse_release
             m.drag_start = nothing
+            m.plot_press = nothing  # cancel plot click if released over side
         end
         # move / drag over side: preserve hovered; ignore pan
         return
@@ -5426,6 +5478,7 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     if !in_plot
         if evt.action == mouse_release
             m.drag_start = nothing
+            m.plot_press = nothing  # cancel plot click if released outside
         end
         m.hover_x = nothing
         m.hovered = nothing
@@ -5435,7 +5488,7 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         return
     end
 
-    # §5.3 plot_area: pan / select / hover as today; never auto-close explain (KD-WB-13)
+    # §5.3 plot_area: pan / select / hover + dblclick → :point explain (KD-WB-10/13)
     n = length(m.data.values)
     if n <= 0
         return
@@ -5445,6 +5498,7 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         factor = (evt.button == mouse_scroll_up) ? 0.75 : 1.33
         cx = cell_to_data_index(evt.x, pa, m.viewport)
         zoom_viewport_around!(m.viewport, cx, factor, n)
+        m.plot_last_click = nothing  # avoid false dblclick after zoom
         return
     end
 
@@ -5452,10 +5506,20 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         m.drag_start = (x = evt.x, y = evt.y, vp = deepcopy(m.viewport))
         m.hovered = compute_hovered_index(evt.x, evt.y, pa, m.data, m.viewport)
         m.selected = nothing
+        # Arm plot_press for release-without-drag dblclick; do not open/close explain
+        press_idx = m.hovered
+        if press_idx === nothing
+            press_idx = nearest_point_index_to_cell_x(evt.x, pa, m.viewport, m.data)
+        end
+        if press_idx === nothing
+            press_idx = 0
+        end
+        m.plot_press = (idx = press_idx, x = evt.x, y = evt.y, tick = m.tick, dragged = false)
         return
     end
 
     if evt.action == mouse_drag && m.drag_start !== nothing && evt.button == mouse_left
+        # plot_press.dragged already updated globally above when slop exceeded
         dx = evt.x - m.drag_start.x
         pan_viewport!(m.viewport, -dx, pa.width, n)
         m.drag_start = (x = evt.x, y = evt.y, vp = deepcopy(m.viewport))
@@ -5464,11 +5528,34 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
 
     if evt.action == mouse_release
         m.drag_start = nothing
+        pp = m.plot_press
+        m.plot_press = nothing
         m.selected = nearest_point_index_to_cell_x(evt.x, pa, m.viewport, m.data)
         if m.selected !== nothing
             m.hovered = m.selected
         end
         m.hover_x = nothing
+        # Dragged or no press arm → select only (existing path)
+        if pp === nothing || pp.dragged
+            return
+        end
+        # Release without drag: select + optional dblclick open :point for viol index
+        sel = m.selected
+        if sel !== nothing &&
+           m.plot_last_click !== nothing &&
+           m.plot_last_click.idx == sel &&
+           (m.tick - m.plot_last_click.tick) <= WECO_DBLCLICK_TICKS
+            if _weco_try_open_point_explain!(m, sel)
+                m.plot_last_click = nothing
+            else
+                # Non-viol double-click: select only; refresh single-click memory
+                m.plot_last_click = (idx = sel, tick = m.tick)
+            end
+        elseif sel !== nothing
+            m.plot_last_click = (idx = sel, tick = m.tick)
+        else
+            m.plot_last_click = nothing
+        end
         return
     end
 
@@ -5861,8 +5948,8 @@ function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
         (:binds, [("1-8", "WECO"), ("w", "explain"), ("c", "config"), ("v", "lines")]),
         (:binds, [("o", "visual")]),
         (:section, "MOUSE"),
-        (:note, "hover tooltip · click select · drag pan · WECO chip = explain"),
-        (:note, "dash w=explain · lib w=save · config w=Save As"),
+        (:note, "hover · click select · drag pan · dblclick viol = explain"),
+        (:note, "WECO chip = explain · dash w=explain · lib w=save · config w=Save As"),
     ]
 end
 
@@ -5965,7 +6052,7 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:note, "full page: Tab · s/w Save As · S Save · W Load · p/P path · load → dash"),
             (:section, "MOUSE"),
             (:binds, [("move", "hover"), ("drag", "pan"), ("click", "select"), ("wheel", "zoom")]),
-            (:note, "library: click select · double-click activate · WECO chip = explain"),
+            (:note, "plot: dblclick viol = explain · library: 2× activate · chip = explain"),
         ]
     else
         return [(:note, "no keys for mode")]
