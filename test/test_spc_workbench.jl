@@ -3328,9 +3328,9 @@ end
         @test occursin("Specs=", side) || occursin("USL=", side)
         @test occursin("USL=", side)
         @test occursin("LSL=", side)
-        # No pre-Lines triple row "USL=… T=… LSL=…" — Target alone as T=
-        # Specs still owns USL/LSL; band hex not required
-        @test !occursin("band:", side) || !occursin("#", side)
+        # No hex band: row (KD-SS-5); band name may appear as dim " · green" only
+        @test !occursin("band:", side)
+        @test !occursin(r"#[0-9a-fA-F]{3,8}", side)
     end
 
     @testset "side stats PR2: collapse+hover short height multi-chart" begin
@@ -3344,8 +3344,11 @@ end
         tb = T.TestBackend(80, 18); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 18), [], []))
         @test length(m.charts) >= 2
+        @test m.side_area.height <= 11
         side = _side_full(tb, m)
         @test occursin("h[", side)  # hover body kept (D18)
+        # KD-SS-17: headerless HOVER under compact profile
+        @test !occursin("▸ HOVER", side)
         # ±1/±2 dropped under KD-SS-17 when hover + multi-chart
         @test !occursin("±1", side)
         @test !occursin("±2", side)
@@ -3398,6 +3401,55 @@ end
             side = _side_full(tb, m)
             @test occursin("Viols:", side)
         end
+    end
+
+    @testset "side stats PR2: H=19/20 hover multi WECO floor (no height cliff)" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        for term_h in (19, 20)
+            m = SPCWorkbenchModel(data=d, paused=true, seed_demos=:triple)
+            _ensure_charts!(m)
+            @test length(m.charts) >= 2
+            m.hovered = 1
+            tb = T.TestBackend(80, term_h); T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, term_h), [], []))
+            @test m.side_area.height >= 12  # above compact_h11 cliff region
+            side = _side_full(tb, m)
+            @test occursin("h[", side)
+            found = _side_weco_bubbles(tb, m)
+            @test found !== nothing  # bubbles not starved by full Lines
+            @test occursin("Viols:", side)  # D17 floor via reserve_tail=2
+        end
+        # H=20 + Target must not starve WECO (D14 gated for all heights)
+        m = SPCWorkbenchModel(data=d, paused=true, seed_demos=:triple)
+        _ensure_charts!(m)
+        m.target = 12.0
+        current_chart(m).target = 12.0
+        m.hovered = 1
+        tb = T.TestBackend(80, 20); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 20), [], []))
+        side = _side_full(tb, m)
+        @test _side_weco_bubbles(tb, m) !== nothing
+        @test occursin("Viols:", side)
+        @test occursin("h[", side)
+    end
+
+    @testset "side stats PR2: H=16 hover keeps hover+WECO; no Charts without Lines" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true, seed_demos=:triple)
+        _ensure_charts!(m)
+        m.hovered = 1
+        tb = T.TestBackend(80, 16); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 16), [], []))
+        side = _side_full(tb, m)
+        @test occursin("h[", side)
+        @test !occursin("▸ HOVER", side)  # compact headerless
+        found = _side_weco_bubbles(tb, m)
+        @test found !== nothing
+        @test occursin("Viols:", side)
+        # Either Lines minimal present (CL) or, if omitted, Charts count must not outrank (D4 ≺ D13)
+        has_lines = occursin("CL=", side)
+        has_charts_count = occursin("Charts:", side)
+        @test has_lines || !has_charts_count
     end
 
     @testset "visual prefs panel + solid series line connector" begin

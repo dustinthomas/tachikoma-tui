@@ -6371,15 +6371,18 @@ function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
     n_primary = length(act_ctx.primary_values)
     hover_active = (hi = m.hovered) !== nothing && 1 <= hi <= n_primary
     multi_or_filter = length(m.charts) > 1 || _any_filter_active(m)
-    # H≤11: reserve bubbles + Viols: N (KD-SS-17)
+    # KD-SS-17 compact profile (headerless prefs + force-drop ±1/±2)
     compact_h11 = side_inner.height <= 11
-    reserve_tail = compact_h11 ? 2 : 0
+    # Always reserve bubbles + Viols: N so Lines cannot starve WECO at any height
+    # (fixes side_h 12–13 cliff when reserve was 0 above height 11).
+    reserve_tail = 2
     drop_sigma12 = compact_h11 && (hover_active || multi_or_filter)
 
     y = _side_sec_summary!(buf, x, y, bot, maxw, m, act_ctx, n_primary;
                            compact_h11=compact_h11, reserve_tail=reserve_tail,
                            hover_active=hover_active)
-    y = _side_sec_hover!(buf, x, y, bot, maxw, m, act_ctx, act_ch, n_primary)
+    y = _side_sec_hover!(buf, x, y, bot, maxw, m, act_ctx, act_ch, n_primary;
+                         compact_h11=compact_h11)
     y = _side_sec_lines!(buf, x, y, bot, maxw, m, act_ctx;
                          reserve_tail=reserve_tail, drop_sigma12=drop_sigma12,
                          compact_h11=compact_h11)
@@ -6396,7 +6399,12 @@ function _side_sec_summary!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     rem = bot - y + 1
     rem <= 0 && return y
     body_min = 3
-    if _side_want_header(rem, body_min)
+    # KD-SS-17: prefer headerless STATS under compact when hover steals rows
+    use_hdr = _side_want_header(rem, body_min)
+    if compact_h11 && hover_active
+        use_hdr = false
+    end
+    if use_hdr
         y = _side_section_header!(buf, x, y, bot, maxw, "STATS")
     end
     lz = act_ctx.lz
@@ -6427,29 +6435,28 @@ function _side_sec_summary!(buf, x::Int, y::Int, bot::Int, maxw::Int,
         cpk_s = act_ctx.cpk === nothing ? "—" : _fmt(act_ctx.cpk)
         band = act_ctx.band
         cpk_st = act_ctx.cpk === nothing ? tstyle(:text_dim) : _side_cpk_style(band)
-        # KD-SS-5: merge band name as dim suffix; drop hex row
-        cpk_line = "Cpk=$cpk_s"
-        set_string!(buf, x, y, _side_trunc(cpk_line, maxw), cpk_st)
-        if act_ctx.cpk !== nothing
+        # KD-SS-5: merge band name as dim suffix; drop hex. Single-string budget:
+        # paint value span + dim suffix only when both fit untruncated; else one trunc.
+        cpk_prefix = "Cpk=$cpk_s"
+        if act_ctx.cpk === nothing
+            set_string!(buf, x, y, _side_trunc(cpk_prefix, maxw), cpk_st)
+        else
             suffix = " · $(band)"
-            # paint suffix dim after value when width allows
-            sx = x + length(cpk_line)
-            if sx <= x + maxw - 1 && sx + length(suffix) - 1 <= right_of_maxw(x, maxw)
-                set_string!(buf, sx, y, _side_trunc(suffix, max(0, maxw - length(cpk_line))), tstyle(:text_dim))
+            if length(cpk_prefix) + length(suffix) <= maxw
+                set_string!(buf, x, y, cpk_prefix, cpk_st)
+                set_string!(buf, x + length(cpk_prefix), y, suffix, tstyle(:text_dim))
+            else
+                set_string!(buf, x, y, _side_trunc(cpk_prefix * suffix, maxw), cpk_st)
             end
         end
         y += 1
     end
-    # Target on STATS (KD-SS-11); D14 drops before hover body under pressure
+    # Target on STATS (KD-SS-11); D14 drops before hover/WECO floor at ALL heights
     if m.target !== nothing && y <= bot
-        paint_t = true
-        if compact_h11
-            # After T= need: hover? + lines min(2) + reserve_tail
-            rem_after_t = bot - y  # rows remaining after painting T at y
-            need_rest = (hover_active ? 1 : 0) + 2 + reserve_tail
-            paint_t = rem_after_t >= need_rest
-        end
-        if paint_t
+        # After T= need: hover body? + lines min(2) + reserve_tail (WECO floor)
+        rem_after_t = bot - y  # rows remaining after painting T at y
+        need_rest = (hover_active ? 1 : 0) + 2 + reserve_tail
+        if rem_after_t >= need_rest
             set_string!(buf, x, y, _side_trunc("T=$(round(m.target; digits=1))", maxw), tstyle(:text_dim))
             y += 1
         end
@@ -6457,17 +6464,16 @@ function _side_sec_summary!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     return y
 end
 
-# max x for a left-aligned run of maxw cells starting at x
-right_of_maxw(x::Int, maxw::Int) = x + maxw - 1
-
-"""▸ HOVER — only when hovered; headerless if rem < 2 (D15/D18)."""
+"""▸ HOVER — only when hovered; headerless if rem < 2 or compact_h11 (KD-SS-17)."""
 function _side_sec_hover!(buf, x::Int, y::Int, bot::Int, maxw::Int,
-                          m::SPCWorkbenchModel, act_ctx, act_ch, n_primary::Int)::Int
+                          m::SPCWorkbenchModel, act_ctx, act_ch, n_primary::Int;
+                          compact_h11::Bool = false)::Int
     hi = m.hovered
     (hi === nothing || hi < 1 || hi > n_primary) && return y
     rem = bot - y + 1
     rem < 1 && return y
-    if _side_want_header(rem, 1)
+    # KD-SS-17 rule 3: headerless HOVER under compact profile
+    if !compact_h11 && _side_want_header(rem, 1)
         y = _side_section_header!(buf, x, y, bot, maxw, "HOVER")
     end
     if y <= bot
@@ -6490,19 +6496,13 @@ function _side_sec_lines!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     rem < 2 && return y  # Lines omitted when rem - reserve_tail < 2
 
     # Prefer header only if body still has ≥2 rows after (KD-SS-7 / body_min=2)
-    use_header = _side_want_header(rem, 2)
     # At H≤11 prefer headerless (KD-SS-17 rule 3)
-    if compact_h11
-        use_header = false
-    end
+    use_header = !compact_h11 && _side_want_header(rem, 2)
     body_budget = use_header ? rem - 1 : rem
     keys = _side_line_keys(body_budget; drop_sigma12=drop_sigma12)
     isempty(keys) && return y
-    if use_header && length(keys) >= 2
+    if use_header
         y = _side_section_header!(buf, x, y, effective_bot, maxw, "LINES [v]")
-    elseif use_header
-        # header would leave only 1 body row — skip header, recompute keys
-        keys = _side_line_keys(rem; drop_sigma12=drop_sigma12)
     end
 
     lz = act_ctx.lz
@@ -6536,9 +6536,11 @@ function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     rem = bot - y + 1
     rem < 1 && return y
 
-    # D5 blank gap before WECO when room (H=24 Specs–WECO contract: gap ≥ 1)
-    # Need gap + bubbles + Viols at minimum (and preferably digits) → rem ≥ 4 non-compact
-    if !compact_h11 && rem >= 4
+    # D5 blank gap only when bubbles + Viols (+ digits when not compact) still fit after gap.
+    # Tall path wants digits: need gap + bubbles + digits + Viols → rem ≥ 5.
+    # Without digits budget: gap + bubbles + Viols → rem ≥ 4 (unused under compact).
+    gap_need = compact_h11 ? 4 : 5
+    if !compact_h11 && rem >= gap_need
         y += 1
         rem = bot - y + 1
     end
