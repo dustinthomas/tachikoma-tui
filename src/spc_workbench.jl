@@ -602,6 +602,24 @@ _pref_on(m, key::AbstractString) = get(m.visual_prefs, key, get(DEFAULT_VISUAL_P
     enabled_rules::Dict{String,Bool} = copy(DEFAULT_WECO_RULES)
 end
 
+# ── Saved-list body chips (PR1 path-free polish; KD-SE-10) ───────────────
+"""WECO chip from in-memory preset body: \"N/8\" enabled rules."""
+function _preset_weco_chip(p::GraphPreset)::String
+    return "$(count(values(p.enabled_rules)))/8"
+end
+
+"""Lines chip: \"all\" when every chart line is on, else \"off-N\"."""
+function _preset_lines_chip(p::GraphPreset)::String
+    n_off = count(!, values(p.show_chart_lines))
+    return n_off == 0 ? "all" : "off-$n_off"
+end
+
+"""Styles chip: single shared style name, or \"mixed\"."""
+function _preset_styles_chip(p::GraphPreset)::String
+    styles = unique(collect(values(p.chart_line_styles)))
+    return length(styles) == 1 ? String(first(styles)) : "mixed"
+end
+
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 function _beyond(v::Real, bound::Real, op::Function)
@@ -2521,13 +2539,16 @@ end
 
 # ── Graph presets menu scroll helpers ───────────────────────────────────
 
+# PR1 Saved chrome: title + rule + col header + action strip (KD-SE-10).
+const SAVED_LIST_CHROME_ROWS = 4
+
 """Visible list-row capacity for Config Saved. `presets_area` is the remaining
 body rect (from list body start), not full page content — subtract the list's
-own header rows (`Saved: N` + blank = 2) so rows do not paint into chrome."""
+own chrome rows (`SAVED_LIST_CHROME_ROWS`) so rows do not paint into chrome."""
 function _presets_visible_capacity(m::SPCWorkbenchModel)::Int
     a = m.presets_area
     h = (a.height > 0) ? a.height : 20
-    return max(1, h - 2)
+    return max(1, h - SAVED_LIST_CHROME_ROWS)
 end
 
 function _sync_presets_scroll!(m::SPCWorkbenchModel, n::Int = length(m.graph_presets),
@@ -5702,31 +5723,32 @@ function _render_config_page!(buf, area, m)
     set_string!(buf, content.x + 1, content.y,
         "CONFIG  ·  Esc/q → dashboard", tstyle(:title, bold=true))
     y = content.y + 1
-    # Section strip — current tab bold (four-way including Saved)
+    # Section strip — current tab bold (four-way including Saved; ★ when active)
     rules_sty = m.config_tab == :weco ? tstyle(:accent, bold=true) : tstyle(:text_dim)
     lines_sty = m.config_tab == :lines ? tstyle(:accent, bold=true) : tstyle(:text_dim)
     visual_sty = m.config_tab == :visual ? tstyle(:accent, bold=true) : tstyle(:text_dim)
     saved_sty = m.config_tab === :saved ? tstyle(:accent, bold=true) : tstyle(:text_dim)
+    saved_lbl = m.config_tab === :saved ? "[★ Saved]" : "[Saved]"
     set_string!(buf, content.x + 2, y, "[Rules]", rules_sty)
     set_string!(buf, content.x + 12, y, "[Lines]", lines_sty)
     set_string!(buf, content.x + 22, y, "[Visual]", visual_sty)
-    set_string!(buf, content.x + 33, y, "[Saved]", saved_sty)
-    set_string!(buf, content.x + 44, y, "Tab cycle · ←/→ style · e saved", tstyle(:text_dim))
+    set_string!(buf, content.x + 33, y, saved_lbl, saved_sty)
+    tab_help_x = content.x + (m.config_tab === :saved ? 47 : 44)
+    set_string!(buf, tab_help_x, y, "Tab cycle · ←/→ style · e saved", tstyle(:text_dim))
     y += 1
     tab_lbl = m.config_tab == :lines ? "Chart Lines" :
               (m.config_tab == :visual ? "Visual Preferences" :
                (m.config_tab === :saved ? "Saved Configs" : "WECO Rules"))
     chname = isempty(m.charts) ? "—" : current_chart(m).name
     if m.config_tab === :saved
-        set_string!(buf, content.x + 2, y,
-            "Section: $tab_lbl   ·  Enter/l/a/Space load → dash   ·  s name  ·  w/W file  ·  d del",
-            tstyle(:text_dim))
+        # PR1: hierarchy + action strip live in list body; blank under tab strip
+        y += 1
     else
         set_string!(buf, content.x + 2, y,
             "Section: $tab_lbl   ·  Active chart: $chname   ·  toggles apply immediately",
             tstyle(:text_dim))
+        y += 2
     end
-    y += 2
     _render_config_section_body!(buf, content, m; y = y)
     if chrome !== nothing
         _render_mode_chrome!(buf, chrome, m; mode=:config)
@@ -5735,41 +5757,99 @@ function _render_config_page!(buf, area, m)
 end
 
 # ── Named configs list body (Config → Saved) ────────────────────────────
+"""Pad/truncate `s` to fixed width for Saved column layout."""
+function _saved_col(s::AbstractString, w::Int)::String
+    t = String(s)
+    length(t) > w && return t[1:w]
+    return rpad(t, w)
+end
+
+"""Format one Saved list row: marker, index, name, body chips (no path)."""
+function _format_preset_list_row(p::GraphPreset, i::Int; selected::Bool)::String
+    marker = selected ? "▶" : " "
+    name = _saved_col(p.name, 14)
+    weco = _saved_col(_preset_weco_chip(p), 5)
+    lines = _saved_col(_preset_lines_chip(p), 6)
+    styles = _preset_styles_chip(p)
+    return "$marker $i $name  $weco  $lines  $styles"
+end
+
 """Draw the named presets list body into `content` starting at row `y`. Returns next free y."""
 function _render_presets_list_body!(buf, content, m; y::Int)
     npre = length(m.graph_presets)
     if npre >= 1
         m.presets_selected = clamp(m.presets_selected, 1, npre)
     end
-    set_string!(buf, content.x + 2, y,
-        "Saved: $npre   selected=$(m.presets_selected)   (whole set: lines · styles · visual · WECO)",
-        tstyle(:text_dim))
-    y += 2
-    capacity = _presets_visible_capacity(m)
-    _sync_presets_scroll!(m, npre, capacity)
-    if npre == 0
-        set_string!(buf, content.x + 2, y,
-            "No saved configs — s · name-save  ·  w · file-save  ·  W · file-load",
-            tstyle(:warning, bold=true))
+    bot = bottom(content)
+    maxw = max(1, content.width - 4)
+    x0 = content.x + 2
+
+    # Hierarchy title + count (list length only — path-free PR1)
+    title = "▸ SAVED GRAPH CONFIGS"
+    count_s = npre == 1 ? "1 saved" : "$npre saved"
+    gap = max(1, maxw - length(title) - length(count_s))
+    title_line = title * " "^gap * count_s
+    set_string!(buf, x0, y, _side_trunc(title_line, maxw), tstyle(:accent, bold=true))
+    y += 1
+    if y <= bot
+        set_string!(buf, x0, y, _side_trunc("─"^maxw, maxw), tstyle(:text_dim))
         y += 1
-        set_string!(buf, content.x + 2, y,
-            "  Capture lines on/off, styles, visual prefs, and WECO rules (name or JSON path).",
+    end
+    if y <= bot
+        set_string!(buf, x0, y,
+            _side_trunc("#  Name            WECO   Lines   Styles", maxw),
             tstyle(:text_dim))
         y += 1
+    end
+
+    capacity = _presets_visible_capacity(m)
+    _sync_presets_scroll!(m, npre, capacity)
+
+    if npre == 0
+        # Boxed empty CTA with shipped key labels (KD-SE-10 / PR1)
+        box_w = min(maxw, 62)
+        box_w = max(box_w, 40)
+        if y <= bot
+            set_string!(buf, x0, y, "╭" * "─"^(box_w - 2) * "╮", tstyle(:text_dim))
+            y += 1
+        end
+        empty_lines = (
+            ("│  ★  No saved configs yet", tstyle(:warning, bold=true)),
+            ("│  Capture lines · styles · visual · WECO as a portable JSON.", tstyle(:text_dim)),
+            ("│  [s] name-save  ·  [w] file-save  ·  [W] file-load", tstyle(:text)),
+        )
+        for (raw, sty) in empty_lines
+            y > bot && break
+            pad = max(0, box_w - 1 - length(raw))
+            set_string!(buf, x0, y, raw * " "^pad * "│", sty)
+            y += 1
+        end
+        if y <= bot
+            set_string!(buf, x0, y, "╰" * "─"^(box_w - 2) * "╯", tstyle(:text_dim))
+            y += 1
+        end
     else
         first_i = m.presets_scroll + 1
         last_i = min(npre, m.presets_scroll + capacity)
         for i in first_i:last_i
+            y > bot && break
             p = m.graph_presets[i]
-            marker = i == m.presets_selected ? "▶" : " "
-            # Compact summary of what the preset holds
-            n_off = count(!, values(p.show_chart_lines))
-            n_rules = count(values(p.enabled_rules))
-            line = "$marker $i. $(p.name)  (lines-off=$n_off · WECO-on=$n_rules)"
+            line = _format_preset_list_row(p, i; selected = (i == m.presets_selected))
             sty = i == m.presets_selected ? tstyle(:accent, bold=true) : tstyle(:text)
-            set_string!(buf, content.x + 2, y, line, sty)
+            set_string!(buf, x0, y, _side_trunc(line, maxw), sty)
             y += 1
         end
+    end
+
+    # Action strip with current shipped key labels (name-save still on s)
+    if y <= bot
+        y += 1  # blank before actions when room
+    end
+    if y <= bot
+        set_string!(buf, x0, y,
+            _side_trunc("Actions: s name-save · w/W file · ↵ load · d del", maxw),
+            tstyle(:text_dim))
+        y += 1
     end
     return y
 end

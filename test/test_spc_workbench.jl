@@ -41,6 +41,23 @@ include("../src/spc_workbench.jl")
         @test _cycle_line_style!(m, "cl"; dir = -1) == "solid"
     end
 
+    @testset "graph preset body chips (PR1 path-free)" begin
+        p = GraphPreset()
+        @test _preset_weco_chip(p) == "5/8"  # WECO-1..5 on by default
+        @test _preset_lines_chip(p) == "all"
+        @test _preset_styles_chip(p) == "mixed"  # defaults use multiple styles
+        p.show_chart_lines["specs"] = false
+        p.show_chart_lines["sigma1"] = false
+        @test _preset_lines_chip(p) == "off-2"
+        p.enabled_rules["WECO-6"] = true
+        @test _preset_weco_chip(p) == "6/8"
+        for k in keys(p.chart_line_styles)
+            p.chart_line_styles[k] = "solid"
+        end
+        @test _preset_styles_chip(p) == "solid"
+        @test SAVED_LIST_CHROME_ROWS == 4
+    end
+
     @testset "graph presets: capture/apply whole graph set (lines+styles+visual+rules)" begin
         @test GraphPreset <: Any
         p0 = GraphPreset()
@@ -3748,21 +3765,75 @@ end
         @test m.view_mode === :config && m.config_tab === :saved
         tb = T.TestBackend(100, 24); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
-        # Area is remaining body; capacity reserves list header rows
+        # Area is remaining body; capacity reserves list chrome rows (title/rule/header/actions)
         @test m.presets_area.height > 0
         cap = _presets_visible_capacity(m)
         @test cap >= 1
         @test cap < m.presets_area.height
+        @test cap == max(1, m.presets_area.height - SAVED_LIST_CHROME_ROWS)
         # Selecting last entry advances scroll so capacity stays honest
         m.presets_selected = 20
         _sync_presets_scroll!(m)
         @test m.presets_scroll > 0
-        # re-render: last name visible, first name scrolled off
+        # re-render: last name visible, first name scrolled off (PR1 chip row format)
         tb2 = T.TestBackend(100, 24); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 24), [], []))
         full = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
-        @test occursin("cfg-20  (", full)
-        @test !occursin("cfg-1  (", full)  # early entries scrolled away (exact name, not cfg-10+)
+        @test occursin("cfg-20", full)
+        @test !occursin("cfg-1  ", full)  # early entries scrolled away (exact pad, not cfg-10+)
+        T.update!(m, T.KeyEvent(:escape))
+    end
+
+    @testset "Config Saved PR1 polish: hierarchy, body chips, empty CTA, action strip" begin
+        d = generate_spc_workbench_data(12; seed = 11)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+
+        # Empty Saved: hierarchy + boxed CTA + shipped key labels (no Path chrome)
+        T.update!(m, T.KeyEvent('e'))
+        @test m.view_mode === :config && m.config_tab === :saved
+        tb = T.TestBackend(100, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
+        full0 = join([string(T.row_text(tb, i)) for i in 1:24 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("SAVED GRAPH CONFIGS", full0)
+        @test occursin("0 saved", full0)
+        @test occursin("No saved configs yet", full0) || occursin("No saved configs", full0)
+        @test occursin("name-save", full0)
+        @test occursin("Actions:", full0)
+        @test occursin("[★ Saved]", full0) || occursin("★ Saved", full0)
+        @test !occursin("Path  ", full0)  # no Path column header (PR1 path-free)
+        @test !occursin(" on disk", full0)
+        # s still name-save (not explorer rebind)
+        T.update!(m, T.KeyEvent('s'))
+        @test m.prompt_kind === :save_graph_preset
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.prompt_kind === nothing
+
+        # Two presets → column header + WECO/lines/styles chips from body
+        p1 = capture_graph_preset(m; name = "fab-dense")
+        p1.show_chart_lines["specs"] = false
+        p1.enabled_rules["WECO-6"] = true
+        p1.enabled_rules["WECO-7"] = true
+        p1.enabled_rules["WECO-8"] = true  # defaults 1-5 on → 8/8
+        push!(m.graph_presets, p1)
+        p2 = capture_graph_preset(m; name = "loose")
+        # default styles are mixed (solid/dotted/dashed/long_dash)
+        push!(m.graph_presets, p2)
+        tb2 = T.TestBackend(100, 24); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 24), [], []))
+        full1 = join([string(T.row_text(tb2, i)) for i in 1:24 if T.row_text(tb2, i) !== nothing], "\n")
+        @test occursin("SAVED GRAPH CONFIGS", full1)
+        @test occursin("2 saved", full1)
+        @test occursin("Name", full1) && occursin("WECO", full1) &&
+              occursin("Lines", full1) && occursin("Styles", full1)
+        @test occursin("fab-dense", full1)
+        @test occursin("loose", full1)
+        # body chips: WECO count, lines-off chip, mixed styles (default line styles differ)
+        @test occursin("8/8", full1)  # p1 with WECO 6-8 enabled
+        @test occursin("off-1", full1) || occursin("all", full1)
+        @test occursin("mixed", full1)
+        @test !occursin("lines-off=", full1)  # old summary format gone
+        @test !occursin("missing", lowercase(full1))  # no missing-file badge
         T.update!(m, T.KeyEvent(:escape))
     end
 
