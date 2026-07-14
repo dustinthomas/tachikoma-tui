@@ -43,7 +43,7 @@ export workbench_to_dict, workbench_from_dict, workbench_from_dict!
 export export_csv_series, chart_for_export
 export save_workbench, load_workbench, load_workbench!
 export graph_preset_to_dict, graph_preset_from_dict, save_graph_preset, load_graph_preset
-export FileBrowserEntry, list_browser_entries
+export list_browser_entries
 export GraphConfigIndexEntry, GRAPH_CONFIG_INDEX_CAP
 export default_graph_config_index_path
 export read_graph_config_index, write_graph_config_index

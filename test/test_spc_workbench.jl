@@ -3758,6 +3758,8 @@ end
         _sync_active_back!(m)
 
         mktempdir() do dir
+            # KD-SE-5: never write host XDG index from tests
+            m.graph_config_index_path = joinpath(dir, "graph_config_index.json")
             path1 = joinpath(dir, "my-preset.json")
             T.update!(m, T.KeyEvent('p'))
             @test m.view_mode === :config && m.config_tab === :saved
@@ -3787,6 +3789,7 @@ end
             @test m.graph_presets[1].enabled_rules["WECO-6"] === true
             @test occursin("saved graph config", m.last_event)
             @test isfile(path1)
+            @test isfile(m.graph_config_index_path)  # index wrote to inject path only
             # List shows the saved name
             tb4 = T.TestBackend(100, 24); T.reset!(tb4.buf)
             T.view(m, T.Frame(tb4.buf, T.Rect(1, 1, 100, 24), [], []))
@@ -6924,6 +6927,12 @@ function _set_prompt_path!(m, path::AbstractString)
     end
 end
 
+"""Inject temp index path so tests never write host XDG (KD-SE-5)."""
+function _isolate_index!(m, dir::AbstractString)
+    m.graph_config_index_path = joinpath(dir, "graph_config_index.json")
+    return m
+end
+
 @testset "PR3/PR4 Config file save/load (typed path + explorer keys)" begin
 
     @testset "p typed path save: basename name in JSON + list upsert + prefill" begin
@@ -6938,6 +6947,7 @@ end
         @test m.last_graph_config_path == ""
 
         mktempdir() do dir
+            _isolate_index!(m, dir)
             path = joinpath(dir, "fab-dense.json")
             T.update!(m, T.KeyEvent('c'))  # Config (any section may open p)
             @test m.view_mode === :config
@@ -6952,6 +6962,7 @@ end
             @test abspath(m.last_graph_config_path) == abspath(path)
             @test occursin("saved graph config", m.last_event)
             @test occursin(abspath(path), m.last_event) || occursin(path, m.last_event)
+            @test isfile(m.graph_config_index_path)  # inject path only, not XDG
             @test isfile(path)
             # KD-SE-23: save upserts list + selects entry
             @test length(m.graph_presets) == 1
@@ -7000,6 +7011,7 @@ end
         @test isempty(m.graph_presets)
 
         mktempdir() do dir
+            _isolate_index!(m, dir)
             p_a = GraphPreset(
                 name = "cfg-a",
                 show_chart_lines = Dict{String,Bool}("cl" => false, "sigma1" => true, "sigma2" => true, "sigma3" => true, "specs" => false),
@@ -7146,6 +7158,7 @@ end
         _sync_active_back!(m)
 
         mktempdir() do dir
+            _isolate_index!(m, dir)
             p = GraphPreset(
                 name = "from-file",
                 show_chart_lines = Dict{String,Bool}("cl" => false, "sigma1" => true, "sigma2" => true, "sigma3" => true, "specs" => true),
@@ -7175,6 +7188,7 @@ end
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
         _ensure_charts!(m)
         mktempdir() do dir
+            _isolate_index!(m, dir)
             path = joinpath(dir, "alias-kind.json")
             open(path, "w") do io
                 write(io, """{"kind":"graph_config","version":1,"name":"alias-cfg",
@@ -7195,15 +7209,89 @@ end
         end
     end
 
+    @testset "KD-SE-21: path-bearing load re-reads file, never applies lazy list body" begin
+        # List row has DEFAULT body; file on disk has WECO-6 on and cl off.
+        # Enter must apply file payload, not the lazy defaults in the list entry.
+        d = generate_spc_workbench_data(10; seed = 28)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        m.show_chart_lines["cl"] = true
+        m.enabled_rules["WECO-6"] = false
+        _sync_active_back!(m)
+
+        mktempdir() do dir
+            _isolate_index!(m, dir)
+            path = joinpath(dir, "disk-truth.json")
+            disk = GraphPreset(
+                name = "disk-truth",
+                show_chart_lines = Dict{String,Bool}(
+                    "cl" => false, "sigma1" => true, "sigma2" => true,
+                    "sigma3" => true, "specs" => true,
+                ),
+                chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+                visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+                enabled_rules = copy(DEFAULT_WECO_RULES),
+            )
+            disk.enabled_rules["WECO-6"] = true
+            disk.enabled_rules["WECO-1"] = false
+            @test save_graph_preset(disk, path) === nothing
+
+            # Path-bearing list entry with DEFAULT body (lazy / never loaded)
+            lazy = GraphPreset(
+                name = "lazy-row",
+                show_chart_lines = copy(DEFAULT_CHART_LINES),  # cl=true
+                chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+                visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+                enabled_rules = copy(DEFAULT_WECO_RULES),  # WECO-6 false
+                path = path,
+            )
+            push!(m.graph_presets, lazy)
+            m.presets_selected = 1
+            # Live model still differs from both lazy body and file
+            m.show_chart_lines["cl"] = true
+            m.enabled_rules["WECO-6"] = false
+            m.enabled_rules["WECO-1"] = true
+            _sync_active_back!(m)
+
+            T.update!(m, T.KeyEvent('e'))
+            @test m.view_mode === :config && m.config_tab === :saved
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.view_mode === :dashboard
+            @test occursin("loaded graph config", m.last_event)
+            # Must match file, not lazy defaults
+            @test m.show_chart_lines["cl"] === false
+            @test m.enabled_rules["WECO-6"] === true
+            @test m.enabled_rules["WECO-1"] === false
+            @test current_chart(m).enabled_rules["WECO-6"] === true
+            # List upserted from file payload
+            @test m.graph_presets[1].show_chart_lines["cl"] === false
+            @test m.graph_presets[1].enabled_rules["WECO-6"] === true
+        end
+    end
+
+    @testset "empty path helper rejects before abspath(cwd)" begin
+        d = generate_spc_workbench_data(6; seed = 29)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        mktempdir() do dir
+            _isolate_index!(m, dir)
+            @test WB._apply_save_graph_config_path!(m, "   ") === false
+            @test occursin("empty path", m.last_event)
+            @test isempty(m.graph_presets)
+            @test WB._apply_load_graph_config_path!(m, "") === false
+            @test occursin("empty path", m.last_event)
+        end
+    end
+
     @testset "explorer Save As + overwrite + Quick Save + Load" begin
         d = generate_spc_workbench_data(10; seed = 27)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
         _ensure_charts!(m)
         m.show_chart_lines["specs"] = false
         _sync_active_back!(m)
-        # Isolate index writes
+        # Isolate index writes (KD-SE-5)
         mktempdir() do dir
-            m.graph_config_index_path = joinpath(dir, "index.json")
+            _isolate_index!(m, dir)
             path = joinpath(dir, "explorer-cfg.json")
             # Open Save As from Lines tab (Config-wide KD-SE-18)
             T.update!(m, T.KeyEvent('v'))

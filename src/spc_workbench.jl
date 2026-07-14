@@ -2446,9 +2446,15 @@ function _browser_refresh!(m::SPCWorkbenchModel)
     end
     ents = result::Vector{FileBrowserEntry}
     m.file_browser_entries = ents
-    # Cap is enforced in list_browser_entries; flag if max hit (500)
+    # Cap is enforced in list_browser_entries (max_entries=500); length==cap is the
+    # only signal available without a return-bit API change (soft heuristic KD-SE-15).
     m.file_browser_truncated = length(ents) >= 500
-    if !isempty(m.file_browser_error) && startswith(m.file_browser_error, "browser err:")
+    if m.file_browser_truncated
+        m.file_browser_error = "listing truncated (500)"
+        m.last_event = "browser listing truncated (500)"
+    elseif !isempty(m.file_browser_error) &&
+           (startswith(m.file_browser_error, "browser err:") ||
+            startswith(m.file_browser_error, "listing truncated"))
         m.file_browser_error = ""
     end
     n = length(ents)
@@ -2503,7 +2509,11 @@ function _open_file_browser!(
     m.file_browser_error = ""
     m.file_browser_truncated = false
     _browser_refresh!(m)
-    m.last_event = "file browser $(mode)"
+    if m.file_browser_truncated
+        m.last_event = "file browser $(mode) · listing truncated (500)"
+    else
+        m.last_event = "file browser $(mode)"
+    end
     return nothing
 end
 
@@ -2535,8 +2545,8 @@ function _arm_overwrite!(m::SPCWorkbenchModel, path::AbstractString)
     return nothing
 end
 
-"""Path-upsert index + write (no-op when index helpers unavailable)."""
-function _index_upsert_and_write!(m::SPCWorkbenchModel, p::GraphPreset)
+"""Path-upsert index + write. Returns nothing on ok, or non-fatal warn string."""
+function _index_upsert_and_write!(m::SPCWorkbenchModel, p::GraphPreset)::Union{Nothing,String}
     raw = strip(p.path)
     isempty(raw) && return nothing
     try
@@ -2549,15 +2559,19 @@ function _index_upsert_and_write!(m::SPCWorkbenchModel, p::GraphPreset)
         if err !== nothing
             # non-fatal — save already succeeded
             m.file_browser_error = String(err)
+            return String(err)
         end
-    catch
-        # index helpers may be absent in pure workbench include
+        return nothing
+    catch e
+        # index helpers may be absent in pure workbench include; surface if present
+        msg = "index err: $(sprint(showerror, e))"
+        m.file_browser_error = msg
+        return msg
     end
-    return nothing
 end
 
-"""Touch last_used on load and write index."""
-function _index_touch_and_write!(m::SPCWorkbenchModel, p::GraphPreset)
+"""Touch last_used on load and write index. Returns nothing or non-fatal warn."""
+function _index_touch_and_write!(m::SPCWorkbenchModel, p::GraphPreset)::Union{Nothing,String}
     raw = strip(p.path)
     isempty(raw) && return nothing
     try
@@ -2571,10 +2585,12 @@ function _index_touch_and_write!(m::SPCWorkbenchModel, p::GraphPreset)
             e.saved_at = isempty(strip(entries[i].saved_at)) ? e.saved_at : entries[i].saved_at
         end
         upsert_graph_config_index_entry!(entries, e)
-        write_graph_config_index(idx_path, entries)
-    catch
+        err = write_graph_config_index(idx_path, entries)
+        err !== nothing && return String(err)
+        return nothing
+    catch e
+        return "index err: $(sprint(showerror, e))"
     end
-    return nothing
 end
 
 """
@@ -2584,11 +2600,12 @@ Write graph config to disk, path-upsert list + index, select entry, set
 `last_graph_config_path` (KD-SE-23). Stays on Config.
 """
 function _apply_save_graph_config_path!(m::SPCWorkbenchModel, path::AbstractString)::Bool
-    path = abspath(expanduser(strip(String(path))))
-    if isempty(path)
+    raw = strip(String(path))
+    if isempty(raw)
         m.last_event = "save err: empty path"
         return false
     end
+    path = abspath(expanduser(raw))
     name = _graph_config_name_from_path(path)
     p = capture_graph_preset(m; name = name)
     p.path = path
@@ -2607,13 +2624,16 @@ function _apply_save_graph_config_path!(m::SPCWorkbenchModel, path::AbstractStri
         _sync_presets_scroll!(m)
     end
     m.last_graph_config_path = path
-    _index_upsert_and_write!(m, p)
+    idx_warn = _index_upsert_and_write!(m, p)
     m.file_browser_open = false
     m.prompt_kind = nothing
     m.prompt_buf = ""
     m.pending_overwrite = false
     m.pending_overwrite_path = ""
     m.last_event = "saved graph config $path"
+    if idx_warn !== nothing
+        m.last_event = m.last_event * " · $idx_warn"
+    end
     return true
 end
 
@@ -2624,11 +2644,12 @@ Load from disk, path-upsert, apply, go dashboard (R2). Final event
 `\"loaded graph config \$path\"` (KD-SE-16).
 """
 function _apply_load_graph_config_path!(m::SPCWorkbenchModel, path::AbstractString)::Bool
-    path = abspath(expanduser(strip(String(path))))
-    if isempty(path)
+    raw = strip(String(path))
+    if isempty(raw)
         m.last_event = "load err: empty path"
         return false
     end
+    path = abspath(expanduser(raw))
     result = load_graph_preset(path)
     if result isa AbstractString
         m.last_event = startswith(String(result), "load err:") ? String(result) : "load err: $result"
@@ -2644,7 +2665,10 @@ function _apply_load_graph_config_path!(m::SPCWorkbenchModel, path::AbstractStri
     apply_graph_preset!(m, p)  # sets "preset applied: …" briefly
     m.last_graph_config_path = path
     m.last_event = "loaded graph config $path"  # KD-SE-16 final
-    _index_touch_and_write!(m, p)
+    idx_warn = _index_touch_and_write!(m, p)
+    if idx_warn !== nothing
+        m.last_event = m.last_event * " · $idx_warn"
+    end
     m.file_browser_open = false
     m.prompt_kind = nothing
     m.prompt_buf = ""
@@ -2673,12 +2697,13 @@ end
 
 """Commit save path from explorer: overwrite confirm if exists, else write."""
 function _browser_commit_save_path!(m::SPCWorkbenchModel, path::AbstractString)
-    path = abspath(expanduser(strip(String(path))))
-    if isempty(path)
+    raw = strip(String(path))
+    if isempty(raw)
         m.file_browser_error = "save err: empty path"
         m.last_event = m.file_browser_error
         return nothing
     end
+    path = abspath(expanduser(raw))
     if isfile(path)
         # Quick-save known path skips confirm; explorer Save As always confirms
         # when the file exists (even if it matches last path).
@@ -2828,7 +2853,8 @@ function _handle_file_browser_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.last_event = "file browser hidden=$(m.file_browser_show_hidden)"
             return
         end
-        if c == '~'
+        # `~` jumps home only in list focus; name focus types a tilde
+        if c == '~' && m.file_browser_focus === :list
             home = abspath(homedir())
             if isdir(home)
                 m.file_browser_cwd = home
@@ -2840,7 +2866,7 @@ function _handle_file_browser_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
             end
             return
         end
-        # Printable (incl. q) — never quit; auto-focus name on save and append
+        # Printable (incl. q and ~ when name-focused) — never quit; auto-focus name on save
         if c >= ' ' && c != '\x7f'
             if m.file_browser_mode === :save_graph_config
                 m.file_browser_focus = :name
@@ -6477,9 +6503,16 @@ function _render_file_browser!(buf, area, m::SPCWorkbenchModel)
     maxw = max(1, inner.width - 1)
     y = inner.y
     hid = m.file_browser_show_hidden ? "on" : "off"
-    cwd_line = _side_trunc("$(m.file_browser_cwd)  [hidden:$hid]", maxw)
+    trunc_tag = m.file_browser_truncated ? "  [truncated]" : ""
+    cwd_line = _side_trunc("$(m.file_browser_cwd)  [hidden:$hid]$trunc_tag", maxw)
     set_string!(buf, inner.x, y, cwd_line, tstyle(:text_dim))
     y += 1
+    if m.file_browser_truncated && y <= bot &&
+       (isempty(m.file_browser_error) || !occursin("truncated", m.file_browser_error))
+        set_string!(buf, inner.x, y,
+            _side_trunc("listing truncated (500)", maxw), tstyle(:warning))
+        y += 1
+    end
     if !isempty(m.file_browser_error) && y <= bot
         set_string!(buf, inner.x, y, _side_trunc(m.file_browser_error, maxw), tstyle(:error))
         y += 1
