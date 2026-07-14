@@ -62,6 +62,7 @@ include("../src/spc_workbench.jl")
         @test GraphPreset <: Any
         p0 = GraphPreset()
         @test p0.name == "default"
+        @test p0.path == ""  # optional host path; default empty (KD-SE-4)
         for k in CHART_LINE_KEYS
             @test p0.show_chart_lines[k] == DEFAULT_CHART_LINES[k]
             @test p0.chart_line_styles[k] == DEFAULT_CHART_LINE_STYLES[k]
@@ -158,7 +159,7 @@ include("../src/spc_workbench.jl")
         @test occursin("preset updated", m3.last_event)
     end
 
-    @testset "graph config path helpers: basename name + upsert by payload (PR4)" begin
+    @testset "graph config path helpers: basename name + path-keyed upsert (PR2/KD-SE-17)" begin
         @test _graph_config_name_from_path("/tmp/fab-dense.json") == "fab-dense"
         @test _graph_config_name_from_path("fab-dense.json") == "fab-dense"
         @test _graph_config_name_from_path("/x/foo.bar.json") == "foo.bar"
@@ -169,6 +170,7 @@ include("../src/spc_workbench.jl")
 
         d = generate_spc_workbench_data(8; seed = 3)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        # Path-less name upsert (legacy / memory rows)
         p1 = GraphPreset(name = "from-file", show_chart_lines = copy(DEFAULT_CHART_LINES),
             chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
             visual_prefs = copy(DEFAULT_VISUAL_PREFS),
@@ -177,8 +179,9 @@ include("../src/spc_workbench.jl")
         @test _upsert_graph_preset!(m, p1) === nothing
         @test length(m.graph_presets) == 1
         @test m.graph_presets[1].name == "from-file"
+        @test m.graph_presets[1].path == ""
         @test m.graph_presets[1].show_chart_lines["cl"] === false
-        # same name replaces payload (length unchanged); does NOT re-capture live model
+        # same name + empty path replaces payload (length unchanged); does NOT re-capture live model
         m.show_chart_lines["cl"] = true
         p2 = GraphPreset(name = "from-file", show_chart_lines = copy(DEFAULT_CHART_LINES),
             chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
@@ -204,6 +207,74 @@ include("../src/spc_workbench.jl")
             enabled_rules = copy(DEFAULT_WECO_RULES))
         @test _upsert_graph_preset!(m, pbad) isa AbstractString
         @test length(m.graph_presets) == 2
+
+        # Path-keyed: two same basenames in different dirs → two list slots
+        m2 = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        dir_a = joinpath(tempdir(), "spc_upsert_a_$(rand(UInt32))")
+        dir_b = joinpath(tempdir(), "spc_upsert_b_$(rand(UInt32))")
+        path_a = joinpath(dir_a, "fab-dense.json")
+        path_b = joinpath(dir_b, "fab-dense.json")
+        pa = GraphPreset(name = "fab-dense", show_chart_lines = copy(DEFAULT_CHART_LINES),
+            chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+            visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+            enabled_rules = copy(DEFAULT_WECO_RULES),
+            path = path_a)
+        pa.show_chart_lines["cl"] = false
+        pb = GraphPreset(name = "fab-dense", show_chart_lines = copy(DEFAULT_CHART_LINES),
+            chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+            visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+            enabled_rules = copy(DEFAULT_WECO_RULES),
+            path = path_b)
+        pb.show_chart_lines["specs"] = false
+        @test _upsert_graph_preset!(m2, pa) === nothing
+        @test _upsert_graph_preset!(m2, pb) === nothing
+        @test length(m2.graph_presets) == 2
+        paths = sort([abspath(e.path) for e in m2.graph_presets])
+        @test paths == sort([abspath(path_a), abspath(path_b)])
+        # Re-save same path → one slot updated (payload rename allowed)
+        pa2 = GraphPreset(name = "renamed-dense", show_chart_lines = copy(DEFAULT_CHART_LINES),
+            chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+            visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+            enabled_rules = copy(DEFAULT_WECO_RULES),
+            path = path_a)
+        pa2.show_chart_lines["sigma1"] = false
+        @test _upsert_graph_preset!(m2, pa2) === nothing
+        @test length(m2.graph_presets) == 2
+        hit = findfirst(e -> abspath(e.path) == abspath(path_a), m2.graph_presets)
+        @test hit !== nothing
+        @test m2.graph_presets[hit].name == "renamed-dense"
+        @test m2.graph_presets[hit].show_chart_lines["sigma1"] === false
+        # Never replace path-bearing row by name when paths differ
+        m3 = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        with_path = GraphPreset(name = "same", show_chart_lines = copy(DEFAULT_CHART_LINES),
+            chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+            visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+            enabled_rules = copy(DEFAULT_WECO_RULES),
+            path = path_a)
+        pathless = GraphPreset(name = "same", show_chart_lines = copy(DEFAULT_CHART_LINES),
+            chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+            visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+            enabled_rules = copy(DEFAULT_WECO_RULES),
+            path = "")
+        pathless.show_chart_lines["cl"] = false
+        @test _upsert_graph_preset!(m3, with_path) === nothing
+        @test _upsert_graph_preset!(m3, pathless) === nothing
+        @test length(m3.graph_presets) == 2
+        # Path-less same-name upsert does not touch the path-bearing entry
+        pathless2 = GraphPreset(name = "same", show_chart_lines = copy(DEFAULT_CHART_LINES),
+            chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+            visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+            enabled_rules = copy(DEFAULT_WECO_RULES),
+            path = "")
+        pathless2.show_chart_lines["specs"] = false
+        @test _upsert_graph_preset!(m3, pathless2) === nothing
+        @test length(m3.graph_presets) == 2
+        pl = findfirst(e -> isempty(e.path), m3.graph_presets)
+        @test pl !== nothing
+        @test m3.graph_presets[pl].show_chart_lines["specs"] === false
+        pbearing = findfirst(e -> !isempty(e.path), m3.graph_presets)
+        @test pbearing !== nothing
+        @test m3.graph_presets[pbearing].show_chart_lines["cl"] === true  # untouched
     end
 
     @testset "weco_detect guards (empty, zero sigma)" begin
@@ -7246,3 +7317,300 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
 
 end
 end # module TestSPCWorkbenchHTMLImport
+
+# PR2: pure browser listing + graph config index + include_path serialization
+# (package-module load to avoid type redefinition vs pure include of spc_workbench.jl).
+# ═══════════════════════════════════════════════════════════════════════
+
+module TestSPCWorkbenchBrowserIndexIO
+using Test
+using Random
+using TachikomaTUI
+
+const WB = TachikomaTUI
+
+@testset "PR2 list_browser_entries + index IO + GraphPreset.path serialization" begin
+
+    @testset "list_browser_entries: dirs, json filter, hidden, cap, errors" begin
+        mktempdir() do dir
+            mkdir(joinpath(dir, "sub"))
+            mkdir(joinpath(dir, ".hidden_dir"))
+            open(joinpath(dir, "a.json"), "w") do io; write(io, "{}"); end
+            open(joinpath(dir, "b.JSON"), "w") do io; write(io, "{}"); end
+            open(joinpath(dir, "c.txt"), "w") do io; write(io, "x"); end
+            open(joinpath(dir, ".secret.json"), "w") do io; write(io, "{}"); end
+            open(joinpath(dir, "z.json"), "w") do io; write(io, "{}"); end
+
+            ents = list_browser_entries(dir)
+            @test ents isa Vector{FileBrowserEntry}
+            names = [e.name for e in ents]
+            # parent when not root
+            @test ".." in names
+            parent_e = ents[findfirst(e -> e.is_parent, ents)]
+            @test parent_e.is_dir
+            @test parent_e.path == dirname(abspath(dir))
+            # dirs first among non-parent, then json files (case-insensitive)
+            non_parent = filter(e -> !e.is_parent, ents)
+            dir_names = [e.name for e in non_parent if e.is_dir]
+            file_names = [e.name for e in non_parent if !e.is_dir]
+            @test dir_names == sort(dir_names)
+            @test "sub" in dir_names
+            @test !(".hidden_dir" in dir_names)
+            @test Set(file_names) == Set(["a.json", "b.JSON", "z.json"])
+            @test !("c.txt" in file_names)
+            @test !(".secret.json" in file_names)
+            # order: dirs then files
+            first_file_i = findfirst(e -> !e.is_dir, non_parent)
+            last_dir_i = findlast(e -> e.is_dir, non_parent)
+            if first_file_i !== nothing && last_dir_i !== nothing
+                @test last_dir_i < first_file_i
+            end
+
+            # show_hidden
+            ents_h = list_browser_entries(dir; show_hidden = true)
+            names_h = [e.name for e in ents_h]
+            @test ".hidden_dir" in names_h
+            @test ".secret.json" in names_h
+
+            # cap
+            ents_cap = list_browser_entries(dir; max_entries = 2)
+            @test ents_cap isa Vector{FileBrowserEntry}
+            @test length(ents_cap) == 2
+
+            # custom pred
+            ents_txt = list_browser_entries(dir; file_pred = n -> endswith(n, ".txt"))
+            @test any(e -> e.name == "c.txt", ents_txt)
+            @test !any(e -> endswith(lowercase(e.name), ".json") && !e.is_dir, ents_txt)
+
+            # not a directory
+            err = list_browser_entries(joinpath(dir, "nope_missing_$(rand(UInt32))"))
+            @test err isa AbstractString
+            @test occursin("browser err", err)
+        end
+    end
+
+    @testset "XDG helpers + default index path" begin
+        # default when XDG_DATA_HOME empty → ~/.local/share/tachikoma-tui/...
+        old = get(ENV, "XDG_DATA_HOME", nothing)
+        try
+            delete!(ENV, "XDG_DATA_HOME")
+            p = default_graph_config_index_path()
+            @test endswith(p, joinpath("tachikoma-tui", "graph_config_index.json"))
+            @test occursin(".local", p) || occursin("share", p)
+            # non-empty XDG_DATA_HOME
+            mktempdir() do xdg
+                ENV["XDG_DATA_HOME"] = xdg
+                p2 = default_graph_config_index_path()
+                @test p2 == joinpath(xdg, "tachikoma-tui", "graph_config_index.json")
+                @test WB._tachikoma_data_dir() == joinpath(xdg, "tachikoma-tui")
+            end
+        finally
+            if old === nothing
+                delete!(ENV, "XDG_DATA_HOME")
+            else
+                ENV["XDG_DATA_HOME"] = old
+            end
+        end
+    end
+
+    @testset "graph config index: mkpath write, read, upsert, cap, corrupt" begin
+        mktempdir() do root
+            idx_path = joinpath(root, "nested", "deep", "graph_config_index.json")
+            @test !isdir(dirname(idx_path))
+
+            # missing → empty
+            @test read_graph_config_index(idx_path) == GraphConfigIndexEntry[]
+
+            e1 = GraphConfigIndexEntry(
+                name = "fab-dense",
+                path = "/tmp/a/fab-dense.json",
+                saved_at = "2026-07-13T10:00:00",
+                last_used_at = "2026-07-13T12:00:00",
+                summary = Dict{String,Any}("weco_on" => 5, "lines_off" => 1, "styles" => "mixed"),
+            )
+            e2 = GraphConfigIndexEntry(
+                name = "loose",
+                path = "/tmp/b/loose.json",
+                saved_at = "2026-07-13T11:00:00",
+                last_used_at = "2026-07-13T13:00:00",
+                summary = Dict{String,Any}("weco_on" => 8, "lines_off" => 0, "styles" => "solid"),
+            )
+            entries = GraphConfigIndexEntry[e1, e2]
+            err = write_graph_config_index(idx_path, entries)
+            @test err === nothing
+            @test isfile(idx_path)
+            @test isdir(dirname(idx_path))  # mkpath
+
+            loaded = read_graph_config_index(idx_path)
+            @test length(loaded) == 2
+            paths = sort([e.path for e in loaded])
+            @test paths == sort([abspath("/tmp/a/fab-dense.json"), abspath("/tmp/b/loose.json")]) ||
+                  paths == sort(["/tmp/a/fab-dense.json", "/tmp/b/loose.json"])
+            # name preserved
+            by_name = Dict(e.name => e for e in loaded)
+            @test haskey(by_name, "fab-dense")
+            @test by_name["fab-dense"].summary["weco_on"] == 5
+
+            # path-keyed upsert: same path replaces
+            ents = read_graph_config_index(idx_path)
+            e1b = GraphConfigIndexEntry(
+                name = "fab-dense-v2",
+                path = e1.path,
+                saved_at = "2026-07-13T14:00:00",
+                last_used_at = "2026-07-13T15:00:00",
+                summary = Dict{String,Any}("weco_on" => 6, "lines_off" => 0, "styles" => "dashed"),
+            )
+            upsert_graph_config_index_entry!(ents, e1b)
+            @test length(ents) == 2
+            hit = findfirst(e -> abspath(e.path) == abspath(e1.path), ents)
+            @test hit !== nothing
+            @test ents[hit].name == "fab-dense-v2"
+            @test ents[hit].summary["weco_on"] == 6
+
+            # new path pushes
+            e3 = GraphConfigIndexEntry(
+                name = "third",
+                path = "/tmp/c/third.json",
+                saved_at = "2026-07-13T16:00:00",
+                last_used_at = "2026-07-13T16:00:00",
+                summary = Dict{String,Any}(),
+            )
+            upsert_graph_config_index_entry!(ents, e3)
+            @test length(ents) == 3
+
+            # empty path no-op
+            n_before = length(ents)
+            upsert_graph_config_index_entry!(ents, GraphConfigIndexEntry(name = "x", path = ""))
+            @test length(ents) == n_before
+
+            # cap 50: fill beyond cap, oldest last_used_at dropped
+            bulk = GraphConfigIndexEntry[]
+            for i in 1:55
+                # zero-padded so string order matches insertion order
+                ts = "t" * lpad(string(i), 3, '0')
+                push!(bulk, GraphConfigIndexEntry(
+                    name = "n$i",
+                    path = "/tmp/cap/cfg_$i.json",
+                    saved_at = ts,
+                    last_used_at = ts,
+                    summary = Dict{String,Any}(),
+                ))
+            end
+            capped = GraphConfigIndexEntry[]
+            for e in bulk
+                upsert_graph_config_index_entry!(capped, e; cap = 50)
+            end
+            @test length(capped) == 50
+            # oldest should be gone (t001..t005)
+            used = Set(e.last_used_at for e in capped)
+            @test !("t001" in used)
+            @test !("t005" in used)
+            @test "t055" in used
+            @test "t006" in used
+
+            # corrupt / bad version → empty
+            bad = joinpath(root, "bad_index.json")
+            open(bad, "w") do io; write(io, "{not json"); end
+            @test read_graph_config_index(bad) == GraphConfigIndexEntry[]
+            open(bad, "w") do io
+                write(io, """{"version":99,"kind":"graph_config_index","entries":[{"name":"x","path":"/p"}]}""")
+            end
+            @test read_graph_config_index(bad) == GraphConfigIndexEntry[]
+            open(bad, "w") do io
+                write(io, """{"version":1,"kind":"other","entries":[{"name":"x","path":"/p"}]}""")
+            end
+            @test read_graph_config_index(bad) == GraphConfigIndexEntry[]
+
+            # graph_preset_index_summary + entry_from_preset
+            p = GraphPreset(
+                name = "sum",
+                show_chart_lines = copy(DEFAULT_CHART_LINES),
+                chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+                visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+                enabled_rules = copy(DEFAULT_WECO_RULES),
+                path = joinpath(root, "sum.json"),
+            )
+            p.show_chart_lines["cl"] = false
+            p.enabled_rules["WECO-6"] = true
+            s = graph_preset_index_summary(p)
+            @test s["lines_off"] == 1
+            @test s["weco_on"] == count(values(p.enabled_rules))
+            @test s["styles"] isa AbstractString
+            ent = graph_config_index_entry_from_preset(p)
+            @test ent isa GraphConfigIndexEntry
+            @test ent.name == "sum"
+            @test abspath(ent.path) == abspath(p.path)
+            @test ent.summary["lines_off"] == 1
+            @test graph_config_index_entry_from_preset(GraphPreset(name = "nopath")) === nothing
+        end
+    end
+
+    @testset "graph_preset_to_dict include_path + from_dict path optional" begin
+        p = GraphPreset(
+            name = "with-path",
+            show_chart_lines = copy(DEFAULT_CHART_LINES),
+            chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+            visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+            enabled_rules = copy(DEFAULT_WECO_RULES),
+            path = "/home/op/configs/with-path.json",
+        )
+        p.show_chart_lines["specs"] = false
+
+        # default / standalone: no path key
+        d0 = graph_preset_to_dict(p)
+        @test !haskey(d0, "path")
+        d_false = graph_preset_to_dict(p; include_path = false)
+        @test !haskey(d_false, "path")
+        # session: include_path true
+        d_true = graph_preset_to_dict(p; include_path = true)
+        @test d_true["path"] == "/home/op/configs/with-path.json"
+        @test d_true["name"] == "with-path"
+        # empty path never written even with include_path
+        p_empty = GraphPreset(name = "mem", path = "")
+        @test !haskey(graph_preset_to_dict(p_empty; include_path = true), "path")
+
+        # from_dict optional path
+        p2 = graph_preset_from_dict(d_true)
+        @test p2 isa GraphPreset
+        @test p2.path == "/home/op/configs/with-path.json"
+        @test p2.show_chart_lines["specs"] === false
+        p3 = graph_preset_from_dict(d0)
+        @test p3 isa GraphPreset
+        @test p3.path == ""
+
+        # standalone file never writes path even if model has path
+        mktempdir() do dir
+            fpath = joinpath(dir, "portable.json")
+            @test save_graph_preset(p, fpath) === nothing
+            raw = read(fpath, String)
+            @test !occursin("/home/op/configs", raw)
+            @test !occursin("\"path\"", raw)
+            loaded = load_graph_preset(fpath)
+            @test loaded isa GraphPreset
+            @test loaded.path == ""
+            @test loaded.name == "with-path"
+        end
+
+        # session round-trip restores path via workbench_to_dict include_path=true
+        d = generate_spc_workbench_data(8; seed = 41)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        push!(m.graph_presets, p)
+        wd = workbench_to_dict(m)
+        @test haskey(wd, "graph_presets")
+        @test wd["graph_presets"][1]["path"] == p.path
+        path = joinpath(tempdir(), "spc_wb_path_rt_$(rand(UInt32)).json")
+        try
+            @test save_workbench(m, path) === nothing
+            loaded_m = load_workbench(path)
+            @test loaded_m isa SPCWorkbenchModel
+            @test length(loaded_m.graph_presets) == 1
+            @test loaded_m.graph_presets[1].path == p.path
+            @test loaded_m.graph_presets[1].name == "with-path"
+        finally
+            isfile(path) && rm(path; force = true)
+        end
+    end
+
+end
+
+end # module TestSPCWorkbenchBrowserIndexIO

@@ -436,26 +436,35 @@ function _style_dict_from_json(v, defaults::Dict{String,String})::Union{Dict{Str
 end
 
 """
-    graph_preset_to_dict(p) -> Dict
+    graph_preset_to_dict(p; include_path=false) -> Dict
 
 Serialize one GraphPreset (no series data). Used for session `graph_presets`
 array and standalone preset files.
+
+`include_path=true` embeds host-local `path` when non-empty (session list only).
+Standalone file save always uses `include_path=false` so portable JSON never
+embeds absolute paths (KD-SE-4).
 """
-function graph_preset_to_dict(p::GraphPreset)::Dict{String,Any}
-    return Dict{String,Any}(
+function graph_preset_to_dict(p::GraphPreset; include_path::Bool = false)::Dict{String,Any}
+    d = Dict{String,Any}(
         "name" => p.name,
         "show_chart_lines" => Dict{String,Any}(k => v for (k, v) in p.show_chart_lines),
         "chart_line_styles" => Dict{String,Any}(k => v for (k, v) in p.chart_line_styles),
         "visual_prefs" => Dict{String,Any}(k => v for (k, v) in p.visual_prefs),
         "enabled_rules" => Dict{String,Any}(k => v for (k, v) in p.enabled_rules),
     )
+    if include_path && !isempty(strip(p.path))
+        d["path"] = p.path
+    end
+    return d
 end
 
 """
     graph_preset_from_dict(d) -> GraphPreset | String
 
 Parse one GraphPreset. Fail-closed on bad types / unknown line styles.
-Missing optional fields use module defaults.
+Missing optional fields use module defaults. Optional `path` is read when present
+(session / index); standalone files typically omit it.
 """
 function graph_preset_from_dict(d)::Union{GraphPreset,String}
     d isa AbstractDict || return "graph preset must be an object"
@@ -473,12 +482,16 @@ function graph_preset_from_dict(d)::Union{GraphPreset,String}
     rules = _rules_from_json(get(d, "enabled_rules", nothing))
     rules isa String && return rules
 
+    path_raw = get(d, "path", "")
+    path_s = path_raw isa AbstractString ? String(path_raw) : ""
+
     return GraphPreset(
         name = n,
         show_chart_lines = lines,
         chart_line_styles = styles,
         visual_prefs = vis,
         enabled_rules = rules,
+        path = path_s,
     )
 end
 
@@ -501,7 +514,8 @@ Write a standalone graph-preset JSON file (`kind=graph_preset`, `version=1`).
 """
 function save_graph_preset(p::GraphPreset, path::AbstractString)::Union{Nothing,String}
     try
-        d = graph_preset_to_dict(p)
+        # Standalone file body never embeds host paths (KD-SE-4)
+        d = graph_preset_to_dict(p; include_path = false)
         d["kind"] = "graph_preset"
         d["version"] = 1
         open(path, "w") do io
@@ -539,6 +553,292 @@ function load_graph_preset(path::AbstractString)::Union{GraphPreset,String}
     p = graph_preset_from_dict(d)
     p isa String && return "load err: $p"
     return p
+end
+
+# ── File browser listing + graph-config index (PR2 pure IO) ─────────────
+
+"""One directory or file row for the in-TUI file explorer (PR2 listing / PR3 UI)."""
+@kwdef struct FileBrowserEntry
+    name::String
+    path::String
+    is_dir::Bool
+    is_parent::Bool = false
+end
+
+"""
+    list_browser_entries(cwd; show_hidden=false, file_pred, max_entries=500)
+        -> Vector{FileBrowserEntry} | String
+
+Pure directory listing for the file explorer (KD-SE-15).
+
+- Resolves `cwd` with `abspath(expanduser(...))`.
+- Includes parent `..` when not filesystem root.
+- Directories first (alpha), then files matching `file_pred` (default `*.json`
+  case-insensitive).
+- Hidden names (leading `.`) omitted unless `show_hidden`.
+- Caps at `max_entries` (parent `..` counts toward the cap when present).
+- Errors → string (`"browser err: …"`); never throws into `update!`.
+"""
+function list_browser_entries(
+    cwd::AbstractString;
+    show_hidden::Bool = false,
+    file_pred = (name -> endswith(lowercase(name), ".json")),
+    max_entries::Int = 500,
+)::Union{Vector{FileBrowserEntry},String}
+    try
+        root = abspath(expanduser(String(cwd)))
+        isdir(root) || return "browser err: not a directory: $root"
+        max_entries < 1 && return FileBrowserEntry[]
+
+        entries = FileBrowserEntry[]
+        parent = dirname(root)
+        if parent != root  # not filesystem root
+            push!(entries, FileBrowserEntry(; name = "..", path = parent, is_dir = true, is_parent = true))
+        end
+
+        names = readdir(root)
+        dirs = String[]
+        files = String[]
+        for name in names
+            if !show_hidden && startswith(name, ".")
+                continue
+            end
+            full = joinpath(root, name)
+            if isdir(full)
+                push!(dirs, name)
+            elseif isfile(full) && file_pred(name)
+                push!(files, name)
+            end
+        end
+        sort!(dirs)
+        sort!(files)
+        for name in dirs
+            length(entries) >= max_entries && break
+            push!(
+                entries,
+                FileBrowserEntry(; name = name, path = joinpath(root, name), is_dir = true, is_parent = false),
+            )
+        end
+        for name in files
+            length(entries) >= max_entries && break
+            push!(
+                entries,
+                FileBrowserEntry(; name = name, path = joinpath(root, name), is_dir = false, is_parent = false),
+            )
+        end
+        return entries
+    catch e
+        return "browser err: $(sprint(showerror, e))"
+    end
+end
+
+# ── Graph config index (XDG data dir; KD-SE-5) ──────────────────────────
+
+const GRAPH_CONFIG_INDEX_CAP = 50
+const GRAPH_CONFIG_INDEX_VERSION = 1
+const GRAPH_CONFIG_INDEX_KIND = "graph_config_index"
+
+"""One known graph-config file reference (no full preset body)."""
+@kwdef mutable struct GraphConfigIndexEntry
+    name::String = ""
+    path::String = ""
+    saved_at::String = ""
+    last_used_at::String = ""
+    summary::Dict{String,Any} = Dict{String,Any}()
+end
+
+"""XDG data base + `tachikoma-tui` subdir (KD-SE-5)."""
+function _tachikoma_data_dir()::String
+    xdg = get(ENV, "XDG_DATA_HOME", "")
+    base = !isempty(strip(xdg)) ? expanduser(strip(xdg)) :
+           joinpath(homedir(), ".local", "share")
+    return joinpath(base, "tachikoma-tui")
+end
+
+"""Default absolute path for the durable graph-config index file."""
+function default_graph_config_index_path()::String
+    return joinpath(_tachikoma_data_dir(), "graph_config_index.json")
+end
+
+"""ISO-ish local timestamp without a Dates dependency (stdlib pin)."""
+function _index_timestamp()::String
+    # Libc.strftime is available via Base; format is stable for MRU string sort
+    return Libc.strftime("%Y-%m-%dT%H:%M:%S", time())
+end
+
+"""Summary chips for index rows (weco_on / lines_off / styles)."""
+function graph_preset_index_summary(p::GraphPreset)::Dict{String,Any}
+    styles = unique(collect(values(p.chart_line_styles)))
+    style_s = length(styles) == 1 ? String(first(styles)) : "mixed"
+    return Dict{String,Any}(
+        "weco_on" => count(values(p.enabled_rules)),
+        "lines_off" => count(!, values(p.show_chart_lines)),
+        "styles" => style_s,
+    )
+end
+
+function _index_entry_to_dict(e::GraphConfigIndexEntry)::Dict{String,Any}
+    return Dict{String,Any}(
+        "name" => e.name,
+        "path" => e.path,
+        "saved_at" => e.saved_at,
+        "last_used_at" => e.last_used_at,
+        "summary" => Dict{String,Any}(k => v for (k, v) in e.summary),
+    )
+end
+
+function _index_entry_from_dict(d)::Union{GraphConfigIndexEntry,Nothing}
+    d isa AbstractDict || return nothing
+    path = get(d, "path", nothing)
+    path isa AbstractString || return nothing
+    ps = strip(String(path))
+    isempty(ps) && return nothing
+    name_raw = get(d, "name", "")
+    name_s = name_raw isa AbstractString ? String(name_raw) : ""
+    saved = get(d, "saved_at", "")
+    saved_s = saved isa AbstractString ? String(saved) : ""
+    used = get(d, "last_used_at", "")
+    used_s = used isa AbstractString ? String(used) : ""
+    sum_raw = get(d, "summary", nothing)
+    summary = Dict{String,Any}()
+    if sum_raw isa AbstractDict
+        for (k, v) in sum_raw
+            summary[String(k)] = v
+        end
+    end
+    return GraphConfigIndexEntry(;
+        name = name_s,
+        path = ps,
+        saved_at = saved_s,
+        last_used_at = used_s,
+        summary = summary,
+    )
+end
+
+"""
+    read_graph_config_index(path) -> Vector{GraphConfigIndexEntry}
+
+Load index entries. Missing file, corrupt JSON, or unknown version → empty
+vector (fail-closed; never throws).
+"""
+function read_graph_config_index(path::AbstractString)::Vector{GraphConfigIndexEntry}
+    try
+        p = String(path)
+        isfile(p) || return GraphConfigIndexEntry[]
+        text = read(p, String)
+        d = JSON.parse(text)
+        d isa AbstractDict || return GraphConfigIndexEntry[]
+        ver = get(d, "version", nothing)
+        ver_ok = ver isa Integer ? Int(ver) == GRAPH_CONFIG_INDEX_VERSION :
+                 ver isa AbstractFloat ? Int(ver) == GRAPH_CONFIG_INDEX_VERSION :
+                 ver isa AbstractString ? tryparse(Int, String(ver)) == GRAPH_CONFIG_INDEX_VERSION :
+                 false
+        ver_ok || return GraphConfigIndexEntry[]
+        kind = get(d, "kind", nothing)
+        if kind !== nothing && String(kind) != GRAPH_CONFIG_INDEX_KIND
+            return GraphConfigIndexEntry[]
+        end
+        ents = get(d, "entries", nothing)
+        ents isa AbstractVector || return GraphConfigIndexEntry[]
+        out = GraphConfigIndexEntry[]
+        for item in ents
+            e = _index_entry_from_dict(item)
+            e === nothing && continue
+            push!(out, e)
+        end
+        return out
+    catch
+        return GraphConfigIndexEntry[]
+    end
+end
+
+"""
+    write_graph_config_index(path, entries) -> nothing | String
+
+Write index JSON. Creates parent dirs via `mkpath`. Prefers atomic temp+rename.
+Fail-closed error string on failure (`"index err: …"`); never throws into UI.
+"""
+function write_graph_config_index(
+    path::AbstractString,
+    entries::AbstractVector{<:GraphConfigIndexEntry},
+)::Union{Nothing,String}
+    tmp = ""
+    try
+        p = String(path)
+        dir = dirname(abspath(expanduser(p)))
+        try
+            mkpath(dir)
+        catch e
+            return "index err: mkpath failed ($(sprint(showerror, e)))"
+        end
+        d = Dict{String,Any}(
+            "version" => GRAPH_CONFIG_INDEX_VERSION,
+            "kind" => GRAPH_CONFIG_INDEX_KIND,
+            "entries" => [_index_entry_to_dict(e) for e in entries],
+        )
+        tmp = p * ".tmp." * string(rand(UInt32); base = 16)
+        open(tmp, "w") do io
+            JSON.print(io, d)
+        end
+        mv(tmp, p; force = true)
+        tmp = ""
+        return nothing
+    catch e
+        try
+            !isempty(tmp) && isfile(tmp) && rm(tmp; force = true)
+        catch
+        end
+        return "index err: $(sprint(showerror, e))"
+    end
+end
+
+"""
+    upsert_graph_config_index_entry!(entries, entry; cap=50) -> nothing
+
+Path-keyed upsert (absolute path identity). Updates name/summary/timestamps from
+`entry`. Enforces `cap` by dropping oldest `last_used_at` (empty timestamps
+sort first / drop first). Empty path → no-op.
+"""
+function upsert_graph_config_index_entry!(
+    entries::Vector{GraphConfigIndexEntry},
+    entry::GraphConfigIndexEntry;
+    cap::Int = GRAPH_CONFIG_INDEX_CAP,
+)::Nothing
+    raw = strip(entry.path)
+    isempty(raw) && return nothing
+    path = abspath(expanduser(raw))
+    entry.path = path
+    i = findfirst(e -> abspath(expanduser(strip(e.path))) == path, entries)
+    if i !== nothing
+        entries[i] = entry
+    else
+        push!(entries, entry)
+    end
+    if cap > 0 && length(entries) > cap
+        # Drop oldest last_used_at until within cap (stable for ties: first min wins)
+        while length(entries) > cap
+            _, oldest = findmin(e -> e.last_used_at, entries)
+            deleteat!(entries, oldest)
+        end
+    end
+    return nothing
+end
+
+"""Build an index entry from a GraphPreset (requires non-empty path)."""
+function graph_config_index_entry_from_preset(
+    p::GraphPreset;
+    now::AbstractString = _index_timestamp(),
+)::Union{GraphConfigIndexEntry,Nothing}
+    raw = strip(p.path)
+    isempty(raw) && return nothing
+    ts = String(now)
+    return GraphConfigIndexEntry(;
+        name = p.name,
+        path = abspath(expanduser(raw)),
+        saved_at = ts,
+        last_used_at = ts,
+        summary = graph_preset_index_summary(p),
+    )
 end
 
 function _tools_registry_from_json(v)::Union{Vector{ToolEntry},String}
@@ -952,9 +1252,10 @@ function workbench_to_dict(m::SPCWorkbenchModel)::Dict
         "visual_prefs" => Dict{String,Any}(k => v for (k, v) in m.visual_prefs),
         "paused" => m.paused,
     )
-    # Omit empty presets (keep fixtures small; same policy as table)
+    # Omit empty presets (keep fixtures small; same policy as table).
+    # Session embeds optional host `path` so list identity survives restart (KD-SE-4).
     if !isempty(m.graph_presets)
-        d["graph_presets"] = [graph_preset_to_dict(p) for p in m.graph_presets]
+        d["graph_presets"] = [graph_preset_to_dict(p; include_path = true) for p in m.graph_presets]
     end
     # Omit empty table (KD-P2-18)
     if !isempty(m.table.columns) || !isempty(m.table.rows)
@@ -1478,6 +1779,12 @@ end
 export workbench_to_dict, workbench_from_dict, workbench_from_dict!
 export save_workbench, load_workbench, load_workbench!
 export graph_preset_to_dict, graph_preset_from_dict, save_graph_preset, load_graph_preset
+export FileBrowserEntry, list_browser_entries
+export GraphConfigIndexEntry, GRAPH_CONFIG_INDEX_CAP
+export _tachikoma_data_dir, default_graph_config_index_path
+export read_graph_config_index, write_graph_config_index
+export upsert_graph_config_index_entry!, graph_preset_index_summary
+export graph_config_index_entry_from_preset
 export extract_html_spc_state, extract_html_spc_state_file
 export html_state_to_workbench, html_state_to_workbench!
 export load_html_archive, load_html_archive!

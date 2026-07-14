@@ -43,6 +43,12 @@ export workbench_to_dict, workbench_from_dict, workbench_from_dict!
 export export_csv_series, chart_for_export
 export save_workbench, load_workbench, load_workbench!
 export graph_preset_to_dict, graph_preset_from_dict, save_graph_preset, load_graph_preset
+export FileBrowserEntry, list_browser_entries
+export GraphConfigIndexEntry, GRAPH_CONFIG_INDEX_CAP
+export default_graph_config_index_path
+export read_graph_config_index, write_graph_config_index
+export upsert_graph_config_index_entry!, graph_preset_index_summary
+export graph_config_index_entry_from_preset
 export extract_html_spc_state, extract_html_spc_state_file
 export html_state_to_workbench, html_state_to_workbench!
 export load_html_archive, load_html_archive!

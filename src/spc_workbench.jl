@@ -593,13 +593,18 @@ _pref_on(m, key::AbstractString) = get(m.visual_prefs, key, get(DEFAULT_VISUAL_P
 # Whole set: what is on the graph (line visibility), coloring/styles,
 # series/layout visual prefs, and what WECO rules are calculated.
 
-"""Named snapshot of graph presentation + calculation settings (no series data)."""
+"""Named snapshot of graph presentation + calculation settings (no series data).
+
+Optional `path` is host-local only (session list / index). Standalone graph-config
+JSON files never embed it (see `graph_preset_to_dict(; include_path)`).
+"""
 @kwdef mutable struct GraphPreset
     name::String = "default"
     show_chart_lines::Dict{String,Bool} = copy(DEFAULT_CHART_LINES)
     chart_line_styles::Dict{String,String} = copy(DEFAULT_CHART_LINE_STYLES)
     visual_prefs::Dict{String,Bool} = copy(DEFAULT_VISUAL_PREFS)
     enabled_rules::Dict{String,Bool} = copy(DEFAULT_WECO_RULES)
+    path::String = ""  # local disk path; empty = memory/legacy only
 end
 
 # ── Saved-list body chips (PR1 path-free polish; KD-SE-10) ───────────────
@@ -2298,15 +2303,42 @@ function _graph_config_name_from_path(path::AbstractString)::String
     return isempty(n) ? "default" : n
 end
 
-"""Replace-or-push preset by exact name. Stores provided value — does NOT re-capture model (KD-UC-12)."""
+"""
+Replace-or-push preset with path-keyed identity (KD-SE-17).
+
+1. If `abspath(p.path)` non-empty: replace first entry with same abspath; else push.
+2. Else (path empty): replace first entry with same exact name **and** empty path; else push.
+3. Never replace entry A by name when A has a different non-empty path.
+
+Stores provided value — does NOT re-capture model (KD-UC-12).
+"""
 function _upsert_graph_preset!(m::SPCWorkbenchModel, p::GraphPreset)
     n = strip(p.name)
     isempty(n) && return "empty preset name"
-    for i in eachindex(m.graph_presets)
-        if m.graph_presets[i].name == n
+    raw_path = strip(p.path)
+    path = isempty(raw_path) ? "" : abspath(raw_path)
+    if !isempty(path)
+        p.path = path
+        i = findfirst(
+            e -> !isempty(strip(e.path)) && abspath(strip(e.path)) == path,
+            m.graph_presets,
+        )
+        if i !== nothing
             m.graph_presets[i] = p
             return nothing
         end
+        push!(m.graph_presets, p)
+        return nothing
+    end
+    # path empty: match name only among path-less entries
+    p.path = ""
+    j = findfirst(
+        e -> e.name == n && isempty(strip(e.path)),
+        m.graph_presets,
+    )
+    if j !== nothing
+        m.graph_presets[j] = p
+        return nothing
     end
     push!(m.graph_presets, p)
     return nothing
