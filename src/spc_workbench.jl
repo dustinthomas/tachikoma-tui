@@ -3575,6 +3575,7 @@ end
 
 """Open full-page Config (Rules / Lines / Visual / Saved)."""
 function _open_config!(m::SPCWorkbenchModel; tab::Symbol = :weco)
+    _clear_weco_explain!(m)
     m.view_mode = :config
     m.config_tab = tab
     m.config_selected = 1
@@ -4993,6 +4994,14 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return
     end
 
+    # WECO explain open: Esc / q / Q close popup only (KD-WB-5) — before quit
+    if m.weco_explain_open &&
+       (evt.key == :escape || (evt.key == :char && (evt.char == 'q' || evt.char == 'Q')))
+        _clear_weco_explain!(m)
+        m.last_event = "weco explain closed"
+        return
+    end
+
     # Global quit (dashboard only — modes already returned above)
     if evt.key == :escape || (evt.key == :char && evt.char == 'q')
         m.quit = true
@@ -5003,6 +5012,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         c = evt.char
         if c == 'm' || c == 'M'
             # Open chart library (GC-PR2)
+            _clear_weco_explain!(m)
             m.view_mode = :library
             m.library_selected = clamp(m.active, 1, max(1, length(m.charts)))
             m.pending_delete = false
@@ -5013,6 +5023,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             return
         elseif c == 'x' || c == 'X'
             # Open tools registry (P2-PR4 / KD-P2-6)
+            _clear_weco_explain!(m)
             m.view_mode = :tools
             ntools = length(m.tools)
             m.tools_selected = ntools >= 1 ? clamp(m.tools_selected, 1, ntools) : 1
@@ -5028,6 +5039,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             return
         elseif c == 'd' || c == 'D'
             # SharedTable grid (P2-PR7 / KD-P2-20) — dashboard only; library/tools keep d=delete
+            _clear_weco_explain!(m)
             m.view_mode = :table
             m.table_editing = false
             m.table_buf = ""
@@ -5035,6 +5047,10 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.pending_delete = false
             _sync_table_scroll!(m)
             m.last_event = "table open"
+            return
+        elseif c == 'w' || c == 'W'
+            # WECO explain open/toggle (dashboard only; library/config use w for I/O)
+            _weco_key_toggle!(m)
             return
         elseif _handle_filter_char!(m, c)
             # GC-PR4: f cycles filter prompt; F clears all (dashboard)
@@ -5111,15 +5127,18 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.last_event = m.keys_panel_expanded ? "keys expanded" : "keys collapsed"
             return
         elseif c == 'h' || c == 'H'
+            _clear_weco_explain!(m)
             m.view_mode = :help
             m.last_event = "help open"
             return
         elseif c == 'k' || c == 'K'
+            _clear_weco_explain!(m)
             m.view_mode = :keymap
             m.last_event = "keymap open"
             return
         elseif c == 'b' || c == 'B'
             # PR6: open chart builder for active chart (manual limits + mapping)
+            _clear_weco_explain!(m)
             m.view_mode = :builder
             m.builder_selected = 1
             m.builder_editing = false
@@ -5177,6 +5196,60 @@ function _clear_weco_explain!(m::SPCWorkbenchModel)
     return nothing
 end
 
+"""First enabled WECO rule id on chart (WECO-1…8 order), else \"WECO-1\"."""
+function _weco_first_enabled_rule(ch)::String
+    for k in 1:8
+        rid = "WECO-$k"
+        get(ch.enabled_rules, rid, false) && return rid
+    end
+    return "WECO-1"
+end
+
+"""Dashboard hotkey w/W: toggle close, or open with hover/first-enabled selection (KD-WB-3)."""
+function _weco_key_toggle!(m::SPCWorkbenchModel)
+    if m.weco_explain_open
+        _clear_weco_explain!(m)
+        m.last_event = "weco explain closed"
+        return nothing
+    end
+    _ensure_charts!(m)
+    if isempty(m.charts) || length(m.data.values) == 0
+        m.last_event = "nothing to explain"
+        return nothing
+    end
+    ch = current_chart(m)
+    ctx = resolve_chart_render_context(ch; sigma_method = :mr)
+    # Match side-panel detect (data.values) for index alignment with hover
+    viols = weco_detect(ch.data.values, ctx.lz.cl, ctx.lz.sigma; enabled_rules = ch.enabled_rules)
+    rules_at = m.hovered === nothing ? String[] : weco_rules_at_index(viols, m.hovered)
+    if length(rules_at) >= 2
+        m.weco_explain_open = true
+        m.weco_explain_mode = :point
+        m.weco_explain_rule = rules_at[1]
+        m.weco_explain_index = m.hovered
+        m.last_event = "weco explain #$(m.hovered)"
+    elseif length(rules_at) == 1
+        rid = rules_at[1]
+        m.weco_explain_open = true
+        m.weco_explain_mode = :rule
+        m.weco_explain_rule = rid
+        m.weco_explain_index = m.hovered
+        m.last_event = "weco explain $rid"
+    else
+        rid = if m.weco_explain_rule !== nothing
+            m.weco_explain_rule
+        else
+            _weco_first_enabled_rule(ch)
+        end
+        m.weco_explain_open = true
+        m.weco_explain_mode = :rule
+        m.weco_explain_rule = rid
+        m.weco_explain_index = m.hovered  # may be nothing
+        m.last_event = "weco explain $rid"
+    end
+    return nothing
+end
+
 """Open/retarget/toggle rule explain from bubble press (does not touch drag/hover)."""
 function _weco_bubble_press!(m::SPCWorkbenchModel, k::Int)
     rid = "WECO-$k"
@@ -5189,6 +5262,96 @@ function _weco_bubble_press!(m::SPCWorkbenchModel, k::Int)
         m.weco_explain_rule = rid
         m.weco_explain_index = m.hovered  # may be nothing
         m.last_event = "weco explain $rid"
+    end
+    return nothing
+end
+
+"""
+Paint WECO explain popup right-anchored over primary `plot_area` (KD-WB-2/14).
+Sets `m.weco_popup_rect` for hit-test; skips when plot too narrow (<16).
+Re-queries viols each paint so At-line stays live.
+"""
+function _render_weco_explain_popup!(buf, plot_area::Rect, m::SPCWorkbenchModel)
+    if !m.weco_explain_open
+        m.weco_popup_rect = Rect(0, 0, 0, 0)
+        return nothing
+    end
+    if plot_area.width < 16 || plot_area.height < 4
+        m.weco_popup_rect = Rect(0, 0, 0, 0)
+        m.last_event = isempty(m.last_event) ? "popup too narrow" : m.last_event
+        return nothing
+    end
+    _ensure_charts!(m)
+    isempty(m.charts) && return nothing
+    ch = current_chart(m)
+    ctx = resolve_chart_render_context(ch; sigma_method = :mr)
+    viols = weco_detect(ch.data.values, ctx.lz.cl, ctx.lz.sigma; enabled_rules = ch.enabled_rules)
+    rule = something(m.weco_explain_rule, "WECO-1")
+    enabled = get(ch.enabled_rules, rule, false)
+    mode = m.weco_explain_mode  # :rule | :point
+    rules_at = m.weco_explain_index === nothing ? String[] :
+        weco_rules_at_index(viols, m.weco_explain_index)
+    content = weco_explain_content(mode; rule, enabled, viols,
+        index = m.weco_explain_index, rules_at)
+
+    avail = max(0, plot_area.width - 1)
+    avail < 16 && (m.weco_popup_rect = Rect(0, 0, 0, 0); return nothing)
+    desired = 36
+    box_w = clamp(desired, min(28, max(12, avail)), min(48, avail))
+    body_maxw = max(4, box_w - 2)
+    body_lines = [_side_trunc(ln, body_maxw) for ln in content.lines]
+    box_h = 2 + length(body_lines)   # Block borders + body (no footer row)
+    box_h = min(box_h, plot_area.height)
+    box_h < 3 && (m.weco_popup_rect = Rect(0, 0, 0, 0); return nothing)
+
+    # Right edge at side_outer.x - 2 (gap ≥1 before side), else side_area.x - 2
+    anchor_right = if m.side_outer.width > 0
+        m.side_outer.x - 2
+    elseif m.side_area.width > 0
+        m.side_area.x - 2
+    else
+        plot_area.x + plot_area.width - 1
+    end
+    box_x = anchor_right - box_w + 1
+    box_x = max(plot_area.x, box_x)
+    # If still overflows plot right, clamp left and shrink width
+    if box_x + box_w - 1 > plot_area.x + plot_area.width - 1
+        box_w = max(12, plot_area.x + plot_area.width - box_x)
+        body_maxw = max(4, box_w - 2)
+        body_lines = [_side_trunc(ln, body_maxw) for ln in content.lines]
+        box_h = min(2 + length(body_lines), plot_area.height)
+    end
+
+    # Vertical: prefer centered on bubble row; clamp into plot_area
+    cy = m.weco_bubble_geom !== nothing ? m.weco_bubble_geom.y :
+        (plot_area.y + plot_area.height ÷ 2)
+    box_y = cy - box_h ÷ 2
+    max_y = plot_area.y + plot_area.height - box_h
+    box_y = clamp(box_y, plot_area.y, max(plot_area.y, max_y))
+
+    rect = Rect(box_x, box_y, box_w, box_h)
+    m.weco_popup_rect = rect
+    _clear_rect!(buf, rect)
+    title_s = _side_trunc(content.title, max(4, box_w - 2))
+    inner = render(
+        Block(
+            title = title_s,
+            border_style = tstyle(:border),
+            title_style = tstyle(:accent, bold = true),
+        ),
+        rect,
+        buf,
+    )
+    if inner.width < 2 || inner.height < 1
+        return nothing
+    end
+    maxw = max(1, inner.width)
+    bot = bottom(inner)
+    y = inner.y
+    for ln in body_lines
+        y > bot && break
+        set_string!(buf, inner.x, y, _side_trunc(ln, maxw), tstyle(:text))
+        y += 1
     end
     return nothing
 end
@@ -5695,9 +5858,11 @@ function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
         (:binds, [("r/z", "reset"), ("wheel", "zoom"), ("drag", "pan")]),
         (:section, "SPECS / WECO / CONFIG"),
         (:binds, [("u", "USL"), ("t", "Target"), ("l", "LSL"), ("s", "clear")]),
-        (:binds, [("1-8", "WECO"), ("c", "config"), ("v", "lines"), ("o", "visual")]),
+        (:binds, [("1-8", "WECO"), ("w", "explain"), ("c", "config"), ("v", "lines")]),
+        (:binds, [("o", "visual")]),
         (:section, "MOUSE"),
-        (:note, "hover tooltip · click select · drag pan"),
+        (:note, "hover tooltip · click select · drag pan · WECO chip = explain"),
+        (:note, "dash w=explain · lib w=save · config w=Save As"),
     ]
 end
 
@@ -5774,8 +5939,8 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:binds, [("q", "close")]),
             (:section, "DASHBOARD"),
             (:binds, [("p", "pause"), ("g", "live"), ("[ ]", "chart"), ("←→", "pan")]),
-            (:binds, [("r/z", "reset"), ("u/t/l", "specs"), ("1-8", "WECO"), ("s", "clear specs")]),
-            (:binds, [("c", "config"), ("v", "lines"), ("o", "visual"), ("e", "saved cfg")]),
+            (:binds, [("r/z", "reset"), ("u/t/l", "specs"), ("1-8", "WECO"), ("w", "explain")]),
+            (:binds, [("s", "clear specs"), ("c", "config"), ("v", "lines"), ("o", "visual")]),
             (:section, "CONFIG (full page · c/v/o/e)"),
             (:note, "Rules · Lines · Visual · Saved · Tab cycle · Esc/q close only"),
             (:note, "Saved: s/w Save As · S Save · W Load · p/P path · ↵ load → dash"),
@@ -5786,7 +5951,7 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:note, "library: a/c/n/d · i/e/w/W session I/O · f/F filters"),
             (:note, "table: arrows · Enter edit · r rematerialize (never auto)"),
             (:note, "tools: master ids; assign on charts via builder"),
-            (:note, "mode-gated: dash s=clear specs · Config s=Save As · lib w≠config w"),
+            (:note, "mode-gated: dash w=explain · lib w=save · config w=Save As · builder 1-8 no popup"),
         ]
     elseif mode === :keymap
         return [
@@ -5794,13 +5959,13 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:binds, [("m", "library"), ("x", "tools"), ("d", "table"), ("b", "builder")]),
             (:binds, [("p", "pause"), ("g", "live"), ("f/F", "filter"), ("e", "saved cfg")]),
             (:binds, [("c", "config"), ("v", "lines"), ("o", "visual"), ("s", "clear specs")]),
-            (:binds, [("u/t/l", "specs"), ("1-8", "WECO"), ("h", "help"), ("k", "keymap")]),
+            (:binds, [("u/t/l", "specs"), ("1-8", "WECO"), ("w", "explain"), ("h", "help")]),
             (:binds, [("[ ]", "chart"), ("←→", "pan"), ("r/z", "reset"), ("q/Esc", "quit/close")]),
             (:section, "CONFIG"),
             (:note, "full page: Tab · s/w Save As · S Save · W Load · p/P path · load → dash"),
             (:section, "MOUSE"),
             (:binds, [("move", "hover"), ("drag", "pan"), ("click", "select"), ("wheel", "zoom")]),
-            (:note, "library: click select · double-click activate"),
+            (:note, "library: click select · double-click activate · WECO chip = explain"),
         ]
     else
         return [(:note, "no keys for mode")]
@@ -6492,6 +6657,13 @@ function view(m::SPCWorkbenchModel, f::Frame)
 
     # side
     _render_side_stats!(buf, side_rect, m)
+
+    # WECO explain popup: after plot + side, before Message|Keys chrome (KD-WB-2)
+    if m.weco_explain_open && m.view_mode == :dashboard
+        _render_weco_explain_popup!(buf, m.plot_area, m)
+    else
+        m.weco_popup_rect = Rect(0, 0, 0, 0)
+    end
 
     # Bottom panels: Message center (left) + Keys (right) — no status footer strip
     gcols = split_layout(Layout(Horizontal, [Fill(), Fill()]), gauge_row)

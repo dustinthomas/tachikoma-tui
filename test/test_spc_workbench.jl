@@ -3515,6 +3515,147 @@ end
         @test _clear_weco_explain!(m) === nothing
     end
 
+    @testset "WECO explain popup: w/Esc/q + paint + clear paths (PR3b)" begin
+        d = generate_spc_workbench_data(18; seed=42)
+        n = length(d.values)
+        m = SPCWorkbenchModel(data=d, paused=true, viewport=Viewport(x0=1, x1=n))
+        W, H = 100, 36
+        tb = T.TestBackend(W, H)
+        function re_view!()
+            T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, W, H), [], []))
+        end
+        re_view!()
+        @test m.weco_bubble_geom !== nothing
+        g = m.weco_bubble_geom
+        pa = m.plot_area
+        @test pa.width >= 16
+
+        # w open → How: body + title ON; popup rect sized
+        @test m.weco_explain_open === false
+        T.update!(m, T.KeyEvent('w'))
+        @test m.weco_explain_open === true
+        @test m.weco_explain_mode === :rule
+        @test m.weco_explain_rule == "WECO-1"  # first enabled
+        re_view!()
+        @test m.weco_popup_rect.width > 0 && m.weco_popup_rect.height > 0
+        @test T.find_text(tb, "How:") !== nothing
+        @test T.find_text(tb, "WECO-1") !== nothing
+        @test T.find_text(tb, "ON") !== nothing || occursin("ON", m.weco_explain_rule === nothing ? "" :
+            weco_explain_content(:rule; rule="WECO-1", enabled=true).title)
+
+        # w toggle close
+        T.update!(m, T.KeyEvent('w'))
+        @test m.weco_explain_open === false
+        @test m.quit === false
+        re_view!()
+        @test m.weco_popup_rect.width == 0
+
+        # Bubble press opens painted popup
+        bx = g.x0 + (g.boxed ? 1 : 0)
+        by = g.y
+        T.update!(m, T.MouseEvent(bx, by, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === true
+        @test m.weco_explain_rule == "WECO-1"
+        re_view!()
+        @test T.find_text(tb, "How:") !== nothing
+
+        # Esc closes explain without quit
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.weco_explain_open === false
+        @test m.quit === false
+
+        # q closes explain without quit
+        T.update!(m, T.KeyEvent('w'))
+        @test m.weco_explain_open === true
+        T.update!(m, T.KeyEvent('q'))
+        @test m.weco_explain_open === false
+        @test m.quit === false
+
+        # Q also closes without quit
+        T.update!(m, T.KeyEvent('w'))
+        @test m.weco_explain_open === true
+        T.update!(m, T.KeyEvent('Q'))
+        @test m.weco_explain_open === false
+        @test m.quit === false
+
+        # Plot press while open: explain stays open (KD-WB-13)
+        # Use bottom-left of plot_area so we do not hit the right-anchored popup rect.
+        T.update!(m, T.KeyEvent('w'))
+        @test m.weco_explain_open === true
+        re_view!()
+        pa = m.plot_area
+        pop = m.weco_popup_rect
+        cx = pa.x + 2
+        cy = pa.y + max(1, pa.height - 2)
+        @test T.contains(pa, cx, cy)
+        @test !(pop.width > 0 && T.contains(pop, cx, cy))
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === true
+        @test m.drag_start !== nothing
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.weco_explain_open === true
+
+        # Outside chrome press closes
+        T.update!(m, T.MouseEvent(1, 1, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === false
+
+        # OFF bubble (WECO-6 default off): title OFF + How:
+        re_view!()
+        g = m.weco_bubble_geom
+        bx6 = g.x0 + (6 - 1) * g.step + (g.boxed ? 1 : 0)
+        by6 = g.y
+        T.update!(m, T.MouseEvent(bx6, by6, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.weco_explain_open === true
+        @test m.weco_explain_rule == "WECO-6"
+        re_view!()
+        @test T.find_text(tb, "OFF") !== nothing
+        @test T.find_text(tb, "How:") !== nothing
+
+        # Leave dashboard (library) force-closes explain
+        T.update!(m, T.KeyEvent('m'))
+        @test m.view_mode === :library
+        @test m.weco_explain_open === false
+        @test m.weco_explain_rule === nothing
+
+        # Back to dashboard; reopen then config mode also clears
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
+        T.update!(m, T.KeyEvent('w'))
+        @test m.weco_explain_open === true
+        T.update!(m, T.KeyEvent('c'))
+        @test m.view_mode === :config
+        @test m.weco_explain_open === false
+
+        # Load ephemerals clear explain
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode === :dashboard
+        T.update!(m, T.KeyEvent('w'))
+        @test m.weco_explain_open === true
+        _clear_load_ephemerals!(m)
+        @test m.weco_explain_open === false
+        @test m.weco_explain_rule === nothing
+        @test m.weco_popup_rect.width == 0
+
+        # Empty data: w → nothing to explain (seed_demos=:none → empty chart)
+        m_empty = SPCWorkbenchModel(data=empty_workbench_data(), paused=true, seed_demos=:none)
+        _ensure_charts!(m_empty)
+        @test length(m_empty.data.values) == 0
+        T.update!(m_empty, T.KeyEvent('w'))
+        @test m_empty.weco_explain_open === false
+        @test occursin("nothing to explain", m_empty.last_event)
+
+        # Help/keys mention dashboard w=explain (Main-included helpers)
+        m2 = SPCWorkbenchModel(data=d, paused=true, viewport=Viewport(x0=1, x1=n))
+        entries = _contextual_key_entries(m2; expanded=true)
+        flat = join([string(e) for e in entries], " ")
+        @test occursin("explain", flat)
+        help_e = _mode_key_entries(:help)
+        help_flat = join([string(e) for e in help_e], " ")
+        @test occursin("explain", help_flat)
+        @test occursin("dash w", help_flat) || occursin("WECO explain", help_flat)
+    end
+
     # Side panel chart-line parameters (CL/±1/±2/±3/Specs) + configurable visibility
     function _side_rows_text(tb, m)
         sa = m.side_area
