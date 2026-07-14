@@ -34,7 +34,7 @@ change that default. Use `:single` or `:none` only in explicit constructs.
 | `c` / `C` | Open **Config** → Rules (WECO) |
 | `v` / `V` | Open **Config** → Lines (visibility + style) |
 | `o` / `O` | Open **Config** → Visual preferences |
-| **`e` / `E`** | Open **Config** → **Saved** (named / file graph configs) |
+| **`e` / `E`** | Open **Config** → **Saved** (disk-first known configs + file explorer) |
 | `u` / `t` / `l` | Edit USL / Target / **LSL** (`L` is LSL, not live) |
 | `s` | Clear all **spec** limits (USL/Target/LSL) on active chart |
 | `1`…`8` | Toggle WECO rule N on active chart (no Config open required) |
@@ -67,26 +67,70 @@ separate Graph Presets page (`view_mode = :presets`).
 | Tab | Cycle Rules → Lines → Visual → Saved → Rules |
 | `c` / `v` / `o` / `e` | Jump section (stay on Config; **not** close) |
 | `↑` / `↓` | Move selection within section |
-| Space / Enter | Rules/Lines/Visual: toggle item. **Saved:** load named → dashboard |
+| Space / Enter | Rules/Lines/Visual: toggle item. **Saved:** load selected → dashboard |
 | `1`…`N` | Jump + toggle (Rules N≤8, Lines N≤5, Visual N≤4) |
 | `←` / `→` | **Lines only:** cycle line style (`solid` / `dotted` / `dashed` / `long_dash`) |
 
-**Live apply:** toggles mutate the model immediately (no separate Apply). Named
+**Live apply:** toggles mutate the model immediately (no separate Apply). List
 or file **load** is the batch apply path.
 
-#### Saved section (session list + portable files)
+#### How to open Saved
 
-| Key | Action |
-|-----|--------|
-| `s` | Name prompt → upsert current graph set into session `graph_presets` list |
-| `w` | Path prompt → **file-save** graph-config JSON |
-| `W` | Path prompt → **file-load** → upsert by payload `name` → apply → dashboard |
-| `↑` / `↓` | Select a named config |
-| Enter / `l` / `a` / **Space** | **Load** selected named → **dashboard** (R2) |
-| `d` then `y` | Delete selected **named config** (not a chart) |
+```text
+Dashboard ──v──► Config [Lines]
+                 Tab / e ──► Config [Saved]
+Dashboard ──e──► Config [Saved]   (direct deep-link)
+```
 
-**R2 load:** applying a named or file config returns to the dashboard (not stay
+#### Saved section (disk-first list + in-TUI file explorer)
+
+The Saved list is a **library of known graph-config files** (path + name +
+summary/body), merged with a durable **config index** under the XDG data dir
+(`…/tachikoma-tui/graph_config_index.json`). Disk is the source of truth for
+path-bearing rows: loading re-reads the JSON file (fail-closed).
+
+| Key | Scope | Action |
+|-----|-------|--------|
+| **`s` / `w`** | Any Config tab | **Save As** — open in-TUI **file explorer** (pick dir + filename) |
+| **`S`** | Any Config tab | **Quick Save** — write to selected entry path or `last_graph_config_path` without overwrite confirm; if no known path → Save As explorer |
+| **`W`** | Any Config tab | **Load** — open file explorer to pick a `.json` graph config |
+| **`p`** | Any Config tab | Typed-path **save** fallback (Message path prompt; secondary) |
+| **`P`** | Any Config tab | Typed-path **load** fallback (Message path prompt; secondary) |
+| `↑` / `↓` | Saved only | Select a known config |
+| Enter / `l` / `a` / **Space** | Saved only | **Load** selected → re-read path (if set) → apply → **dashboard** (R2) |
+| `d` then `y` | Saved only | **Remove from list + index** — does **not** delete the file on disk |
+
+**Save As / Load explorer (primary I/O):**
+
+- Modal over Config (not a separate `view_mode`). Shows directories + `*.json`.
+- Navigate with ↑↓ / PgUp/PgDn; Enter opens a directory or commits a file.
+- Tab toggles list ⇄ filename focus (Save As). Esc cancels (never quits).
+- `h` toggles hidden entries; `~` jumps to home.
+- Save As rejects empty / `.` / `..` / path separators in the filename; appends
+  `.json` when missing. Overwriting an existing file asks `y` confirm first
+  (explorer closes, then Message confirm).
+- Successful save always upserts the Saved list + index, selects the entry, and
+  sets `last_graph_config_path`. Stay on Config.
+- Successful load applies and returns to the **dashboard** (R2).
+
+**Typed path (`p` / `P`):** escape hatch for paste/automation. Prefills
+`last_graph_config_path` only — never a silent default write. Not the primary
+chrome (explorer is).
+
+**List chrome:** column header `Name · WECO · Lines · Styles · Path`. Path is
+elided (`~/…` when under home). A **`!`** badge on the name means the path is
+set but the file is currently missing (cached on open/merge — not re-stat every
+frame). Chips come from the loaded body, or from the index summary when the
+body is still lazy. No mtime column.
+
+**Delete:** `d`+`y` drops the entry from the session list and the durable index.
+The JSON file on disk is **kept**. `last_event` still contains `"deleted preset"`.
+
+**R2 load:** applying a list or file config returns to the dashboard (not stay
 on Config). Empty list: `last_event` ≈ `"no presets to load"`; stay on Saved.
+Path-bearing list load finalizes `"loaded graph config <path>"`. Path-less
+**legacy** session rows (no path) still apply from memory as
+`"preset applied: <name>"`. File save success: `"saved graph config <path>"`.
 
 **WECO apply scope (KD-UC-5):** load applies WECO enable map to the **active
 chart** and session `default_rules` (seeds new charts). It does **not** rewrite
@@ -95,27 +139,27 @@ other charts’ `enabled_rules`, series values, spec numbers, or viewport.
 **Included in a config** (lines + styles + visual + WECO). **Not** included:
 series data, USL/Target/LSL values, tools, table, viewport.
 
-Named-list success events keep `"preset …"` prefixes (`preset applied:`,
-`preset saved:`, …). File path success uses `"saved graph config <path>"` /
-`"loaded graph config <path>"`. Path prompts prefill `last_graph_config_path`
-only (never a silent default write). Fail-closed on bad/empty path.
+Fail-closed on bad/empty path or bad JSON: no partial apply; list unchanged on
+load fail.
 
 #### Same glyph, different mode (mode-gated)
 
 | Glyph | Dashboard | Config | Library |
 |-------|-----------|--------|---------|
 | `c` | Open Config → Rules | Jump → Rules | Clone chart |
-| `s` | Clear **spec** limits | **Name-save** config | — |
+| `s` | Clear **spec** limits | **Save As** (file explorer) | — |
+| `S` | — | **Quick Save** known path | — |
 | `e` | Open Config → Saved | Jump → Saved | Export CSV |
-| `w` | — | **File-save** config | Save workbench **session** |
-| `W` | — | **File-load** config | Load workbench **session** |
-| `d` | SharedTable grid | Delete named config (Saved) | Delete chart |
-| `l` | Edit LSL | Load named config | — |
+| `w` | — | **Save As** (alias of `s`) | Save workbench **session** |
+| `W` | — | **Load** graph config (explorer) | Load workbench **session** |
+| `p` / `P` | Pause (dashboard `p`) | Typed path save / load fallback | — |
+| `d` | SharedTable grid | Remove config from list (Saved; file kept) | Delete chart |
+| `l` | Edit LSL | Load selected config | — |
 | `1`–`8` | Toggle WECO on active chart | Jump+toggle in Rules (or Lines/Visual range) | — |
 
 Config is **not** full session save. Library `w`/`W` persist charts + series +
-tools + table + current graph fields; Config `w`/`W` write/read a single graph
-config file only.
+tools + table + current graph fields; Config `s`/`w`/`S`/`W` write/read a
+single graph-config file only (explorer primary; `p`/`P` typed fallback).
 
 ### Dual secondary canvas (active plot)
 
@@ -190,7 +234,8 @@ delete. Never open the grid from library/tools with `d`.
 
 **Never** use `o` / `O` for open-file (those open Config → Visual on the
 dashboard). Library file keys are `i` / `e` / `w` / `W` only. Config graph-config
-files use Config `w` / `W` (see collision table under Config).
+files use the **file explorer** (`s`/`w` Save As, `W` Load) or typed `p`/`P`
+fallback (see collision table under Config).
 
 ### Tools registry (`view_mode=:tools`)
 
@@ -354,22 +399,23 @@ load_workbench!(m, "session.json")       # in-session replace (library W)
 | `show_chart_lines` | no | CL / σ / specs visibility |
 | `chart_line_styles` | no | Per-line style ids (`solid` / `dotted` / `dashed` / `long_dash`); omitted → defaults |
 | `visual_prefs` | no | Series connectors + `secondary_canvas` (dual MR/R/s under active) |
-| `graph_presets` | no | Array of named graph configs (whole graph set); wire key stays `graph_presets`; **omitted on save when empty** |
+| `graph_presets` | no | Array of graph configs (whole graph set); may include optional `path` for disk-first list; wire key stays `graph_presets`; **omitted on save when empty** |
 | `paused` | no | Bool; default false if omitted |
 | `table` | no | SharedTable `{columns, rows}`; **omitted on save when empty**; missing/null → empty on load |
 
 ### Graph config object (`graph_presets[]` + standalone files)
 
-Named snapshot of the **whole graph config set** (no series data): what is drawn,
+Snapshot of the **whole graph config set** (no series data): what is drawn,
 line styles, visual prefs, and WECO rules to calculate. Product language: **config**;
 session JSON key and Julia type remain `graph_presets` / `GraphPreset`.
 
-UI: **Config → Saved** (see [Config](#config-view_mode--config) keys). No separate
-presets page.
+UI: **Config → Saved** — disk-first list of known files + in-TUI explorer
+(see [Config](#config-view_mode--config) keys). No separate presets page.
 
 | Field | Required | Notes |
 |-------|----------|-------|
-| `name` | **yes** | Non-empty string (upsert key) |
+| `name` | **yes** | Non-empty string (display / legacy path-less identity) |
+| `path` | no | Absolute path on the **session / index list only**. Standalone files **never** embed host paths. Identity for path-keyed upsert when non-empty. |
 | `show_chart_lines` | no | Bool map; defaults if omitted |
 | `chart_line_styles` | no | Style map; unknown style string → fail-closed |
 | `visual_prefs` | no | Bool map; defaults if omitted |
@@ -377,8 +423,8 @@ presets page.
 
 #### Standalone graph-config file
 
-Helpers: `save_graph_preset(p, path)` / `load_graph_preset(path)`. TUI wires path
-prompts via Config `w` / `W`.
+Helpers: `save_graph_preset(p, path)` / `load_graph_preset(path)`. TUI wires
+**file explorer** (`s`/`w` Save As, `W` Load) and typed fallbacks (`p`/`P`).
 
 ```json
 {
@@ -397,9 +443,17 @@ prompts via Config `w` / `W`.
 | Write `kind` | Always `"graph_preset"` |
 | Load `kind` | Accepts `"graph_preset"` or alias `"graph_config"` |
 | File-save `name` | Basename of path without extension (empty → `"default"`) |
-| File-load upsert | Inserts **file payload** by `p.name` (not live re-capture) then apply → dashboard |
+| File-save list | Path-keyed upsert into session list + durable index; select entry; set `last_graph_config_path` |
+| File-load upsert | Path-keyed upsert of **file payload**, apply → dashboard (`"loaded graph config <path>"`) |
+| List load (path set) | Always **re-reads** the file (disk is source of truth); fail-closed if missing/bad |
+| Delete from Saved | Removes list + index entry only; **never** `rm` the file |
 | Fail-closed | Bad path / JSON / kind → `save err:` / `load err:`; model + list unchanged on load fail |
-| Prefill | `last_graph_config_path` only; no silent default path write |
+| Prefill | `last_graph_config_path` / selected path only; no silent default path write |
+
+**Durable index:** known configs also live in
+`$XDG_DATA_HOME/tachikoma-tui/graph_config_index.json` (or
+`~/.local/share/tachikoma-tui/…`). Opening Saved merges index ↔ session list
+(path is identity; MRU order; missing files get a `!` badge). Cap 50 entries.
 
 **Apply scope:** session lines/styles/visual; **active-chart** WECO + session
 `default_rules`. Not other charts’ rules, not series/specs/viewport.

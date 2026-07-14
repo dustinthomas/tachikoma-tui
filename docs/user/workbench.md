@@ -69,7 +69,7 @@ Seeded demos usually start with live enabled on charts. Successful **CSV import*
 | `c` | Open **Config** → Rules (WECO descriptions + toggles) |
 | `v` | Open **Config** → Lines (CL / σ / specs visibility + styles) |
 | `o` | Open **Config** → Visual (connectors, secondary canvas, …) |
-| **`e`** | Open **Config** → **Saved** (named configs + file save/load) |
+| **`e`** | Open **Config** → **Saved** (known disk configs + file explorer) |
 
 ### Config menu (full page)
 
@@ -82,21 +82,41 @@ not quit). Section jumps: `c` / `v` / `o` / `e` or Tab.
 | **Rules** | WECO-1…8 on the **active** chart |
 | **Lines** | CL / ±σ / specs on/off and line style |
 | **Visual** | Series connectors, secondary canvas, … |
-| **Saved** | Named snapshots of the whole set + portable JSON files |
+| **Saved** | List of known graph-config files + save/load via file explorer |
 
 Toggles apply **immediately**. Loading a saved config is the batch apply.
 
-#### Config → Saved
+#### Open Saved
+
+```text
+Dashboard ──v──► Config [Lines] ──Tab or e──► Saved
+Dashboard ──e──► Config [Saved]   (direct)
+```
+
+#### Config → Saved (disk-first)
+
+Configs are **portable JSON files**. The Saved tab keeps a **list of known
+files** (merged with a durable index that survives restarts). Saving always
+writes a file; the list tracks paths so you can re-open favorites without
+retyping.
 
 | Key | Action |
 |-----|--------|
-| `s` | Name prompt — save/upsert current set into the **session** list |
-| `w` | Path prompt — **file-save** graph config JSON |
-| `W` | Path prompt — **file-load** → apply → back to dashboard |
-| `↑` `↓` | Select a named config |
-| Enter / `l` / `a` / Space | Load selected → **dashboard** |
-| `d` then `y` | Delete named config (does **not** delete a chart) |
+| **`s` / `w`** | **Save As** — in-TUI **file explorer** (browse dirs, type filename) |
+| **`S`** | **Quick Save** — overwrite the known path (selected row or last used); if none, opens Save As |
+| **`W`** | **Load** — file explorer → pick a `.json` config → apply → **dashboard** |
+| **`p` / `P`** | Typed-path save / load (paste full path; secondary to the explorer) |
+| `↑` `↓` | Select a known config |
+| Enter / `l` / `a` / Space | Load selected (re-reads file when path is set) → **dashboard** |
+| `d` then `y` | **Remove from list** (and index) — **does not delete the file on disk** |
 | Esc / `q` | Close Config |
+
+**List display:** name, WECO/lines/styles chips, and a **Path** column. A **`!`**
+next to the name means the path is remembered but the file is currently missing.
+
+**Explorer tips:** ↑↓ navigate; Enter opens a folder or chooses a file; Tab
+focuses the filename field on Save As; Esc cancels. Overwrite of an existing
+file asks for `y` confirm.
 
 **What a config includes:** line visibility, line styles, visual prefs, WECO
 enable map. **Not** series values, not USL/Target/LSL numbers, not viewport.
@@ -108,8 +128,10 @@ enable map. **Not** series values, not USL/Target/LSL numbers, not viewport.
 
 | Key | Dashboard | Config | Library |
 |-----|-----------|--------|---------|
-| `s` | Clear **specs** | Name-save config | — |
-| `w` / `W` | — | Graph **config** file | Whole **session** JSON |
+| `s` | Clear **specs** | **Save As** (explorer) | — |
+| `S` | — | **Quick Save** known path | — |
+| `w` / `W` | — | Graph **config** Save As / Load (explorer) | Whole **session** JSON |
+| `p` / `P` | Pause (`p`) | Typed path save / load fallback | — |
 | `e` | Config → Saved | Jump Saved | Export CSV |
 | `c` | Config → Rules | Jump Rules | Clone chart |
 
@@ -287,9 +309,11 @@ More detail on files: [Data import & export](data-import-export.md)
 | `q` in a path prompt quits | No — it types the letter `q`. Esc cancels. |
 | Edit table → chart updates | No — rematerialize with builder **`a`** or table **`r`**. |
 | Tools registry assigns charts | No — registry is the master list; builder sets `ch.tools`. |
-| `d` always means table | No — dashboard `d` = table; **library** `d` = delete chart; **Config Saved** `d` = delete named config. |
+| `d` always means table | No — dashboard `d` = table; **library** `d` = delete chart; **Config Saved** `d` = remove config from **list** (file stays on disk). |
 | Neighbor charts show MR dual | No — dual secondary is **active chart only**. |
 | Three overlays `c`/`v`/`o` + presets `e` | **One Config page** with four sections; deep-link keys still work. |
-| Dashboard `s` saves a config | No — dashboard `s` **clears specs**. Name-save is Config **`s`**. |
+| Dashboard `s` saves a config | No — dashboard `s` **clears specs**. Config **`s`/`w`** = **Save As** (file explorer). |
+| Config `s` is name-only / `w` is typed path only | Stale — primary save/load is the **file explorer**; `p`/`P` are typed-path fallbacks. |
 | Library `w` vs Config `w` | Library = whole **session** (charts + data). Config = **graph config** file only. |
+| Delete on Saved removes the JSON file | No — only the **list/index entry**. The file remains until you delete it outside the app. |
 | Load config rewrites all charts’ WECO | No — **active chart** + session defaults for new charts only. |

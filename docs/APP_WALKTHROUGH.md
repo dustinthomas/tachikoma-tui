@@ -181,7 +181,7 @@ What you see:
 | `s` | Clear all spec limits |
 | `1`…`8` | Toggle WECO rule N |
 | `c` / `v` / `o` | Open **Config** → Rules / Lines / Visual |
-| **`e`** | Open **Config** → **Saved** (named configs + file save/load) |
+| **`e`** | Open **Config** → **Saved** (known disk configs + file explorer) |
 | `m` | Chart **library** |
 | `b` | Chart **builder** |
 | `x` | **Tools** registry |
@@ -252,11 +252,19 @@ One surface for WECO rules, chart lines, visual prefs, and saved configs.
 Replaces the old three-tab plot overlay and the separate Graph Presets page.
 
 - Deep-links from dashboard: **`c`** Rules · **`v`** Lines · **`o`** Visual · **`e`** Saved
+- Reach Saved also via **`v`** then Tab/`e`, or **`e`** directly
 - In-Config: Tab cycles sections; `c`/`v`/`o`/`e` jump (do not close); **Esc/`q` only** close → dashboard
 - Toggles apply immediately on the live model
-- **Saved:** `s` name-save (session list); `w` / `W` graph-config file save/load; Enter/`l`/`a`/Space load named → dashboard
+- **Saved (disk-first):** list of known graph-config files (session list + durable index)
+  - **`s` / `w`** → **Save As** (in-TUI file explorer)
+  - **`S`** → **Quick Save** to known path (or Save As if none)
+  - **`W`** → **Load** via file explorer → apply → dashboard
+  - **`p` / `P`** → typed path save/load fallback (secondary)
+  - Enter / `l` / `a` / Space → load selected (re-reads path when set) → dashboard
+  - **`d` then `y`** → remove from list+index only (**file kept on disk**)
+  - Path column + **`!`** missing-file badge when the remembered path is gone
 - Load applies WECO to the **active chart** + session defaults for new charts (not every chart)
-- Config is **not** full session save (library `w`/`W` is session JSON)
+- Config is **not** full session save (library `w`/`W` is session JSON; Config graph-config I/O is explorer / `p`/`P`)
 
 ---
 
@@ -283,7 +291,8 @@ Demo data is seeded (deterministic RNG) so tests and demos stay stable.
 |------|--------|-------|
 | **CSV import** | Series-first: prefer `Value` column (or single column) | Simple parser; max 50k rows; fail closed |
 | **CSV export** | `Value` + floats | Library-selected or active chart |
-| **JSON session** | Schema **v1** | charts, active, tools, table, prefs, WECO defaults |
+| **JSON session** | Schema **v1** | charts, active, tools, table, prefs, WECO defaults, optional `graph_presets` (+ paths) |
+| **Graph config file** | `kind=graph_preset` JSON | Lines/styles/visual/WECO only; Config explorer Save As / Load |
 | **HTML archive** | Extract state from archived HTML mockup | `load_html_archive` family |
 
 JSON is fail-closed: bad version / empty charts / bad table → error, model unchanged on in-place load. No passwords/admins. Load does **not** auto-rematerialize from table.
