@@ -31,24 +31,91 @@ change that default. Use `:single` or `:none` only in explicit constructs.
 | `p` / `P` | Pause / resume live tick |
 | **`g` / `G`** | Toggle active chart `live_enabled` (**not `L`**) |
 | `r` / `z` | Reset viewport (full range + auto Y) |
-| `c` / `v` / `o` | Config → Rules / Lines / Visual |
-| **`e` / `E`** | Config → **Saved** (named graph configs; load → dashboard) |
-| Config `e` | Jump to Saved section |
-| Config `s` | Name-save current graph set (session upsert) |
-| Config `w` | Path prompt → **file-save** graph config JSON (`kind=graph_preset`) |
-| Config `W` | Path prompt → **file-load** graph config → upsert by name → apply → dashboard |
+| `c` / `C` | Open **Config** → Rules (WECO) |
+| `v` / `V` | Open **Config** → Lines (visibility + style) |
+| `o` / `O` | Open **Config** → Visual preferences |
+| **`e` / `E`** | Open **Config** → **Saved** (named / file graph configs) |
 | `u` / `t` / `l` | Edit USL / Target / **LSL** (`L` is LSL, not live) |
-| `s` | Clear all spec limits |
-| `1`…`8` | Toggle WECO rule N |
+| `s` | Clear all **spec** limits (USL/Target/LSL) on active chart |
+| `1`…`8` | Toggle WECO rule N on active chart (no Config open required) |
 | `[` `]` | Switch active chart |
 | `←` `→` | Pan viewport |
 | `m` / `M` | Open chart library |
 | `x` / `X` | Open tools registry |
 | `f` / `F` | Cycle filter prompt / clear filters |
 | `b` / `B` | Open chart builder |
-| `?` / `h` | Help overlay |
+| `?` / `h` | Help page |
 | `k` | Keymap page |
 | **`d` / `D`** | Open SharedTable grid (`view_mode=:table`) |
+
+### Config (`view_mode = :config`)
+
+**One full-page Config surface** for WECO rules, chart lines, visual prefs, and
+saved configs. Replaces the old three-tab plot overlay (`config_open`) and the
+separate Graph Presets page (`view_mode = :presets`).
+
+| Section | Open from dashboard | In-Config jump |
+|---------|---------------------|----------------|
+| **Rules** | `c` / `C` | `c` / `C` |
+| **Lines** | `v` / `V` | `v` / `V` |
+| **Visual** | `o` / `O` | `o` / `O` |
+| **Saved** | `e` / `E` | `e` / `E` |
+
+| Key | Action |
+|-----|--------|
+| Esc / `q` | Close → dashboard (**only** close keys; does not quit) |
+| Tab | Cycle Rules → Lines → Visual → Saved → Rules |
+| `c` / `v` / `o` / `e` | Jump section (stay on Config; **not** close) |
+| `↑` / `↓` | Move selection within section |
+| Space / Enter | Rules/Lines/Visual: toggle item. **Saved:** load named → dashboard |
+| `1`…`N` | Jump + toggle (Rules N≤8, Lines N≤5, Visual N≤4) |
+| `←` / `→` | **Lines only:** cycle line style (`solid` / `dotted` / `dashed` / `long_dash`) |
+
+**Live apply:** toggles mutate the model immediately (no separate Apply). Named
+or file **load** is the batch apply path.
+
+#### Saved section (session list + portable files)
+
+| Key | Action |
+|-----|--------|
+| `s` | Name prompt → upsert current graph set into session `graph_presets` list |
+| `w` | Path prompt → **file-save** graph-config JSON |
+| `W` | Path prompt → **file-load** → upsert by payload `name` → apply → dashboard |
+| `↑` / `↓` | Select a named config |
+| Enter / `l` / `a` / **Space** | **Load** selected named → **dashboard** (R2) |
+| `d` then `y` | Delete selected **named config** (not a chart) |
+
+**R2 load:** applying a named or file config returns to the dashboard (not stay
+on Config). Empty list: `last_event` ≈ `"no presets to load"`; stay on Saved.
+
+**WECO apply scope (KD-UC-5):** load applies WECO enable map to the **active
+chart** and session `default_rules` (seeds new charts). It does **not** rewrite
+other charts’ `enabled_rules`, series values, spec numbers, or viewport.
+
+**Included in a config** (lines + styles + visual + WECO). **Not** included:
+series data, USL/Target/LSL values, tools, table, viewport.
+
+Named-list success events keep `"preset …"` prefixes (`preset applied:`,
+`preset saved:`, …). File path success uses `"saved graph config <path>"` /
+`"loaded graph config <path>"`. Path prompts prefill `last_graph_config_path`
+only (never a silent default write). Fail-closed on bad/empty path.
+
+#### Same glyph, different mode (mode-gated)
+
+| Glyph | Dashboard | Config | Library |
+|-------|-----------|--------|---------|
+| `c` | Open Config → Rules | Jump → Rules | Clone chart |
+| `s` | Clear **spec** limits | **Name-save** config | — |
+| `e` | Open Config → Saved | Jump → Saved | Export CSV |
+| `w` | — | **File-save** config | Save workbench **session** |
+| `W` | — | **File-load** config | Load workbench **session** |
+| `d` | SharedTable grid | Delete named config (Saved) | Delete chart |
+| `l` | Edit LSL | Load named config | — |
+| `1`–`8` | Toggle WECO on active chart | Jump+toggle in Rules (or Lines/Visual range) | — |
+
+Config is **not** full session save. Library `w`/`W` persist charts + series +
+tools + table + current graph fields; Config `w`/`W` write/read a single graph
+config file only.
 
 ### Dual secondary canvas (active plot)
 
@@ -57,7 +124,7 @@ under the **active** plot only (neighbors stay single-series when drawn).
 
 | Item | Behavior |
 |------|----------|
-| Pref | Visual Preferences (`o`) → **Secondary canvas (MR/R/s)** (default **on**) |
+| Pref | Config → Visual (`o`) → **Secondary canvas (MR/R/s)** (default **on**) |
 | Limits | Secondary CL/UCL/LCL only (no WECO markers, no USL/LSL, no ±σ zones on secondary) |
 | Mouse | Primary only — secondary is display-only; `plot_area` / `viewport` stay primary |
 | Height | If multi-pane would starve dual (active outer &lt; 14), **temporary single-pane compress** for that frame so dual can fit; not permanent focused mode. Pref off restores neighbor panes. |
@@ -121,8 +188,9 @@ Canonical library keys:
 SharedTable grid. Tools registry (when present) keeps mode-local `d` for tool
 delete. Never open the grid from library/tools with `d`.
 
-**Never** use `o` / `O` for open-file (those are Visual Preferences on the
-dashboard). File keys are library `i` / `e` / `w` / `W` only.
+**Never** use `o` / `O` for open-file (those open Config → Visual on the
+dashboard). Library file keys are `i` / `e` / `w` / `W` only. Config graph-config
+files use Config `w` / `W` (see collision table under Config).
 
 ### Tools registry (`view_mode=:tools`)
 
@@ -286,33 +354,18 @@ load_workbench!(m, "session.json")       # in-session replace (library W)
 | `show_chart_lines` | no | CL / σ / specs visibility |
 | `chart_line_styles` | no | Per-line style ids (`solid` / `dotted` / `dashed` / `long_dash`); omitted → defaults |
 | `visual_prefs` | no | Series connectors + `secondary_canvas` (dual MR/R/s under active) |
-| `graph_presets` | no | Array of named graph presets (whole graph set); **omitted on save when empty** |
+| `graph_presets` | no | Array of named graph configs (whole graph set); wire key stays `graph_presets`; **omitted on save when empty** |
 | `paused` | no | Bool; default false if omitted |
 | `table` | no | SharedTable `{columns, rows}`; **omitted on save when empty**; missing/null → empty on load |
 
-### Graph preset object (`graph_presets[]`)
+### Graph config object (`graph_presets[]` + standalone files)
 
 Named snapshot of the **whole graph config set** (no series data): what is drawn,
-line styles, visual prefs, and WECO rules to calculate.
+line styles, visual prefs, and WECO rules to calculate. Product language: **config**;
+session JSON key and Julia type remain `graph_presets` / `GraphPreset`.
 
-**Config → Saved** (`e` from dashboard, or `e` from Config; Tab also cycles to Saved):
-
-| Key | Action |
-|-----|--------|
-| `s` | **Popup** name prompt — save/upsert current graph set (session list) |
-| `w` | **Path prompt** — write standalone graph-config JSON (basename without extension becomes `name`) |
-| `W` | **Path prompt** — load file → upsert by payload `name` → apply → dashboard |
-| `↑`/`↓` | Select a saved config |
-| `Enter` / `l` / `a` / **Space** | **Load** selected named → dashboard (R2) |
-| `d` then `y` | Delete selected named config (not a chart) |
-| Esc / `q` | Close Config (no quit) |
-
-Load applies to active-chart WECO rules + session `default_rules`.
-
-Named-list success events keep `"preset …"` prefixes. File path success uses
-`"saved graph config <path>"` / `"loaded graph config <path>"`. Path prompts
-prefill `last_graph_config_path` (never a silent default write). Fail-closed on
-bad/empty path (prompt stays open; model + list unchanged on load fail).
+UI: **Config → Saved** (see [Config](#config-view_mode--config) keys). No separate
+presets page.
 
 | Field | Required | Notes |
 |-------|----------|-------|
@@ -322,9 +375,34 @@ bad/empty path (prompt stays open; model + list unchanged on load fail).
 | `visual_prefs` | no | Bool map; defaults if omitted |
 | `enabled_rules` | no | WECO map captured from active chart at save time |
 
-Standalone file helpers: `save_graph_preset(p, path)` / `load_graph_preset(path)`
-write `{kind: "graph_preset", version: 1, …fields}`. Load also accepts
-`kind: "graph_config"` as an alias; write still emits `graph_preset`.
+#### Standalone graph-config file
+
+Helpers: `save_graph_preset(p, path)` / `load_graph_preset(path)`. TUI wires path
+prompts via Config `w` / `W`.
+
+```json
+{
+  "kind": "graph_preset",
+  "version": 1,
+  "name": "fab-dense",
+  "show_chart_lines": { "cl": true, "sigma1": true, "sigma2": true, "sigma3": true, "specs": false },
+  "chart_line_styles": { "cl": "solid", "sigma1": "dotted", "sigma2": "dotted", "sigma3": "dotted", "specs": "dashed" },
+  "visual_prefs": { "solid_series": true, "solid_stroke": true, "braille_series": false, "secondary_canvas": true },
+  "enabled_rules": { "WECO-1": true, "WECO-2": true }
+}
+```
+
+| Rule | Behavior |
+|------|----------|
+| Write `kind` | Always `"graph_preset"` |
+| Load `kind` | Accepts `"graph_preset"` or alias `"graph_config"` |
+| File-save `name` | Basename of path without extension (empty → `"default"`) |
+| File-load upsert | Inserts **file payload** by `p.name` (not live re-capture) then apply → dashboard |
+| Fail-closed | Bad path / JSON / kind → `save err:` / `load err:`; model + list unchanged on load fail |
+| Prefill | `last_graph_config_path` only; no silent default path write |
+
+**Apply scope:** session lines/styles/visual; **active-chart** WECO + session
+`default_rules`. Not other charts’ rules, not series/specs/viewport.
 
 ### Per-chart object
 

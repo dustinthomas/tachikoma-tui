@@ -64,21 +64,54 @@ Seeded demos usually start with live enabled on charts. Successful **CSV import*
 | Key | Action |
 |-----|--------|
 | `u` / `t` / `l` | Edit USL / Target / LSL (prompt) |
-| `s` | Clear all spec limits on the active chart |
-| `1` … `8` | Toggle WECO rule 1–8 on the active chart |
-| `c` | WECO config overlay |
-| `v` | Chart line visibility + styles (CL, σ zones, specs) |
-| `o` | Visual preferences (including secondary canvas) |
-| **`e`** | **Graph Presets** menu — save the whole setup under a name (popup), load any saved preset |
+| `s` | Clear all **spec** limits on the active chart |
+| `1` … `8` | Toggle WECO rule 1–8 on the active chart (no menu needed) |
+| `c` | Open **Config** → Rules (WECO descriptions + toggles) |
+| `v` | Open **Config** → Lines (CL / σ / specs visibility + styles) |
+| `o` | Open **Config** → Visual (connectors, secondary canvas, …) |
+| **`e`** | Open **Config** → **Saved** (named configs + file save/load) |
 
-### Graph presets menu (`e`)
+### Config menu (full page)
+
+One page for how the graph looks and which WECO rules fire. **Not** an overlay;
+**not** a separate “Graph Presets” page. Esc/`q` closes to the dashboard (does
+not quit). Section jumps: `c` / `v` / `o` / `e` or Tab.
+
+| Section | What you edit |
+|---------|----------------|
+| **Rules** | WECO-1…8 on the **active** chart |
+| **Lines** | CL / ±σ / specs on/off and line style |
+| **Visual** | Series connectors, secondary canvas, … |
+| **Saved** | Named snapshots of the whole set + portable JSON files |
+
+Toggles apply **immediately**. Loading a saved config is the batch apply.
+
+#### Config → Saved
 
 | Key | Action |
 |-----|--------|
-| `s` | Popup to name + save current lines / styles / visual / WECO |
-| `↑` `↓` | Select a preset |
-| Enter / `l` | Load selected → back to dashboard |
-| Esc / `q` | Close |
+| `s` | Name prompt — save/upsert current set into the **session** list |
+| `w` | Path prompt — **file-save** graph config JSON |
+| `W` | Path prompt — **file-load** → apply → back to dashboard |
+| `↑` `↓` | Select a named config |
+| Enter / `l` / `a` / Space | Load selected → **dashboard** |
+| `d` then `y` | Delete named config (does **not** delete a chart) |
+| Esc / `q` | Close Config |
+
+**What a config includes:** line visibility, line styles, visual prefs, WECO
+enable map. **Not** series values, not USL/Target/LSL numbers, not viewport.
+
+**WECO on load:** applies to the **active chart** and to session defaults for
+**new** charts — not every chart already in the library.
+
+**Same keys, different modes (easy to mix up):**
+
+| Key | Dashboard | Config | Library |
+|-----|-----------|--------|---------|
+| `s` | Clear **specs** | Name-save config | — |
+| `w` / `W` | — | Graph **config** file | Whole **session** JSON |
+| `e` | Config → Saved | Jump Saved | Export CSV |
+| `c` | Config → Rules | Jump Rules | Clone chart |
 
 ### Open other pages
 
@@ -97,7 +130,7 @@ Seeded demos usually start with live enabled on charts. Successful **CSV import*
 
 For I-MR, X̄-R, and X̄-S, the **active** plot can show a second canvas under the primary:
 
-- Toggle preference under visual prefs (**`o`**) → “Secondary canvas”
+- Toggle preference under Config → Visual (**`o`**) → “Secondary canvas”
 - Default is **on**
 - On short terminals with three panes, the UI may **temporarily hide neighbor panes** so the dual plot fits — not a permanent “focused mode”
 - Mouse still applies to the **primary** only
@@ -254,5 +287,9 @@ More detail on files: [Data import & export](data-import-export.md)
 | `q` in a path prompt quits | No — it types the letter `q`. Esc cancels. |
 | Edit table → chart updates | No — rematerialize with builder **`a`** or table **`r`**. |
 | Tools registry assigns charts | No — registry is the master list; builder sets `ch.tools`. |
-| `d` always means table | No — on **library**, `d` is delete chart. |
+| `d` always means table | No — dashboard `d` = table; **library** `d` = delete chart; **Config Saved** `d` = delete named config. |
 | Neighbor charts show MR dual | No — dual secondary is **active chart only**. |
+| Three overlays `c`/`v`/`o` + presets `e` | **One Config page** with four sections; deep-link keys still work. |
+| Dashboard `s` saves a config | No — dashboard `s` **clears specs**. Name-save is Config **`s`**. |
+| Library `w` vs Config `w` | Library = whole **session** (charts + data). Config = **graph config** file only. |
+| Load config rewrites all charts’ WECO | No — **active chart** + session defaults for new charts only. |

@@ -4604,7 +4604,8 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:binds, [("Tab", "cycle section"), ("c", "rules"), ("v", "lines"), ("o", "visual"), ("e", "saved")]),
             (:binds, [("s", "name-save"), ("w", "file-save"), ("W", "file-load"), ("l/a", "load named")]),
             (:binds, [("d", "delete saved"), ("Esc/q", "close")]),
-            (:note, "toggles apply immediately · file/named load → dashboard · Esc/q only closes"),
+            (:note, "toggles apply immediately · named/file load → dashboard (R2)"),
+            (:note, "WECO apply: active chart + default_rules · Esc/q only closes"),
         ]
     elseif mode === :table
         compact && return [
@@ -4632,24 +4633,34 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
         return [
             (:section, "PAGES"),
             (:binds, [("m", "library"), ("x", "tools"), ("d", "table"), ("b", "builder")]),
-            (:binds, [("h", "this help"), ("k", "keymap"), ("Esc", "close"), ("q", "close")]),
+            (:binds, [("e", "saved cfg"), ("h", "this help"), ("k", "keymap"), ("Esc", "close")]),
+            (:binds, [("q", "close")]),
             (:section, "DASHBOARD"),
             (:binds, [("p", "pause"), ("g", "live"), ("[ ]", "chart"), ("←→", "pan")]),
-            (:binds, [("r/z", "reset"), ("u/t/l", "specs"), ("1-8", "WECO"), ("c/v/o", "config")]),
+            (:binds, [("r/z", "reset"), ("u/t/l", "specs"), ("1-8", "WECO"), ("s", "clear specs")]),
+            (:binds, [("c", "config"), ("v", "lines"), ("o", "visual"), ("e", "saved cfg")]),
+            (:section, "CONFIG (full page · c/v/o/e)"),
+            (:note, "Rules · Lines · Visual · Saved · Tab cycle · Esc/q close only"),
+            (:note, "Saved: s name-save · w/W file · ↵/l/a/Space load → dash"),
+            (:note, "WECO load → active chart + session defaults (not all charts)"),
             (:section, "VISUALS"),
             (:note, "◆ OOC (yellow) · ✕ OOS (red) · Cpk band colors · dashed σ zones"),
             (:section, "LIBRARY · TABLE · TOOLS"),
-            (:note, "library: a/c/n/d · i/e/w/W I/O · f/F filters"),
+            (:note, "library: a/c/n/d · i/e/w/W session I/O · f/F filters"),
             (:note, "table: arrows · Enter edit · r rematerialize (never auto)"),
             (:note, "tools: master ids; assign on charts via builder"),
+            (:note, "mode-gated: dash s=clear specs · Config s=name-save · lib w≠config w"),
         ]
     elseif mode === :keymap
         return [
             (:section, "KEYS"),
             (:binds, [("m", "library"), ("x", "tools"), ("d", "table"), ("b", "builder")]),
-            (:binds, [("p", "pause"), ("g", "live"), ("f/F", "filter"), ("c/v/o", "config")]),
+            (:binds, [("p", "pause"), ("g", "live"), ("f/F", "filter"), ("e", "saved cfg")]),
+            (:binds, [("c", "config"), ("v", "lines"), ("o", "visual"), ("s", "clear specs")]),
             (:binds, [("u/t/l", "specs"), ("1-8", "WECO"), ("h", "help"), ("k", "keymap")]),
             (:binds, [("[ ]", "chart"), ("←→", "pan"), ("r/z", "reset"), ("q/Esc", "quit/close")]),
+            (:section, "CONFIG"),
+            (:note, "full page: Tab sections · s name · w/W file · load → dashboard"),
             (:section, "MOUSE"),
             (:binds, [("move", "hover"), ("drag", "pan"), ("click", "select"), ("wheel", "zoom")]),
             (:note, "library: click select · double-click activate"),
