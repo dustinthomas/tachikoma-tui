@@ -141,6 +141,54 @@ include("../src/spc_workbench.jl")
         @test occursin("preset updated", m3.last_event)
     end
 
+    @testset "graph config path helpers: basename name + upsert by payload (PR4)" begin
+        @test _graph_config_name_from_path("/tmp/fab-dense.json") == "fab-dense"
+        @test _graph_config_name_from_path("fab-dense.json") == "fab-dense"
+        @test _graph_config_name_from_path("/x/foo.bar.json") == "foo.bar"
+        @test _graph_config_name_from_path("  ") == "default"
+        @test _graph_config_name_from_path("") == "default"
+        @test _graph_config_name_from_path(".json") == ".json"  # leading-dot only: keep base
+        @test _graph_config_name_from_path("noext") == "noext"
+
+        d = generate_spc_workbench_data(8; seed = 3)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        p1 = GraphPreset(name = "from-file", show_chart_lines = copy(DEFAULT_CHART_LINES),
+            chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+            visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+            enabled_rules = copy(DEFAULT_WECO_RULES))
+        p1.show_chart_lines["cl"] = false
+        @test _upsert_graph_preset!(m, p1) === nothing
+        @test length(m.graph_presets) == 1
+        @test m.graph_presets[1].name == "from-file"
+        @test m.graph_presets[1].show_chart_lines["cl"] === false
+        # same name replaces payload (length unchanged); does NOT re-capture live model
+        m.show_chart_lines["cl"] = true
+        p2 = GraphPreset(name = "from-file", show_chart_lines = copy(DEFAULT_CHART_LINES),
+            chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+            visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+            enabled_rules = copy(DEFAULT_WECO_RULES))
+        p2.show_chart_lines["cl"] = false
+        p2.show_chart_lines["specs"] = false
+        @test _upsert_graph_preset!(m, p2) === nothing
+        @test length(m.graph_presets) == 1
+        @test m.graph_presets[1].show_chart_lines["specs"] === false
+        @test m.graph_presets[1].show_chart_lines["cl"] === false  # payload, not live re-capture
+        # different name pushes
+        p3 = GraphPreset(name = "other", show_chart_lines = copy(DEFAULT_CHART_LINES),
+            chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+            visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+            enabled_rules = copy(DEFAULT_WECO_RULES))
+        @test _upsert_graph_preset!(m, p3) === nothing
+        @test length(m.graph_presets) == 2
+        # empty name rejected
+        pbad = GraphPreset(name = "  ", show_chart_lines = copy(DEFAULT_CHART_LINES),
+            chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+            visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+            enabled_rules = copy(DEFAULT_WECO_RULES))
+        @test _upsert_graph_preset!(m, pbad) isa AbstractString
+        @test length(m.graph_presets) == 2
+    end
+
     @testset "weco_detect guards (empty, zero sigma)" begin
         @test isempty(weco_detect(Float64[], 0.0, 1.0))
         @test isempty(weco_detect([10.0, 20.0], 15.0, 0.0))
@@ -6584,14 +6632,334 @@ const _sync_active_back! = TachikomaTUI._sync_active_back!
             @test loaded_p.chart_line_styles["sigma1"] == "solid"
             @test loaded_p.visual_prefs["secondary_canvas"] === false
             @test loaded_p.enabled_rules["WECO-7"] === true
+            # write still uses kind=graph_preset
+            raw_txt = read(fpath, String)
+            @test occursin("\"graph_preset\"", raw_txt) || occursin("graph_preset", raw_txt)
         finally
             isfile(fpath) && rm(fpath; force = true)
+        end
+
+        # load accepts kind=graph_config alias (PR4); write still graph_preset
+        alias_path = joinpath(tempdir(), "spc_graph_config_alias_$(rand(UInt32)).json")
+        try
+            # Minimal portable file with load-only kind alias
+            open(alias_path, "w") do io
+                write(io, """{"kind":"graph_config","version":1,"name":"file-p",
+                    "show_chart_lines":{"cl":false,"sigma1":true,"sigma2":true,"sigma3":true,"specs":true},
+                    "chart_line_styles":{"cl":"dotted","sigma1":"solid","sigma2":"dashed","sigma3":"long_dash","specs":"dotted"},
+                    "visual_prefs":{"solid_series":false,"solid_stroke":true,"braille_series":true,"secondary_canvas":false},
+                    "enabled_rules":{"WECO-1":true,"WECO-2":true,"WECO-3":true,"WECO-4":true,"WECO-5":true,"WECO-6":false,"WECO-7":true,"WECO-8":false}}""")
+            end
+            loaded_alias = load_graph_preset(alias_path)
+            @test loaded_alias isa GraphPreset
+            @test loaded_alias.name == "file-p"
+            @test loaded_alias.show_chart_lines["cl"] === false
+            # unknown kind still rejected
+            badk = joinpath(tempdir(), "spc_graph_badkind_$(rand(UInt32)).json")
+            try
+                open(badk, "w") do io
+                    write(io, """{"kind":"session","name":"x"}""")
+                end
+                errk = load_graph_preset(badk)
+                @test errk isa AbstractString
+                @test occursin("load err", errk)
+            finally
+                isfile(badk) && rm(badk; force = true)
+            end
+        finally
+            isfile(alias_path) && rm(alias_path; force = true)
         end
     end
 
 end
 
 end # module TestSPCWorkbenchJSON
+
+# PR4: Config w/W path prompts for graph config file save/load (package-module;
+# avoids type redefinition vs pure include of spc_workbench.jl).
+# ═══════════════════════════════════════════════════════════════════════
+
+module TestSPCWorkbenchGraphConfigIO
+using Test
+using Random
+using TachikomaTUI
+using Tachikoma
+
+const T = Tachikoma
+const WB = TachikomaTUI
+const _ensure_charts! = WB._ensure_charts!
+const _sync_active_back! = WB._sync_active_back!
+const current_chart = WB.current_chart
+const _graph_config_name_from_path = WB._graph_config_name_from_path
+
+"""Clear prompt_buf with backspaces then type path."""
+function _set_prompt_path!(m, path::AbstractString)
+    while !isempty(m.prompt_buf)
+        T.update!(m, T.KeyEvent(:backspace))
+    end
+    for ch in collect(String(path))
+        T.update!(m, T.KeyEvent(ch))
+    end
+end
+
+@testset "PR4 Config file save/load path prompts (using TachikomaTUI)" begin
+
+    @testset "w file-save: basename name in JSON + last_event + prefill" begin
+        d = generate_spc_workbench_data(12; seed = 21)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        m.show_chart_lines["specs"] = false
+        m.chart_line_styles["cl"] = "dashed"
+        m.visual_prefs["solid_series"] = false
+        m.enabled_rules["WECO-6"] = true
+        _sync_active_back!(m)
+        @test m.last_graph_config_path == ""
+
+        mktempdir() do dir
+            path = joinpath(dir, "fab-dense.json")
+            T.update!(m, T.KeyEvent('c'))  # Config (any section may open w)
+            @test m.view_mode === :config
+            T.update!(m, T.KeyEvent('w'))
+            @test m.prompt_kind === :save_graph_config
+            @test m.prompt_buf == ""  # empty last path
+            _set_prompt_path!(m, path)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.prompt_kind === nothing
+            @test m.view_mode === :config  # stay on Config after file save
+            @test m.last_graph_config_path == path
+            @test occursin("saved graph config", m.last_event)
+            @test occursin(path, m.last_event)
+            @test isfile(path)
+            # basename without extension is the written name (KD-UC-17)
+            loaded = load_graph_preset(path)
+            @test loaded isa GraphPreset
+            @test loaded.name == "fab-dense"
+            @test loaded.show_chart_lines["specs"] === false
+            @test loaded.chart_line_styles["cl"] == "dashed"
+            @test loaded.visual_prefs["solid_series"] === false
+            @test loaded.enabled_rules["WECO-6"] === true
+            raw = read(path, String)
+            @test occursin("graph_preset", raw)  # write kind still graph_preset
+            @test occursin("fab-dense", raw)
+
+            # Prefill: reopen w seeds last_graph_config_path
+            T.update!(m, T.KeyEvent('w'))
+            @test m.prompt_kind === :save_graph_config
+            @test m.prompt_buf == path
+            T.update!(m, T.KeyEvent(:escape))
+            @test m.prompt_kind === nothing
+        end
+    end
+
+    @testset "W file-load: upsert by payload name, apply, dashboard, last_event" begin
+        d = generate_spc_workbench_data(12; seed = 22)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        # live defaults differ from files we'll load
+        m.show_chart_lines["cl"] = true
+        m.chart_line_styles["cl"] = "solid"
+        m.visual_prefs["secondary_canvas"] = true
+        m.enabled_rules["WECO-6"] = false
+        _sync_active_back!(m)
+        @test isempty(m.graph_presets)
+
+        mktempdir() do dir
+            p_a = GraphPreset(
+                name = "cfg-a",
+                show_chart_lines = Dict{String,Bool}("cl" => false, "sigma1" => true, "sigma2" => true, "sigma3" => true, "specs" => false),
+                chart_line_styles = Dict{String,String}("cl" => "long_dash", "sigma1" => "solid", "sigma2" => "dashed", "sigma3" => "long_dash", "specs" => "dotted"),
+                visual_prefs = Dict{String,Bool}("solid_series" => false, "solid_stroke" => true, "braille_series" => true, "secondary_canvas" => false),
+                enabled_rules = copy(DEFAULT_WECO_RULES),
+            )
+            p_a.enabled_rules["WECO-6"] = true
+            path_a = joinpath(dir, "whatever-a.json")  # basename ≠ payload name
+            @test save_graph_preset(p_a, path_a) === nothing
+
+            p_b = GraphPreset(
+                name = "cfg-b",
+                show_chart_lines = Dict{String,Bool}("cl" => true, "sigma1" => false, "sigma2" => true, "sigma3" => true, "specs" => true),
+                chart_line_styles = Dict{String,String}("cl" => "dotted", "sigma1" => "solid", "sigma2" => "dashed", "sigma3" => "long_dash", "specs" => "dotted"),
+                visual_prefs = Dict{String,Bool}("solid_series" => true, "solid_stroke" => true, "braille_series" => true, "secondary_canvas" => true),
+                enabled_rules = copy(DEFAULT_WECO_RULES),
+            )
+            p_b.enabled_rules["WECO-7"] = true
+            path_b = joinpath(dir, "whatever-b.json")
+            @test save_graph_preset(p_b, path_b) === nothing
+
+            # Load A via W
+            T.update!(m, T.KeyEvent('e'))  # Config Saved
+            @test m.view_mode === :config && m.config_tab === :saved
+            T.update!(m, T.KeyEvent('W'))
+            @test m.prompt_kind === :load_graph_config
+            _set_prompt_path!(m, path_a)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.view_mode === :dashboard  # R2
+            @test m.prompt_kind === nothing
+            @test m.last_graph_config_path == path_a
+            @test occursin("loaded graph config", m.last_event)
+            @test occursin(path_a, m.last_event)
+            @test !occursin("preset applied", m.last_event)  # final string overwritten (KD-UC-13)
+            @test length(m.graph_presets) == 1
+            @test m.graph_presets[1].name == "cfg-a"  # payload name wins over path basename
+            @test m.show_chart_lines["cl"] === false
+            @test m.chart_line_styles["cl"] == "long_dash"
+            @test m.visual_prefs["secondary_canvas"] === false
+            @test m.enabled_rules["WECO-6"] === true
+            @test current_chart(m).enabled_rules["WECO-6"] === true
+
+            # Load B → second list entry (different payload name)
+            T.update!(m, T.KeyEvent('e'))
+            T.update!(m, T.KeyEvent('W'))
+            _set_prompt_path!(m, path_b)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.view_mode === :dashboard
+            @test length(m.graph_presets) == 2
+            names = sort([p.name for p in m.graph_presets])
+            @test names == ["cfg-a", "cfg-b"]
+            @test m.show_chart_lines["sigma1"] === false
+            @test m.enabled_rules["WECO-7"] === true
+            @test occursin("loaded graph config", m.last_event)
+
+            # Reload A → same name upsert, length unchanged
+            # mutate live away from A first
+            m.show_chart_lines["cl"] = true
+            T.update!(m, T.KeyEvent('c'))
+            T.update!(m, T.KeyEvent('W'))
+            # prefill is last path (B); replace with A
+            _set_prompt_path!(m, path_a)
+            T.update!(m, T.KeyEvent(:enter))
+            @test length(m.graph_presets) == 2  # upsert, not push
+            @test m.show_chart_lines["cl"] === false
+            @test occursin("loaded graph config", m.last_event)
+        end
+    end
+
+    @testset "W fail-closed: invalid path leaves list + model unchanged" begin
+        d = generate_spc_workbench_data(10; seed = 23)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        push!(m.graph_presets, capture_graph_preset(m; name = "keep"))
+        m.show_chart_lines["specs"] = false
+        m.enabled_rules["WECO-6"] = true
+        _sync_active_back!(m)
+        snap_lines = copy(m.show_chart_lines)
+        snap_rules = copy(m.enabled_rules)
+        n0 = length(m.graph_presets)
+        prev_path = m.last_graph_config_path
+
+        T.update!(m, T.KeyEvent('e'))
+        T.update!(m, T.KeyEvent('W'))
+        @test m.prompt_kind === :load_graph_config
+        bad = "/tmp/does_not_exist_graph_cfg_$(rand(UInt32)).json"
+        _set_prompt_path!(m, bad)
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === :load_graph_config  # stay open for retry
+        @test m.view_mode === :config
+        @test occursin("load err", m.last_event)
+        @test length(m.graph_presets) == n0
+        @test m.graph_presets[1].name == "keep"
+        @test m.show_chart_lines == snap_lines
+        @test m.enabled_rules == snap_rules
+        @test m.last_graph_config_path == prev_path  # unchanged on fail
+        # empty path also fail-closed
+        while !isempty(m.prompt_buf)
+            T.update!(m, T.KeyEvent(:backspace))
+        end
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === :load_graph_config
+        @test occursin("load err", m.last_event)
+        @test length(m.graph_presets) == n0
+        T.update!(m, T.KeyEvent(:escape))
+    end
+
+    @testset "w fail-closed: unwritable path; last_graph_config_path unchanged" begin
+        d = generate_spc_workbench_data(10; seed = 24)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        m.last_graph_config_path = "/tmp/prev_cfg.json"
+
+        T.update!(m, T.KeyEvent('c'))
+        T.update!(m, T.KeyEvent('w'))
+        @test m.prompt_kind === :save_graph_config
+        @test m.prompt_buf == "/tmp/prev_cfg.json"  # prefill
+        bad = "/proc/no_write_cfg_$(rand(UInt32))/out.json"
+        _set_prompt_path!(m, bad)
+        T.update!(m, T.KeyEvent(:enter))
+        @test m.prompt_kind === :save_graph_config
+        @test occursin("save err", m.last_event)
+        @test m.last_graph_config_path == "/tmp/prev_cfg.json"
+        @test m.view_mode === :config
+        T.update!(m, T.KeyEvent(:escape))
+    end
+
+    @testset "file load does NOT call save_named_graph_preset! (payload upsert only)" begin
+        # Regression: file load must store file payload, not re-capture live model.
+        d = generate_spc_workbench_data(10; seed = 25)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        # Live model has cl=true; file payload has cl=false under name "from-file"
+        m.show_chart_lines["cl"] = true
+        _sync_active_back!(m)
+
+        mktempdir() do dir
+            p = GraphPreset(
+                name = "from-file",
+                show_chart_lines = Dict{String,Bool}("cl" => false, "sigma1" => true, "sigma2" => true, "sigma3" => true, "specs" => true),
+                chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+                visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+                enabled_rules = copy(DEFAULT_WECO_RULES),
+            )
+            path = joinpath(dir, "other-basename.json")
+            @test save_graph_preset(p, path) === nothing
+
+            T.update!(m, T.KeyEvent('e'))
+            T.update!(m, T.KeyEvent('W'))
+            _set_prompt_path!(m, path)
+            T.update!(m, T.KeyEvent(:enter))
+            @test length(m.graph_presets) == 1
+            @test m.graph_presets[1].name == "from-file"
+            # Stored entry matches file payload (cl=false), not a post-apply re-capture
+            # under a wrong name. After apply, live also has cl=false — list entry
+            # must still be the loaded payload identity.
+            @test m.graph_presets[1].show_chart_lines["cl"] === false
+            @test m.show_chart_lines["cl"] === false
+            # If save_named_graph_preset! had been used, name would still match but
+            # a second call path would re-capture; assert no "preset saved/updated"
+            # final event and payload name from file.
+            @test occursin("loaded graph config", m.last_event)
+            @test !occursin("preset saved", m.last_event)
+            @test !occursin("preset updated", m.last_event)
+        end
+    end
+
+    @testset "kind=graph_config file loadable via W prompt" begin
+        d = generate_spc_workbench_data(8; seed = 26)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        mktempdir() do dir
+            path = joinpath(dir, "alias-kind.json")
+            open(path, "w") do io
+                write(io, """{"kind":"graph_config","version":1,"name":"alias-cfg",
+                    "show_chart_lines":{"cl":false,"sigma1":true,"sigma2":true,"sigma3":true,"specs":true},
+                    "chart_line_styles":{"cl":"solid","sigma1":"dotted","sigma2":"dashed","sigma3":"long_dash","specs":"dotted"},
+                    "visual_prefs":{"solid_series":true,"solid_stroke":true,"braille_series":true,"secondary_canvas":true},
+                    "enabled_rules":{"WECO-1":true,"WECO-2":true,"WECO-3":true,"WECO-4":true,"WECO-5":true,"WECO-6":false,"WECO-7":false,"WECO-8":false}}""")
+            end
+            T.update!(m, T.KeyEvent('c'))
+            T.update!(m, T.KeyEvent('W'))
+            @test m.prompt_kind === :load_graph_config
+            _set_prompt_path!(m, path)
+            T.update!(m, T.KeyEvent(:enter))
+            @test m.view_mode === :dashboard
+            @test m.graph_presets[1].name == "alias-cfg"
+            @test m.show_chart_lines["cl"] === false
+            @test occursin("loaded graph config", m.last_event)
+        end
+    end
+
+end
+
+end # module TestSPCWorkbenchGraphConfigIO
 
 # HTML archive import (PR10 P2) — strip admins, map charts/values; via package module
 # ═══════════════════════════════════════════════════════════════════════

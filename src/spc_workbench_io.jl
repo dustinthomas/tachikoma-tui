@@ -516,8 +516,9 @@ end
 """
     load_graph_preset(path) -> GraphPreset | String
 
-Load a standalone graph-preset JSON file. Accepts `kind=graph_preset` or a
-bare object with the preset fields. Fail-closed on unreadable / invalid.
+Load a standalone graph-preset JSON file. Accepts `kind=graph_preset` or
+`kind=graph_config` (load-only alias; PR4), or a bare object with the preset
+fields. Fail-closed on unreadable / invalid. Write path still uses `graph_preset`.
 """
 function load_graph_preset(path::AbstractString)::Union{GraphPreset,String}
     local d
@@ -529,8 +530,11 @@ function load_graph_preset(path::AbstractString)::Union{GraphPreset,String}
     end
     d isa AbstractDict || return "load err: graph preset must be an object"
     kind = get(d, "kind", nothing)
-    if kind !== nothing && String(kind) != "graph_preset"
-        return "load err: not a graph_preset (kind=$(kind))"
+    if kind !== nothing
+        ks = String(kind)
+        if ks != "graph_preset" && ks != "graph_config"
+            return "load err: not a graph_preset (kind=$(kind))"
+        end
     end
     p = graph_preset_from_dict(d)
     p isa String && return "load err: $p"

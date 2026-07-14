@@ -35,6 +35,8 @@ change that default. Use `:single` or `:none` only in explicit constructs.
 | **`e` / `E`** | Config → **Saved** (named graph configs; load → dashboard) |
 | Config `e` | Jump to Saved section |
 | Config `s` | Name-save current graph set (session upsert) |
+| Config `w` | Path prompt → **file-save** graph config JSON (`kind=graph_preset`) |
+| Config `W` | Path prompt → **file-load** graph config → upsert by name → apply → dashboard |
 | `u` / `t` / `l` | Edit USL / Target / **LSL** (`L` is LSL, not live) |
 | `s` | Clear all spec limits |
 | `1`…`8` | Toggle WECO rule N |
@@ -297,13 +299,20 @@ line styles, visual prefs, and WECO rules to calculate.
 
 | Key | Action |
 |-----|--------|
-| `s` | **Popup** name prompt — save/upsert current graph set |
+| `s` | **Popup** name prompt — save/upsert current graph set (session list) |
+| `w` | **Path prompt** — write standalone graph-config JSON (basename without extension becomes `name`) |
+| `W` | **Path prompt** — load file → upsert by payload `name` → apply → dashboard |
 | `↑`/`↓` | Select a saved config |
-| `Enter` / `l` / `a` / **Space** | **Load** selected → dashboard (R2) |
+| `Enter` / `l` / `a` / **Space** | **Load** selected named → dashboard (R2) |
 | `d` then `y` | Delete selected named config (not a chart) |
 | Esc / `q` | Close Config (no quit) |
 
 Load applies to active-chart WECO rules + session `default_rules`.
+
+Named-list success events keep `"preset …"` prefixes. File path success uses
+`"saved graph config <path>"` / `"loaded graph config <path>"`. Path prompts
+prefill `last_graph_config_path` (never a silent default write). Fail-closed on
+bad/empty path (prompt stays open; model + list unchanged on load fail).
 
 | Field | Required | Notes |
 |-------|----------|-------|
@@ -314,7 +323,8 @@ Load applies to active-chart WECO rules + session `default_rules`.
 | `enabled_rules` | no | WECO map captured from active chart at save time |
 
 Standalone file helpers: `save_graph_preset(p, path)` / `load_graph_preset(path)`
-write `{kind: "graph_preset", version: 1, …fields}`.
+write `{kind: "graph_preset", version: 1, …fields}`. Load also accepts
+`kind: "graph_config"` as an alias; write still emits `graph_preset`.
 
 ### Per-chart object
 

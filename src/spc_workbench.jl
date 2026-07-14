@@ -1829,6 +1829,7 @@ end
     # :filter_tool | :filter_type | :filter_owner  (GC-PR4)
     # :tool_add_id | :tool_add_desc | :tool_edit_desc  (P2-PR4 tools registry)
     # :save_graph_preset | :apply_graph_preset  (named graph config presets)
+    # :save_graph_config | :load_graph_config   (file path save/load; PR4)
     prompt_buf::String = ""
     pending_delete::Bool = false
     # Prefill only for export prompts — never silent write to default path
@@ -1847,6 +1848,8 @@ end
     presets_area::Rect = Rect(0, 0, 0, 0)
     # Prefill only for save/load prompts — never silent write to default path
     last_workbench_path::String = ""
+    # Prefill only for graph-config file prompts — never silent write (KD-UC-8)
+    last_graph_config_path::String = ""
     # Session-ephemeral dashboard/library filters (GC-PR4) — NOT in JSON schema
     filter_tool::String = ""       # empty = no filter; match requires tool in ch.tools
     filter_type::String = ""       # wire form e.g. "I-MR"; empty = no filter (NOT Union{Nothing,ChartType})
@@ -2267,6 +2270,31 @@ function apply_named_graph_preset!(m::SPCWorkbenchModel, name::AbstractString)::
     return "preset not found: $n"
 end
 
+"""Basename without extension for config file identity (KD-UC-17). Empty → \"default\"."""
+function _graph_config_name_from_path(path::AbstractString)::String
+    base = basename(strip(String(path)))
+    isempty(base) && return "default"
+    # strip last extension only (foo.bar.json → foo.bar)
+    dot = findlast(==('.'), base)
+    name = (dot === nothing || dot == 1) ? base : base[1:prevind(base, dot)]
+    n = strip(name)
+    return isempty(n) ? "default" : n
+end
+
+"""Replace-or-push preset by exact name. Stores provided value — does NOT re-capture model (KD-UC-12)."""
+function _upsert_graph_preset!(m::SPCWorkbenchModel, p::GraphPreset)
+    n = strip(p.name)
+    isempty(n) && return "empty preset name"
+    for i in eachindex(m.graph_presets)
+        if m.graph_presets[i].name == n
+            m.graph_presets[i] = p
+            return nothing
+        end
+    end
+    push!(m.graph_presets, p)
+    return nothing
+end
+
 export capture_graph_preset, apply_graph_preset!, save_named_graph_preset!, apply_named_graph_preset!
 
 # ── Pure chart library CRUD ─────────────────────────────────────────────
@@ -2623,6 +2651,14 @@ function _handle_config_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
     # Name-save available from any Config section
     if evt.key == :char && (evt.char == 's' || evt.char == 'S')
         _open_prompt!(m, :save_graph_preset; seed = "")
+        return
+    end
+    # File save/load path prompts from any Config section (KD-UC-8 / PR4)
+    if evt.key == :char && evt.char == 'w'
+        _open_prompt!(m, :save_graph_config; seed = m.last_graph_config_path)
+        return
+    elseif evt.key == :char && evt.char == 'W'
+        _open_prompt!(m, :load_graph_config; seed = m.last_graph_config_path)
         return
     end
     # ── Saved section: named list (replaces view_mode=:presets) ──────────
@@ -3425,6 +3461,53 @@ function _apply_prompt!(m::SPCWorkbenchModel)
             m.last_event = err
             # keep prompt open so operator can retype name
         end
+        return
+    elseif kind === :save_graph_config
+        # File write of current graph set (KD-UC-8 / KD-UC-17)
+        path = strip(buf)
+        if isempty(path)
+            m.last_event = "save err: empty path"
+            return  # keep prompt open; no last_graph_config_path update
+        end
+        name = _graph_config_name_from_path(path)
+        p = capture_graph_preset(m; name = name)
+        err = save_graph_preset(p, path)
+        if err === nothing
+            m.last_graph_config_path = path
+            m.last_event = "saved graph config $path"
+            m.prompt_kind = nothing
+            m.prompt_buf = ""
+            # stay on Config (do not jump to dashboard)
+        else
+            # fail-closed: keep prompt open for path retry
+            m.last_event = startswith(String(err), "save err:") ? String(err) : "save err: $err"
+        end
+        return
+    elseif kind === :load_graph_config
+        # File load → upsert payload by name → apply → dashboard (KD-UC-12 / R2)
+        path = strip(buf)
+        if isempty(path)
+            m.last_event = "load err: empty path"
+            return  # keep prompt open; no upsert / apply
+        end
+        result = load_graph_preset(path)
+        if result isa AbstractString
+            # fail-closed: no partial apply / no upsert; keep prompt for retry
+            m.last_event = startswith(String(result), "load err:") ? String(result) : "load err: $result"
+            return
+        end
+        p = result::GraphPreset
+        up_err = _upsert_graph_preset!(m, p)  # payload only — NOT save_named_graph_preset!
+        if up_err !== nothing
+            m.last_event = String(up_err)
+            return
+        end
+        apply_graph_preset!(m, p)  # sets "preset applied: …" briefly
+        m.last_graph_config_path = path
+        m.last_event = "loaded graph config $path"  # KD-UC-13: final string after apply
+        m.view_mode = :dashboard
+        m.prompt_kind = nothing
+        m.prompt_buf = ""
         return
     elseif kind === :filter_tool
         set_filter_tool!(m, buf)
@@ -4513,14 +4596,15 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
     elseif mode === :config
         compact && return [
             (:binds, [("↑↓", "select"), ("↵/sp", "tog/load"), ("Tab", "section"), ("←→", "style")]),
-            (:binds, [("c/v/o/e", "jump"), ("s", "name-save"), ("Esc", "close"), ("q", "close")]),
+            (:binds, [("c/v/o/e", "jump"), ("s", "name"), ("w/W", "file"), ("Esc", "close")]),
         ]
         return [
             (:section, "CONFIG"),
             (:binds, [("↑↓", "select"), ("↵/Space", "toggle · load(Saved)"), ("1-N", "jump+toggle"), ("←/→", "style (lines)")]),
             (:binds, [("Tab", "cycle section"), ("c", "rules"), ("v", "lines"), ("o", "visual"), ("e", "saved")]),
-            (:binds, [("s", "name-save"), ("l/a", "load named"), ("d", "delete saved"), ("Esc/q", "close")]),
-            (:note, "toggles apply immediately · Saved load → dashboard · Esc/q only closes"),
+            (:binds, [("s", "name-save"), ("w", "file-save"), ("W", "file-load"), ("l/a", "load named")]),
+            (:binds, [("d", "delete saved"), ("Esc/q", "close")]),
+            (:note, "toggles apply immediately · file/named load → dashboard · Esc/q only closes"),
         ]
     elseif mode === :table
         compact && return [
@@ -5628,7 +5712,7 @@ function _render_config_page!(buf, area, m)
     chname = isempty(m.charts) ? "—" : current_chart(m).name
     if m.config_tab === :saved
         set_string!(buf, content.x + 2, y,
-            "Section: $tab_lbl   ·  Enter/l/a/Space load → dashboard   ·  s name-save   ·  d delete",
+            "Section: $tab_lbl   ·  Enter/l/a/Space load → dash   ·  s name  ·  w/W file  ·  d del",
             tstyle(:text_dim))
     else
         set_string!(buf, content.x + 2, y,
@@ -5657,10 +5741,12 @@ function _render_presets_list_body!(buf, content, m; y::Int)
     capacity = _presets_visible_capacity(m)
     _sync_presets_scroll!(m, npre, capacity)
     if npre == 0
-        set_string!(buf, content.x + 2, y, "No saved configs — s · name-save current graph set", tstyle(:warning, bold=true))
+        set_string!(buf, content.x + 2, y,
+            "No saved configs — s · name-save  ·  w · file-save  ·  W · file-load",
+            tstyle(:warning, bold=true))
         y += 1
         set_string!(buf, content.x + 2, y,
-            "  Capture lines on/off, styles, visual prefs, and WECO rules under a name.",
+            "  Capture lines on/off, styles, visual prefs, and WECO rules (name or JSON path).",
             tstyle(:text_dim))
         y += 1
     else
