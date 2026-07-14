@@ -2256,22 +2256,20 @@ end
 """
     save_named_graph_preset!(m, name) -> nothing | String
 
-Capture current graph set under `name` into `m.graph_presets` (upsert by name).
+Capture current graph set under `name` into `m.graph_presets` via path-keyed
+upsert (KD-SE-17). Capture always yields empty `path`, so only path-less
+same-name rows are replaced — never clobbers a path-bearing entry by name.
 Empty/whitespace name → error string; model unchanged.
 """
 function save_named_graph_preset!(m::SPCWorkbenchModel, name::AbstractString)::Union{Nothing,String}
     n = strip(String(name))
     isempty(n) && return "empty preset name"
     p = capture_graph_preset(m; name = n)
-    for i in eachindex(m.graph_presets)
-        if m.graph_presets[i].name == n
-            m.graph_presets[i] = p
-            m.last_event = "preset updated: $n"
-            return nothing
-        end
-    end
-    push!(m.graph_presets, p)
-    m.last_event = "preset saved: $n"
+    # Capture is path-less; detect path-less same-name before upsert for last_event
+    existed_pathless = any(e -> e.name == n && isempty(strip(e.path)), m.graph_presets)
+    err = _upsert_graph_preset!(m, p)
+    err isa AbstractString && return err
+    m.last_event = existed_pathless ? "preset updated: $n" : "preset saved: $n"
     return nothing
 end
 
@@ -2306,21 +2304,24 @@ end
 """
 Replace-or-push preset with path-keyed identity (KD-SE-17).
 
-1. If `abspath(p.path)` non-empty: replace first entry with same abspath; else push.
+1. If `abspath(expanduser(p.path))` non-empty: replace first entry with same
+   normalized path; else push.
 2. Else (path empty): replace first entry with same exact name **and** empty path; else push.
 3. Never replace entry A by name when A has a different non-empty path.
 
 Stores provided value — does NOT re-capture model (KD-UC-12).
+Path identity matches index upsert: `abspath(expanduser(...))`.
 """
 function _upsert_graph_preset!(m::SPCWorkbenchModel, p::GraphPreset)
     n = strip(p.name)
     isempty(n) && return "empty preset name"
     raw_path = strip(p.path)
-    path = isempty(raw_path) ? "" : abspath(raw_path)
+    path = isempty(raw_path) ? "" : abspath(expanduser(raw_path))
     if !isempty(path)
         p.path = path
         i = findfirst(
-            e -> !isempty(strip(e.path)) && abspath(strip(e.path)) == path,
+            e -> !isempty(strip(e.path)) &&
+                abspath(expanduser(strip(e.path))) == path,
             m.graph_presets,
         )
         if i !== nothing

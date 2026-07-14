@@ -483,7 +483,8 @@ function graph_preset_from_dict(d)::Union{GraphPreset,String}
     rules isa String && return rules
 
     path_raw = get(d, "path", "")
-    path_s = path_raw isa AbstractString ? String(path_raw) : ""
+    # Strip whitespace; non-string path ignored (optional host field, not fail-closed)
+    path_s = path_raw isa AbstractString ? strip(String(path_raw)) : ""
 
     return GraphPreset(
         name = n,
@@ -719,11 +720,14 @@ end
     read_graph_config_index(path) -> Vector{GraphConfigIndexEntry}
 
 Load index entries. Missing file, corrupt JSON, or unknown version → empty
-vector (fail-closed; never throws).
+vector (fail-closed; never throws). Path is normalized with
+`abspath(expanduser(...))` so `~/…` resolves like write.
 """
 function read_graph_config_index(path::AbstractString)::Vector{GraphConfigIndexEntry}
     try
-        p = String(path)
+        raw = strip(String(path))
+        isempty(raw) && return GraphConfigIndexEntry[]
+        p = abspath(expanduser(raw))
         isfile(p) || return GraphConfigIndexEntry[]
         text = read(p, String)
         d = JSON.parse(text)
@@ -755,7 +759,8 @@ end
 """
     write_graph_config_index(path, entries) -> nothing | String
 
-Write index JSON. Creates parent dirs via `mkpath`. Prefers atomic temp+rename.
+Write index JSON. Creates parent dirs via `mkpath`. Prefers atomic temp+rename
+in the same directory. Path is normalized with `abspath(expanduser(...))`.
 Fail-closed error string on failure (`"index err: …"`); never throws into UI.
 """
 function write_graph_config_index(
@@ -764,8 +769,10 @@ function write_graph_config_index(
 )::Union{Nothing,String}
     tmp = ""
     try
-        p = String(path)
-        dir = dirname(abspath(expanduser(p)))
+        raw = strip(String(path))
+        isempty(raw) && return "index err: empty path"
+        p = abspath(expanduser(raw))
+        dir = dirname(p)
         try
             mkpath(dir)
         catch e
@@ -776,7 +783,8 @@ function write_graph_config_index(
             "kind" => GRAPH_CONFIG_INDEX_KIND,
             "entries" => [_index_entry_to_dict(e) for e in entries],
         )
-        tmp = p * ".tmp." * string(rand(UInt32); base = 16)
+        # Same-dir temp for atomic rename; pid+rand avoids collision
+        tmp = joinpath(dir, ".graph_config_index.tmp.$(getpid()).$(string(rand(UInt32); base = 16))")
         open(tmp, "w") do io
             JSON.print(io, d)
         end
@@ -795,9 +803,10 @@ end
 """
     upsert_graph_config_index_entry!(entries, entry; cap=50) -> nothing
 
-Path-keyed upsert (absolute path identity). Updates name/summary/timestamps from
-`entry`. Enforces `cap` by dropping oldest `last_used_at` (empty timestamps
-sort first / drop first). Empty path → no-op.
+Path-keyed upsert (absolute path identity via `abspath(expanduser(...))`).
+Updates name/summary/timestamps from `entry`. Empty `last_used_at` (and
+`saved_at` when empty) is filled with `_index_timestamp()` so a new push at
+cap is never immediately evicted. Cap drops oldest `last_used_at`. Empty path → no-op.
 """
 function upsert_graph_config_index_entry!(
     entries::Vector{GraphConfigIndexEntry},
@@ -808,6 +817,12 @@ function upsert_graph_config_index_entry!(
     isempty(raw) && return nothing
     path = abspath(expanduser(raw))
     entry.path = path
+    if isempty(strip(entry.last_used_at))
+        entry.last_used_at = _index_timestamp()
+    end
+    if isempty(strip(entry.saved_at))
+        entry.saved_at = entry.last_used_at
+    end
     i = findfirst(e -> abspath(expanduser(strip(e.path))) == path, entries)
     if i !== nothing
         entries[i] = entry

@@ -275,6 +275,57 @@ include("../src/spc_workbench.jl")
         pbearing = findfirst(e -> !isempty(e.path), m3.graph_presets)
         @test pbearing !== nothing
         @test m3.graph_presets[pbearing].show_chart_lines["cl"] === true  # untouched
+
+        # Issue 1: ~/ and expanded absolute path are the same identity
+        m_tilde = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        rel = joinpath(".cache", "spc_pr2_upsert_tilde_$(rand(UInt32)).json")
+        tilde_p = "~/" * replace(rel, "\\" => "/")
+        abs_p = abspath(expanduser(tilde_p))
+        @test startswith(abs_p, abspath(homedir()))
+        pt = GraphPreset(name = "tilde-cfg", show_chart_lines = copy(DEFAULT_CHART_LINES),
+            chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+            visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+            enabled_rules = copy(DEFAULT_WECO_RULES),
+            path = tilde_p)
+        pa = GraphPreset(name = "tilde-cfg", show_chart_lines = copy(DEFAULT_CHART_LINES),
+            chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+            visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+            enabled_rules = copy(DEFAULT_WECO_RULES),
+            path = abs_p)
+        pa.show_chart_lines["cl"] = false
+        @test _upsert_graph_preset!(m_tilde, pt) === nothing
+        @test length(m_tilde.graph_presets) == 1
+        @test m_tilde.graph_presets[1].path == abs_p  # stored normalized
+        @test _upsert_graph_preset!(m_tilde, pa) === nothing
+        @test length(m_tilde.graph_presets) == 1  # same slot, not duplicate
+        @test m_tilde.graph_presets[1].show_chart_lines["cl"] === false
+
+        # Issue 3: save_named_graph_preset! must not clobber path-bearing same-name rows
+        m_named = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        disk_path = joinpath(tempdir(), "spc_named_noclobber_$(rand(UInt32)).json")
+        push!(m_named.graph_presets, GraphPreset(
+            name = "shared-name",
+            show_chart_lines = copy(DEFAULT_CHART_LINES),
+            chart_line_styles = copy(DEFAULT_CHART_LINE_STYLES),
+            visual_prefs = copy(DEFAULT_VISUAL_PREFS),
+            enabled_rules = copy(DEFAULT_WECO_RULES),
+            path = disk_path,
+        ))
+        m_named.show_chart_lines["specs"] = false
+        @test save_named_graph_preset!(m_named, "shared-name") === nothing
+        @test length(m_named.graph_presets) == 2  # push path-less, keep path-bearing
+        paths_after = [e.path for e in m_named.graph_presets]
+        @test any(p -> abspath(expanduser(p)) == abspath(disk_path), paths_after)
+        @test any(isempty, paths_after)
+        bearing = findfirst(e -> !isempty(e.path), m_named.graph_presets)
+        @test bearing !== nothing
+        @test m_named.graph_presets[bearing].path == abspath(expanduser(disk_path)) ||
+              m_named.graph_presets[bearing].path == disk_path
+        @test occursin("preset saved", m_named.last_event)
+        # path-less same name still updates (event "preset updated")
+        @test save_named_graph_preset!(m_named, "shared-name") === nothing
+        @test length(m_named.graph_presets) == 2
+        @test occursin("preset updated", m_named.last_event)
     end
 
     @testset "weco_detect guards (empty, zero sigma)" begin
@@ -7609,6 +7660,78 @@ const WB = TachikomaTUI
         finally
             isfile(path) && rm(path; force = true)
         end
+
+        # Issue 5: whitespace-only path strips to empty; non-string path ignored
+        p_ws = graph_preset_from_dict(Dict{String,Any}("name" => "ws", "path" => "   "))
+        @test p_ws isa GraphPreset
+        @test p_ws.path == ""
+        p_ns = graph_preset_from_dict(Dict{String,Any}("name" => "ns", "path" => 123))
+        @test p_ns isa GraphPreset
+        @test p_ns.path == ""
+    end
+
+    @testset "review fixes: tilde index path, empty path, empty-ts cap" begin
+        # Issue 2: write/read via ~/… path under homedir
+        rel = joinpath(".cache", "tachikoma-tui-pr2-idx-$(rand(UInt32))", "graph_config_index.json")
+        abs_idx = joinpath(homedir(), rel)
+        tilde_idx = "~/" * replace(rel, "\\" => "/")
+        try
+            e = GraphConfigIndexEntry(
+                name = "via-tilde",
+                path = "/tmp/via-tilde.json",
+                saved_at = "2026-07-13T10:00:00",
+                last_used_at = "2026-07-13T10:00:00",
+                summary = Dict{String,Any}("weco_on" => 1),
+            )
+            err = write_graph_config_index(tilde_idx, GraphConfigIndexEntry[e])
+            @test err === nothing
+            @test isfile(abs_idx)
+            loaded = read_graph_config_index(tilde_idx)
+            @test length(loaded) == 1
+            @test loaded[1].name == "via-tilde"
+            # also readable via absolute path
+            @test length(read_graph_config_index(abs_idx)) == 1
+        finally
+            isfile(abs_idx) && rm(abs_idx; force = true)
+            d = dirname(abs_idx)
+            isdir(d) && rm(d; force = true)
+        end
+
+        # Issue 6: empty path → clear error
+        @test write_graph_config_index("", GraphConfigIndexEntry[]) == "index err: empty path"
+        @test write_graph_config_index("   ", GraphConfigIndexEntry[]) == "index err: empty path"
+        @test read_graph_config_index("") == GraphConfigIndexEntry[]
+
+        # Issue 4: empty last_used_at at cap still retains the new path.
+        # Bulk uses ISO-ish timestamps so string order matches age; auto-fill uses "now".
+        capped = GraphConfigIndexEntry[]
+        for i in 1:50
+            ts = "2020-01-01T00:" * lpad(string(div(i - 1, 60)), 2, '0') * ":" *
+                 lpad(string(mod(i - 1, 60)), 2, '0')
+            upsert_graph_config_index_entry!(capped, GraphConfigIndexEntry(
+                name = "n$i",
+                path = "/tmp/cap2/cfg_$i.json",
+                saved_at = ts,
+                last_used_at = ts,
+                summary = Dict{String,Any}(),
+            ); cap = 50)
+        end
+        @test length(capped) == 50
+        upsert_graph_config_index_entry!(capped, GraphConfigIndexEntry(
+            name = "new",
+            path = "/tmp/cap2/new.json",
+            saved_at = "",
+            last_used_at = "",
+            summary = Dict{String,Any}(),
+        ); cap = 50)
+        @test length(capped) == 50
+        hit = findfirst(e -> e.name == "new", capped)
+        @test hit !== nothing
+        @test any(e -> endswith(e.path, "new.json"), capped)
+        @test !isempty(capped[hit].last_used_at)  # auto-filled so not immediately evicted
+        @test !isempty(capped[hit].saved_at)
+        # oldest bulk entry (n1 / 00:00:00) should be gone
+        @test !any(e -> e.name == "n1", capped)
     end
 
 end
