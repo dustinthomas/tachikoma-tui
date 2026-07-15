@@ -27,17 +27,22 @@ It is **keyboard-first**. Mouse works on the main plot for pan/zoom/hover; secon
 Session
 ├── Charts          each has its own series, limits mode, WECO toggles, specs, viewport
 ├── Tools registry  master list of tool ids (assign to charts in the builder)
+├── Params catalog  optional tool parameters (Side Stats ▸ PARAMS; fake_tool seed)
 ├── Shared table    optional in-memory spreadsheet-like data (from CSV/session)
 └── Filters         show only charts matching tool / type / owner
 ```
 
 **Materialize:** charts display a **series** (`values`). The SharedTable is a separate source. Changing table cells does **not** rebuild the chart until you **Apply** in the builder (`a`) or rematerialize from the table grid (`r`).
 
+**Seed demos:** runners default to `seed_demos = :triple` (three stacked demos). Keep that default for day-to-day and CI. For a **single-chart tool + parameter** product walkthrough, pass `seed_demos = :fake_tool` (see [Tool parameter demo](#tool-parameter-demo-fake_tool) below). Do not flip the model/runner default without an explicit product decision.
+
 ---
 
 ## Dashboard
 
 This is the home screen after launch (and after closing library/builder/etc.).
+
+How many chart panes you see is controlled by **`dashboard_max_panes`** (clamped 1…3). Seed policy sets it: **`:triple` → 3**, **`:fake_tool` / `:single` / `:none` → 1**. Adding a chart via the **Add Chart** wizard can raise the budget up to 3 so new panes appear.
 
 ### Navigate charts
 
@@ -52,12 +57,64 @@ This is the home screen after launch (and after closing library/builder/etc.).
 
 | Key | Action |
 |-----|--------|
-| `p` | Pause / resume **session** tick-driven live |
+| `p` / `P` | Pause / resume **session** tick-driven live (**unchanged** — not used for params) |
 | **`g` / `G`** | Toggle **this chart’s** live append on/off |
 
-**Important:** Live is **only** `g`/`G`. The key **`L` is for LSL** (lower spec limit), not live.
+**Important:** Live is **only** `g`/`G`. The key **`L` is for LSL** (lower spec limit), not live. **`p`/`P` always pause**, even when Side Stats PARAMS is focused. **`k`/`K` always open the keymap**, even when PARAMS is focused.
 
 Seeded demos usually start with live enabled on charts. Successful **CSV import** turns live **off** for that chart and pauses the session.
+
+### Side Stats ▸ PARAMS (tool parameters)
+
+When the session has a **parameter catalog** (filled by `seed_demos = :fake_tool`), Side Stats shows an interactive **`▸ PARAMS`** section (after STATS, before HOVER). Other Side Stats sections stay read-only paint.
+
+Typical chrome under `:fake_tool`:
+
+```text
+▸ PARAMS
+◆ Film-PTPECVD01
+▶ 1 Thickness 1.3µm  nm
+  2 Refractive Index  —
+  3 HSQ Thickness  nm
+```
+
+| Key | Action |
+|-----|--------|
+| **`;`** | Toggle **PARAMS focus** on/off (no-op if catalog empty) |
+| **`j` / `J`** | Next / previous parameter (**only while focused**) |
+| **`↑` / `↓`** | Previous / next parameter (**only while focused**; otherwise no-op) |
+| **`1`…`9`** | Jump to parameter index **while focused** (digits do **not** toggle WECO while focused) |
+| Esc | Clear PARAMS focus (does not quit while focused) |
+
+Selecting a parameter activates the chart whose `param` id matches that catalog entry. If no chart exists yet, the list still highlights the row and status reports **`no chart for param — press + to add`** (series are never rewritten on select).
+
+While **unfocused**, `1`…`8` still toggle WECO rules on the active chart as before.
+
+### Add Chart (`+` / `A`)
+
+On the **dashboard** only:
+
+| Key | Action |
+|-----|--------|
+| **`+`** or **`A`** | Open the **Add Chart** modal |
+
+Library **`a`** remains **blank add chart** — it does **not** open this wizard.
+
+**Modal keys** (full absorb; Esc/`q` close the modal and never quit the app):
+
+| Key | Action |
+|-----|--------|
+| Tab | Toggle mode: **Param** ↔ **Analysis** |
+| `↑` `↓` | Move list cursor |
+| Enter / Space | Confirm |
+| Esc / `q` | Cancel |
+
+| Mode | What it adds |
+|------|----------------|
+| **Param** | Chart for another catalog parameter (same tool when seeded from fake_tool) |
+| **Analysis** | Second analysis of the **active** chart’s parameter — v1 types: **I-MR**, **X̄-R**, **X̄-S** only |
+
+Duplicates (same parameter id + chart type) are refused. A successful wizard add can **auto-raise** `dashboard_max_panes` up to 3 so the new pane is visible.
 
 ### Specs and WECO
 
@@ -145,8 +202,10 @@ enable map. **Not** series values, not USL/Target/LSL numbers, not viewport.
 | `d` | **SharedTable** grid |
 | `f` | Filter prompt / clear filters |
 | `?` / `h` | Help |
-| `k` | Keymap |
-| `q` / Esc | **Quit** (dashboard only) |
+| `k` / `K` | Keymap (**always**, including while PARAMS focused) |
+| `+` / `A` | **Add Chart** wizard (param or analysis) |
+| `;` | Toggle Side Stats **PARAMS** focus (when catalog non-empty) |
+| `q` / Esc | **Quit** (dashboard only; Esc first clears PARAMS focus / open modals) |
 
 ### Dual secondary chart (MR / R / s)
 
@@ -273,12 +332,47 @@ Use **`?`** in-app when unsure; update this guide if in-app help diverges.
 
 ---
 
+## Tool parameter demo (`:fake_tool`)
+
+**Default runners stay on `:triple`.** Prefer that for general exploration and tests. For a fab-style **one tool + parameter list + single primary chart** walkthrough:
+
+```bash
+julia --project=. -e 'using TachikomaTUI; TachikomaTUI.spc_workbench_demo(seed_demos=:fake_tool)'
+# or
+julia --project=. -e 'using TachikomaTUI; TachikomaTUI.spc_workbench(seed_demos=:fake_tool, paused=true)'
+```
+
+What you get:
+
+| Piece | Content |
+|-------|---------|
+| Tool | **Film-PTPECVD01** (synthetic; not loaded from `template_tool.csv`) |
+| Params | Catalog of process parameters (e.g. Thickness 1.3µm, Refractive Index, HSQ Thickness) |
+| Charts | **One** chart for the first parameter; `dashboard_max_panes = 1` |
+| SharedTable | Long-format rows with a **Parameter** column (stable param ids) |
+| Side Stats | **`▸ PARAMS`** + tool chip `◆ Film-PTPECVD01` |
+
+Suggested keys:
+
+1. **`;`** — focus PARAMS · **`j`/`J`** or **`↑`/`↓`** — move selection  
+2. Select a param without a chart → status suggests **`+`**  
+3. **`+`** → Param mode → pick another parameter → Enter → second pane (budget auto-bumps)  
+4. **`+`** → Tab to **Analysis** → pick X̄-R / X̄-S / I-MR → Enter  
+5. **`p`** still pauses; **`k`** still opens the keymap
+
+---
+
 ## Suggested workflows
 
-### A. Explore the demo
+### A. Explore the demo (default triple)
 
-1. `spc_workbench_demo()`
+1. `spc_workbench_demo()` — three charts, multi-pane  
 2. `[` `]` · `1`–`8` · mouse hover · `?`
+
+### A2. Explore tool + parameters (fake_tool)
+
+1. `spc_workbench_demo(seed_demos=:fake_tool)`  
+2. `;` · `j`/`J` · `+` add param/analysis chart · `p` pause · `k` keymap  
 
 ### B. Import a measurement file
 
@@ -306,6 +400,12 @@ More detail on files: [Data import & export](data-import-export.md)
 | Confusion | Reality |
 |-----------|---------|
 | `L` for live | No — **`g`**. `L` is LSL. |
+| `p` navigates params | No — **`p`/`P` always pause**. Params use **`;`** focus + **`j`/`J`** / **`↑`/`↓`**. |
+| `k` is blocked while PARAMS focused | No — **`k`/`K` always open keymap**. |
+| Default launch is single-chart tool demo | No — default is still **`seed_demos = :triple`**. Use **`:fake_tool`** explicitly. |
+| Dashboard `a` opens Add Chart wizard | No — dashboard uses **`+` / `A`**. Library **`a`** is blank add. |
+| Selecting a param rebuilds series | No — activates matching chart or Message only; never rematerializes on select. |
+| All Side Stats sections are interactive | No — only **`▸ PARAMS`** is interactive; STATS/HOVER/LINES/WECO/CHARTS stay paint-only. |
 | `q` in a path prompt quits | No — it types the letter `q`. Esc cancels. |
 | Edit table → chart updates | No — rematerialize with builder **`a`** or table **`r`**. |
 | Tools registry assigns charts | No — registry is the master list; builder sets `ch.tools`. |
