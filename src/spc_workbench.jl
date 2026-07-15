@@ -291,6 +291,9 @@ empty_workbench_data() = WorkbenchData(values = Float64[], cl = 0.0, sigma = 0.0
     # PR7b: optional Lot/Wafer/Chip (or Tool/Timestamp) column for table Xbar subgroups.
     # Empty → series-chunk of `subgroup_size` on materialized individuals (PR7).
     col_lot::String = ""
+    # PR1b: optional Parameter column map + filter (ParamEntry.id). Empty filter → no param row filter.
+    col_param::String = ""
+    param_filter::String = ""
 end
 
 # ── SharedTable + copy-on-map materialize (PR6 / KD25) ──────────────────
@@ -309,6 +312,8 @@ std_or_0(vs) = length(vs) < 2 ? 0.0 : std(vs; corrected = true)
 
 Pure. Operates on the in-memory SharedTable only (no file I/O).
 Filter rows by `ch.tools` when non-empty (via `ch.col_tool`); map `ch.col_value`.
+When `ch.param_filter` is non-empty, keep rows whose `ch.col_param` cell equals
+`param_filter` (ParamEntry.id). Empty `param_filter` leaves charts unchanged.
 When `ch.col_lot` is set, each point_meta includes `"lot"` (group key for PR7b Xbar).
 """
 function compute_chart_series(table::SharedTable, ch::ChartSpec)
@@ -319,11 +324,21 @@ function compute_chart_series(table::SharedTable, ch::ChartSpec)
     col_t = ch.col_tool
     col_time = ch.col_time
     col_lot = ch.col_lot
+    col_param = ch.col_param
+    param_filter = ch.param_filter
     filter_tools = !isempty(ch.tools) && !isempty(col_t)
+    # Require both map + filter string so empty-filter charts stay unchanged.
+    filter_param = !isempty(param_filter) && !isempty(col_param)
     for row in table.rows
         if filter_tools
             tool_val = get(row, col_t, "")
             if !(String(tool_val) in ch.tools)
+                continue
+            end
+        end
+        if filter_param
+            pcell = get(row, col_param, "")
+            if String(pcell) != param_filter
                 continue
             end
         end
@@ -346,6 +361,9 @@ function compute_chart_series(table::SharedTable, ch::ChartSpec)
         )
         if !isempty(col_lot)
             pm["lot"] = String(get(row, col_lot, ""))
+        end
+        if !isempty(col_param)
+            pm["param"] = String(get(row, col_param, ""))
         end
         push!(point_meta, pm)
     end
@@ -1689,6 +1707,7 @@ export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_
 export I_MR, Xbar_R, Xbar_S, p_chart, np_chart, c_chart, u_chart
 export SharedTable, mean_or_0, std_or_0, compute_chart_series, materialize_chart_from_table!
 export shared_table_from_columns_rows, fill_shared_table!
+export materialize_param_chart!, build_fake_tool_table
 
 # UI requires Tachikoma (slices 2+). Pure tests include will pull it in.
 using Tachikoma
@@ -2461,32 +2480,90 @@ function default_fake_tool_params()::Vector{ParamEntry}
 end
 
 """
+    build_fake_tool_table(; params=default_fake_tool_params(), seed=42, rows_per_param=16) -> SharedTable
+
+Synthetic long-format SharedTable for the demo PECVD tool (PR1b).
+Columns: Timestamp, Tool, Lot, Wafer, Parameter, Units, Value.
+`Parameter` cell = `ParamEntry.id`. Tool = Film-PTPECVD01. Not loaded from fixture CSV.
+"""
+function build_fake_tool_table(;
+    params::Vector{ParamEntry} = default_fake_tool_params(),
+    seed::Int = 42,
+    rows_per_param::Int = 16,
+)::SharedTable
+    n_per = clamp(rows_per_param, 12, 20)
+    cols = ["Timestamp", "Tool", "Lot", "Wafer", "Parameter", "Units", "Value"]
+    rows = Dict{String,String}[]
+    rng = MersenneTwister(seed)
+    t = 1
+    for p in params
+        tool = isempty(p.tool_id) ? "Film-PTPECVD01" : p.tool_id
+        for i in 1:n_per
+            v = p.μ + p.σ * randn(rng)
+            lot = "L$(1000 + ((t - 1) ÷ 4))"
+            wafer = "W$(mod1(i, 8))"
+            # Sequential wall-clock labels (not parsed as real times; labels only)
+            hh = (t - 1) ÷ 3600
+            mm = ((t - 1) % 3600) ÷ 60
+            ss = (t - 1) % 60
+            ts = "2026-01-01T$(lpad(string(hh), 2, '0')):$(lpad(string(mm), 2, '0')):$(lpad(string(ss), 2, '0'))Z"
+            push!(rows, Dict{String,String}(
+                "Timestamp" => ts,
+                "Tool" => tool,
+                "Lot" => lot,
+                "Wafer" => wafer,
+                "Parameter" => p.id,
+                "Units" => p.units,
+                "Value" => string(v),
+            ))
+            t += 1
+        end
+    end
+    return SharedTable(columns = cols, rows = rows)
+end
+
+"""
+    materialize_param_chart!(ch, table, p) -> ChartSpec
+
+Wire `ChartSpec` to a catalog parameter and copy-on-map series from SharedTable
+via `param_filter` / `col_param` (PR1b). `ch.param` and `param_filter` = ParamEntry.id.
+"""
+function materialize_param_chart!(ch::ChartSpec, table::SharedTable, p::ParamEntry)
+    ch.param = p.id
+    ch.param_filter = p.id
+    ch.col_param = "Parameter"
+    ch.units = p.units
+    ch.tools = isempty(p.tool_id) ? String[] : String[p.tool_id]
+    ch.col_value = "Value"
+    ch.col_tool = "Tool"
+    ch.col_time = "Timestamp"
+    ch.chart_type = p.default_chart_type
+    ch.usl = p.usl
+    ch.target = p.target
+    ch.lsl = p.lsl
+    ch.name = p.name
+    materialize_chart_from_table!(ch, table)
+    return ch
+end
+
+"""
     _seed_fake_tool_session!(m)
 
-Bootstrap tools + params + one series chart for `seed_demos = :fake_tool` (PR1a).
-
-Series path only — SharedTable long fill lands in PR1b. `ch.param` = ParamEntry.id.
+Bootstrap tools + params + long SharedTable + one table-sourced chart for
+`seed_demos = :fake_tool` (PR1b). Primary chart is materialize_param_chart! for params[1].
 """
 function _seed_fake_tool_session!(m::SPCWorkbenchModel)
     m.tools = default_fake_tools()
     m.params = default_fake_tool_params()
     m.selected_param = 1
+    m.table = build_fake_tool_table(; params = m.params, seed = 42)
     p = m.params[1]
-    n = max(8, length(m.data.values))
-    d = generate_spc_workbench_data(n; seed = 42, μ = p.μ, σ = p.σ)
-    ch = ChartSpec(
-        name = p.name,
-        chart_type = p.default_chart_type,
-        data = d,
-        viewport = _boot_viewport(d; usl = p.usl, lsl = p.lsl, show_lines = m.show_chart_lines),
-        usl = p.usl,
-        target = p.target,
-        lsl = p.lsl,
-        enabled_rules = copy(m.enabled_rules),
-        param = p.id,  # identity lock: ParamEntry.id, not display name
-        units = p.units,
-        tools = isempty(p.tool_id) ? String[] : String[p.tool_id],
-    )
+    ch = ChartSpec(enabled_rules = copy(m.enabled_rules))
+    materialize_param_chart!(ch, m.table, p)
+    # Re-fit viewport with session line visibility after materialize defaults
+    if !isempty(ch.data.values)
+        ch.viewport = _boot_viewport(ch.data; usl = ch.usl, lsl = ch.lsl, show_lines = m.show_chart_lines)
+    end
     push!(m.charts, ch)
     m.active = 1
     m.library_selected = 1
@@ -3478,6 +3555,8 @@ function clone_chart!(m::SPCWorkbenchModel, idx::Int)::Int
         col_tool = src.col_tool,
         col_time = src.col_time,
         col_lot = src.col_lot,
+        col_param = src.col_param,
+        param_filter = src.param_filter,
     )
     push!(m.charts, cloned)
     new_idx = length(m.charts)
@@ -4118,7 +4197,7 @@ end
 
 export ToolEntry, ParamEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
 export visible_charts, dashboard_pane_charts
-export default_fake_tools, default_fake_tool_params
+export default_fake_tools, default_fake_tool_params, build_fake_tool_table, materialize_param_chart!
 # set_filter_tool! / set_filter_type! / set_filter_owner! / clear_filters! stay package-private
 
 # Builder form field order (P2-PR5: col maps + subgroup + owner)

@@ -1893,6 +1893,159 @@ include("../src/spc_workbench_io.jl")
         @test m_def.selected_param == 0
     end
 
+    @testset "PR1b: param_filter + build_fake_tool_table + materialize" begin
+        # ChartSpec defaults for new fields
+        ch0 = ChartSpec()
+        @test ch0.col_param == ""
+        @test ch0.param_filter == ""
+
+        # Long SharedTable synthetic builder (not fixture CSV)
+        params = default_fake_tool_params()
+        table = build_fake_tool_table(; params = params, seed = 42, rows_per_param = 16)
+        @test table.columns == ["Timestamp", "Tool", "Lot", "Wafer", "Parameter", "Units", "Value"]
+        @test length(table.rows) == 16 * length(params)
+        @test all(r -> r["Tool"] == "Film-PTPECVD01", table.rows)
+        # Parameter cell = ParamEntry.id for every row
+        ids = Set(p.id for p in params)
+        @test all(r -> r["Parameter"] in ids, table.rows)
+        for p in params
+            n_p = count(r -> r["Parameter"] == p.id, table.rows)
+            @test 12 <= n_p <= 20
+            @test n_p == 16
+        end
+        # Deterministic seed: second build matches first
+        table2 = build_fake_tool_table(; params = params, seed = 42, rows_per_param = 16)
+        @test [r["Value"] for r in table.rows] == [r["Value"] for r in table2.rows]
+
+        # param_filter scopes compute_chart_series to one parameter
+        ch_f = ChartSpec(
+            tools = ["Film-PTPECVD01"],
+            col_value = "Value",
+            col_tool = "Tool",
+            col_time = "Timestamp",
+            col_param = "Parameter",
+            param_filter = "thk_1_3um",
+        )
+        vals_thk, _, pmeta_thk = compute_chart_series(table, ch_f)
+        @test length(vals_thk) == 16
+        @test all(pm -> get(pm, "param", "") == "thk_1_3um", pmeta_thk)
+
+        ch_ox = ChartSpec(
+            tools = ["Film-PTPECVD01"],
+            col_value = "Value",
+            col_tool = "Tool",
+            col_time = "Timestamp",
+            col_param = "Parameter",
+            param_filter = "n_oxide",
+        )
+        vals_ox, _, _ = compute_chart_series(table, ch_ox)
+        @test length(vals_ox) == 16
+        @test vals_ox != vals_thk
+
+        # Empty param_filter → all numeric rows (existing charts unchanged)
+        ch_all = ChartSpec(
+            tools = ["Film-PTPECVD01"],
+            col_value = "Value",
+            col_tool = "Tool",
+            col_time = "Timestamp",
+            col_param = "Parameter",
+            param_filter = "",
+        )
+        vals_all, _, _ = compute_chart_series(table, ch_all)
+        @test length(vals_all) == length(table.rows)
+        # Empty col_param with non-empty filter also does not filter (require both)
+        ch_nocol = ChartSpec(
+            tools = ["Film-PTPECVD01"],
+            col_value = "Value",
+            col_tool = "Tool",
+            param_filter = "thk_1_3um",
+            col_param = "",
+        )
+        vals_nocol, _, _ = compute_chart_series(table, ch_nocol)
+        @test length(vals_nocol) == length(table.rows)
+
+        # materialize_param_chart! wires fields + table series
+        ch_m = ChartSpec()
+        materialize_param_chart!(ch_m, table, params[1])
+        @test ch_m.param == "thk_1_3um"
+        @test ch_m.param_filter == "thk_1_3um"
+        @test ch_m.col_param == "Parameter"
+        @test ch_m.col_value == "Value"
+        @test ch_m.col_tool == "Tool"
+        @test ch_m.col_time == "Timestamp"
+        @test ch_m.units == params[1].units
+        @test ch_m.tools == ["Film-PTPECVD01"]
+        @test ch_m.name == params[1].name
+        @test ch_m.usl == params[1].usl
+        @test ch_m.source === :table
+        @test ch_m.live_enabled === false
+        @test length(ch_m.data.values) == 16
+        @test ch_m.data.values == vals_thk
+
+        # :fake_tool seed fills table and materializes params[1]
+        d = generate_spc_workbench_data(12; seed = 7)
+        m_ft = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m_ft)
+        @test !isempty(m_ft.table.rows)
+        @test !isempty(m_ft.table.columns)
+        @test "Parameter" in m_ft.table.columns
+        ch = m_ft.charts[1]
+        @test ch.source === :table
+        @test ch.param_filter == m_ft.params[1].id
+        @test ch.col_param == "Parameter"
+        @test ch.param == m_ft.params[1].id
+        @test length(ch.data.values) >= 12
+        # Only params[1] rows (not full multi-param table)
+        n_p1 = count(r -> r["Parameter"] == m_ft.params[1].id, m_ft.table.rows)
+        @test length(ch.data.values) == n_p1
+
+        # clone_chart! copies col_param / param_filter
+        cidx = clone_chart!(m_ft, 1)
+        cloned = m_ft.charts[cidx]
+        @test cloned.col_param == ch.col_param
+        @test cloned.param_filter == ch.param_filter
+        @test cloned.param == ch.param
+        @test cloned.id != ch.id
+        @test endswith(cloned.name, " (copy)")
+
+        # JSON always writes keys; omit on load → ""
+        d_rt = workbench_to_dict(m_ft)
+        @test haskey(d_rt["charts"][1], "col_param")
+        @test haskey(d_rt["charts"][1], "param_filter")
+        @test d_rt["charts"][1]["col_param"] == "Parameter"
+        @test d_rt["charts"][1]["param_filter"] == "thk_1_3um"
+        m_rt = workbench_from_dict(d_rt)
+        @test m_rt isa SPCWorkbenchModel
+        @test m_rt.charts[1].col_param == "Parameter"
+        @test m_rt.charts[1].param_filter == "thk_1_3um"
+
+        # Fail-soft: missing keys on old fixture chart → empty strings
+        old_wb = Dict{String,Any}(
+            "version" => 1,
+            "active" => 1,
+            "charts" => [
+                Dict{String,Any}(
+                    "id" => "CHT-old",
+                    "name" => "Legacy",
+                    "chart_type" => "I-MR",
+                    "values" => [1.0, 2.0, 3.0],
+                ),
+            ],
+        )
+        m_old = workbench_from_dict(old_wb)
+        @test m_old isa SPCWorkbenchModel
+        @test m_old.charts[1].col_param == ""
+        @test m_old.charts[1].param_filter == ""
+
+        # Triple seed still empty table (no fake long fill)
+        m_t = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m_t)
+        @test isempty(m_t.table.rows)
+        @test m_t.charts[1].param_filter == ""
+        @test m_t.charts[1].col_param == ""
+        @test m_t.charts[1].source === :series
+    end
+
     @testset "dashboard_pane_charts (active neighborhood, no charts[2]/[3] lock)" begin
         d = generate_spc_workbench_data(12; seed = 11)
         m = SPCWorkbenchModel(data = d, paused = true)

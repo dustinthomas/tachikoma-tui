@@ -927,6 +927,8 @@ function _chart_to_dict(ch::ChartSpec)::Dict{String,Any}
         "col_tool" => ch.col_tool,
         "col_time" => ch.col_time,
         "col_lot" => ch.col_lot,  # always write (P2-PR3 / KD-P2-18)
+        "col_param" => ch.col_param,  # PR1b — always write (optional key; fail-soft load)
+        "param_filter" => ch.param_filter,
         "viewport" => Dict{String,Any}(
             "x0" => ch.viewport.x0,
             "x1" => ch.viewport.x1,
@@ -1016,6 +1018,9 @@ function _chart_from_dict(cd)::Union{ChartSpec,String}
     col_time = String(get(cd, "col_time", "Timestamp") === nothing ? "Timestamp" : get(cd, "col_time", "Timestamp"))
     # Optional col_lot (P2-PR3); omitted / null → ""
     col_lot = String(get(cd, "col_lot", "") === nothing ? "" : get(cd, "col_lot", ""))
+    # Optional col_param / param_filter (PR1b); omitted / null → "" (fail-soft)
+    col_param = String(get(cd, "col_param", "") === nothing ? "" : get(cd, "col_param", ""))
+    param_filter = String(get(cd, "param_filter", "") === nothing ? "" : get(cd, "param_filter", ""))
 
     vp = _viewport_from_json(get(cd, "viewport", nothing), data; usl = usl, lsl = lsl)
     vp isa String && return vp
@@ -1046,6 +1051,8 @@ function _chart_from_dict(cd)::Union{ChartSpec,String}
         col_tool = col_tool isa AbstractString ? String(col_tool) : "Tool",
         col_time = col_time isa AbstractString ? String(col_time) : "Timestamp",
         col_lot = col_lot isa AbstractString ? String(col_lot) : "",
+        col_param = col_param isa AbstractString ? String(col_param) : "",
+        param_filter = param_filter isa AbstractString ? String(param_filter) : "",
     )
 end
 
