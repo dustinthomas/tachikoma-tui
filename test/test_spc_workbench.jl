@@ -2086,6 +2086,152 @@ include("../src/spc_workbench_io.jl")
         @test m.selected_param == 0
     end
 
+    @testset "PR1 param-focused display set (KD-PD-1/13/14/15/20/2A)" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m)
+        @test m.dashboard_scope === :param_active
+        @test isempty(m.compare_param_ids)
+        @test length(m.charts) == length(m.params) >= 3
+        @test m.selected_param == 1
+
+        # Triple keeps legacy neighbors
+        m_t = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m_t)
+        @test m_t.dashboard_scope === :legacy_neighbors
+        @test length(dashboard_pane_charts(m_t; k = 3)) == 3
+        @test dashboard_pane_charts(m_t; k = 3)[1].id == current_chart(m_t).id
+
+        # Forced-k regression: param_active with max_panes=3 must NOT surface other params
+        m.dashboard_max_panes = 3
+        _reconcile_active_to_display!(m)
+        panes = dashboard_pane_charts(m; k = effective_dashboard_max_panes(m))
+        @test length(panes) == 1  # one chart per selected param in seed
+        @test all(c -> c.param == m.params[m.selected_param].id, panes)
+        @test panes[1].id == current_chart(m).id  # KD-PD-13
+
+        ds = dashboard_display_set(m)
+        @test length(ds) == 1
+        @test all(c -> c.param == m.params[1].id, ds)
+
+        # select_param changes active + filters display_set to that param only
+        select_param!(m, 2)
+        panes2 = dashboard_pane_charts(m; k = 3)
+        @test m.selected_param == 2
+        @test current_chart(m).param == m.params[2].id
+        @test all(c -> c.param == m.params[2].id, panes2)
+        @test panes2[1].id == current_chart(m).id
+        @test all(c -> c.param == m.params[2].id, dashboard_display_set(m))
+
+        # Force foreign active while selection has chart → reconcile rehomes (KD-PD-20)
+        i1 = findfirst(c -> c.param == m.params[1].id, m.charts)
+        @test i1 !== nothing
+        set_active_chart!(m, i1)  # other param
+        m.selected_param = 2
+        @test current_chart(m).param == m.params[1].id  # desynced
+        @test _reconcile_active_to_display!(m)
+        @test current_chart(m).param == m.params[2].id
+        @test dashboard_pane_charts(m; k = 3)[1].id == current_chart(m).id
+
+        # Empty / chartless param: empty display set — do not paint foreign (KD-PD-14)
+        push!(m.params, ParamEntry(id = "ghost_pd", name = "GhostPD", tool_id = "Film-PTPECVD01"))
+        select_param!(m, length(m.params))
+        @test m.selected_param == length(m.params)
+        @test occursin("no chart for param", m.last_event)
+        @test isempty(dashboard_display_set(m))
+        @test isempty(dashboard_pane_charts(m; k = 3))
+        # Active may remain foreign; reconcile must NOT invent a pane for it
+        @test _reconcile_active_to_display!(m) === false
+
+        # Restore selection to param 1 for remaining checks
+        select_param!(m, 1)
+        @test current_chart(m).param == m.params[1].id
+
+        # Compare scope field assign + unpinned select_param no activate (KD-PD-2A)
+        m.dashboard_scope = :compare
+        m.compare_param_ids = [m.params[1].id, m.params[3].id]  # not params[2]
+        i_pin = findfirst(c -> c.param == m.params[1].id, m.charts)
+        set_active_chart!(m, i_pin)
+        act_before = current_chart(m).id
+        select_param!(m, 2)  # unpinned
+        @test m.selected_param == 2
+        @test current_chart(m).id == act_before  # primary unchanged
+        @test occursin("not pinned", m.last_event)
+        @test occursin(m.params[2].name, m.last_event)
+        ds_cmp = dashboard_display_set(m)
+        @test !isempty(ds_cmp)
+        @test all(c -> c.param in m.compare_param_ids, ds_cmp)
+        @test length(ds_cmp) == 2  # one primary per pin
+
+        # Pinned select in compare does activate
+        select_param!(m, 3)
+        @test m.selected_param == 3
+        @test current_chart(m).param == m.params[3].id
+        @test occursin("param", m.last_event)
+
+        # add_param_chart! updates selected_param (KD-PD-15)
+        m.dashboard_scope = :param_active
+        m.compare_param_ids = String[]
+        # Drop the chart for params[2] so we can re-add
+        i2 = findfirst(c -> c.param == m.params[2].id, m.charts)
+        @test i2 !== nothing
+        delete_chart!(m, i2)
+        select_param!(m, 1)  # leave selection on param 1
+        @test m.selected_param == 1
+        idx_new = add_param_chart!(m, m.params[2])
+        @test idx_new !== nothing
+        @test m.selected_param == 2  # KD-PD-15
+        @test current_chart(m).param == m.params[2].id
+        @test all(c -> c.param == m.params[2].id, dashboard_display_set(m))
+
+        # Same-param multi-analysis active-first: panes[1]==active; unique ids
+        m2 = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m2)
+        select_param!(m2, 1)
+        aidx = add_analysis_chart!(m2, m2.active, Xbar_R)
+        @test aidx !== nothing
+        m2.dashboard_max_panes = 3
+        # Active is new analysis chart; display set has both same-param charts
+        ds_an = dashboard_display_set(m2)
+        @test length(ds_an) == 2
+        @test all(c -> c.param == m2.params[1].id, ds_an)
+        panes_an = dashboard_pane_charts(m2; k = 3)
+        @test length(panes_an) == 2
+        @test panes_an[1].id == current_chart(m2).id
+        @test length(unique(c.id for c in panes_an)) == length(panes_an)
+
+        # [ / ] cycle within display set under param_active (KD-PD-6)
+        act_a = current_chart(m2).id
+        _cycle_dashboard_focus!(m2, +1)
+        @test current_chart(m2).id != act_a
+        @test current_chart(m2).param == m2.params[1].id
+        _cycle_dashboard_focus!(m2, +1)
+        @test current_chart(m2).id == act_a  # wrap
+        # Single-chart display: no-op message
+        m_single = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m_single)
+        select_param!(m_single, 1)
+        act_s = m_single.active
+        _cycle_dashboard_focus!(m_single, +1)
+        @test m_single.active == act_s
+        @test occursin("only one chart", m_single.last_event)
+
+        # Library activate hook: sync selected_param from active under param_active
+        m_lib = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m_lib)
+        @test m_lib.selected_param == 1
+        set_active_chart!(m_lib, 2)  # param 2 chart
+        m_lib.view_mode = :library
+        m_lib.library_selected = 2
+        # Simulate Enter path
+        set_active_chart!(m_lib, m_lib.library_selected)
+        m_lib.last_event = "active chart $(m_lib.active)"
+        _after_library_activate_to_dashboard!(m_lib)
+        @test m_lib.view_mode === :dashboard
+        @test m_lib.selected_param == 2
+        @test all(c -> c.param == m_lib.params[2].id, dashboard_display_set(m_lib))
+    end
+
     @testset "TDD: fake_tool seed denser + WECO failures on all params" begin
         params = default_fake_tool_params()
         table = build_fake_tool_table(; params = params, seed = 42)
@@ -3194,6 +3340,7 @@ end
         @test m_ft.dashboard_max_panes == 1
         @test effective_dashboard_max_panes(m_ft) == 1
         @test length(m_ft.charts) == length(m_ft.params) >= 3
+        @test m_ft.dashboard_scope === :param_active
         m_ft.visual_prefs["secondary_canvas"] = false
         tb2 = T.TestBackend(90, 28); T.reset!(tb2.buf)
         T.view(m_ft, T.Frame(tb2.buf, T.Rect(1, 1, 90, 28), [], []))
@@ -3202,6 +3349,17 @@ end
         @test !occursin("Chart 2:", full2)
         @test !occursin("Chart 2", full2)
         @test occursin("Dashboard", full2)
+
+        # PD-V1 / forced-k: even with dashboard_max_panes=3, param_active must not paint
+        # other-param Chart 2 (THE product gate — not only seed max_panes=1)
+        m_ft.dashboard_max_panes = 3
+        tb_fk = T.TestBackend(90, 28); T.reset!(tb_fk.buf)
+        T.view(m_ft, T.Frame(tb_fk.buf, T.Rect(1, 1, 90, 28), [], []))
+        rows_fk = [T.row_text(tb_fk, i) for i in 1:28]
+        full_fk = join([string(r) for r in rows_fk if r !== nothing], "\n")
+        @test !occursin("Chart 2:", full_fk)
+        @test !occursin("Chart 2", full_fk)
+        @test length(dashboard_pane_charts(m_ft; k = effective_dashboard_max_panes(m_ft))) == 1
 
         # Extra charts + panes=1 still single pane in view (no auto-bump in PR3)
         m_s = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)

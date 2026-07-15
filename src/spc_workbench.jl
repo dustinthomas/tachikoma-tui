@@ -2154,6 +2154,11 @@ end
     # Parameter catalog (dashboard single-chart design / PR1a); empty ⇒ selected_param = 0
     params::Vector{ParamEntry} = ParamEntry[]
     selected_param::Int = 0          # 1-based index; 0 = none / empty catalog
+    # Display scope (KD-PD-1): param-focused / compare / legacy neighbors.
+    # Field default :legacy_neighbors preserves :triple construction without side effects.
+    dashboard_scope::Symbol = :legacy_neighbors  # :param_active | :compare | :legacy_neighbors
+    # Ordered pin set for :compare (ParamEntry.id). Max 3 enforced by pin toggle (PR3).
+    compare_param_ids::Vector{String} = String[]
     # Pane budget: field default 3 for :triple compat; seed policy overwrites on ensure bootstrap
     dashboard_max_panes::Int = 3
     side_focus::Symbol = :none       # :none | :params (PARAMS interactive focus)
@@ -2605,6 +2610,9 @@ function _seed_fake_tool_session!(m::SPCWorkbenchModel)
     end
     m.active = 1
     m.library_selected = 1
+    # KD-PD-1: product default for fake_tool is param-focused (triple stays :legacy_neighbors)
+    m.dashboard_scope = :param_active
+    m.compare_param_ids = String[]
     m.last_event = "fake tool seed loaded ($(length(m.params)) params)"
     return nothing
 end
@@ -3667,6 +3675,8 @@ Select parameter catalog index (1-based). Single path (KD-DC-4):
 find chart with `c.param == p.id` → `set_active_chart!`; else highlight-only
 Message `"no chart for param — press + to add"`. **Never rematerialize.**
 Empty catalog ⇒ `selected_param = 0`.
+
+KD-PD-2A: in `:compare`, unpinned select updates **cursor only** (no activate).
 """
 function select_param!(m::SPCWorkbenchModel, idx::Int)
     if isempty(m.params)
@@ -3675,12 +3685,42 @@ function select_param!(m::SPCWorkbenchModel, idx::Int)
     end
     m.selected_param = clamp(idx, 1, length(m.params))
     p = m.params[m.selected_param]
+
+    # ── KD-PD-2A: Compare — cursor always; activate only if pinned ──
+    if m.dashboard_scope === :compare
+        if !_param_id_is_pinned(m, p.id)
+            # Do NOT set_active_chart! — primary stays on last pinned focus
+            m.last_event = "not pinned — press , to pin ($(p.name))"
+            return nothing
+        end
+        if !isempty(m.charts)
+            act = current_chart(m)
+            act.param == p.id && (m.last_event = "param $(p.name)"; return nothing)
+        end
+        i = findfirst(c -> c.param == p.id, m.charts)
+        if i !== nothing
+            set_active_chart!(m, i)
+            m.last_event = "param $(p.name)"
+        else
+            m.last_event = "no chart for param — press + to add"
+        end
+        return nothing
+    end
+
+    # ── :param_active / :legacy_neighbors ──
+    if !isempty(m.charts)
+        act = current_chart(m)
+        if act.param == p.id
+            m.last_event = "param $(p.name)"
+            return nothing
+        end
+    end
     i = findfirst(c -> c.param == p.id, m.charts)
     if i !== nothing
         set_active_chart!(m, i)
         m.last_event = "param $(p.name)"
     else
-        # Highlight only — NEVER rematerialize / rewrite active chart series
+        # Highlight only — NEVER rematerialize; active may stay foreign (empty shell)
         m.last_event = "no chart for param — press + to add"
     end
     return nothing
@@ -3761,7 +3801,12 @@ function add_param_chart!(
     idx = length(m.charts)
     m.library_selected = idx
     set_active_chart!(m, idx)
-    _auto_bump_dashboard_panes!(m)
+    # KD-PD-15: catalog selection follows the new param (do not re-call select_param!)
+    pi = findfirst(x -> x.id == p.id, m.params)
+    if pi !== nothing
+        m.selected_param = pi
+    end
+    _auto_bump_dashboard_panes!(m)  # PR4 will replace with scope-aware bump
     m.last_event = "added param chart $idx"
     return idx
 end
@@ -4404,6 +4449,10 @@ function _rehome_active_if_filtered!(m::SPCWorkbenchModel)::Bool
     idx === nothing && return false
     set_active_chart!(m, idx)
     m.last_event = "active chart filtered — switched to $(vis[1].name)"
+    # Scoped modes: keep selected_param aligned with rehomed primary
+    if m.dashboard_scope === :param_active || m.dashboard_scope === :compare
+        _sync_selected_param_from_active!(m)
+    end
     return true
 end
 
@@ -4489,6 +4538,61 @@ function _cycle_active_visible!(m::SPCWorkbenchModel, delta::Int)
     return nothing
 end
 
+"""If `current_chart.param` matches a catalog id, set `selected_param` to that index."""
+function _sync_selected_param_from_active!(m::SPCWorkbenchModel)
+    isempty(m.params) && return
+    isempty(m.charts) && return
+    pid = current_chart(m).param
+    isempty(pid) && return
+    i = findfirst(p -> p.id == pid, m.params)
+    i !== nothing && (m.selected_param = i)
+    return nothing
+end
+
+"""Cycle dashboard focus within the display set (KD-PD-6).
+
+`:legacy_neighbors` / empty catalog → full `visible_charts` cycle.
+`:param_active` / `:compare` → cycle only within `dashboard_display_set`.
+"""
+function _cycle_dashboard_focus!(m::SPCWorkbenchModel, delta::Int)
+    if m.dashboard_scope === :legacy_neighbors || isempty(m.params)
+        return _cycle_active_visible!(m, delta)
+    end
+    ds = dashboard_display_set(m)
+    if length(ds) <= 1
+        m.last_event = "only one chart in display"
+        return nothing
+    end
+    act = current_chart(m)
+    pos = findfirst(c -> c.id == act.id, ds)
+    pos === nothing && (pos = 1)
+    new_pos = mod1(pos + delta, length(ds))
+    idx = findfirst(c -> c.id == ds[new_pos].id, m.charts)
+    idx === nothing && return nothing
+    set_active_chart!(m, idx)
+    _sync_selected_param_from_active!(m)  # KD-PD-6
+    m.last_event = "chart $(m.active)"
+    return nothing
+end
+
+"""After library Enter / dblclick activate → dashboard (KD-PD-20 activate-path sync)."""
+function _after_library_activate_to_dashboard!(m::SPCWorkbenchModel)
+    m.view_mode = :dashboard
+    if m.dashboard_scope === :param_active
+        _sync_selected_param_from_active!(m)
+    elseif m.dashboard_scope === :compare
+        pid = current_chart(m).param
+        if !_param_id_is_pinned(m, pid)
+            name = _param_display_name(m, pid)
+            _reconcile_active_to_display!(m)  # snap back to pin set
+            m.last_event = "not pinned — press , to pin ($(name))"
+        else
+            _sync_selected_param_from_active!(m)
+        end
+    end
+    return nothing
+end
+
 """Open next one-field filter prompt (tool→type→owner cycle). Shared by dashboard + library."""
 function _open_filter_prompt_cycle!(m::SPCWorkbenchModel)
     field = m.filter_prompt_field
@@ -4518,27 +4622,179 @@ function _handle_filter_char!(m::SPCWorkbenchModel, c::Char)::Bool
     return false
 end
 
-"""
-    dashboard_pane_charts(m; k=3) -> Vector{ChartSpec}
+# ── Param-focused display set (KD-PD-13 / KD-PD-20) ──────────────────────
 
-Active chart plus the next (k-1) visible neighbors. Primary interactive plot
-is panes[1]; read-only extras are panes[2:end]. Fixes the hard-coded
-`charts[2]`/`charts[3]` lock (active==2 duplicate / post-delete hazards).
-Uses `visible_charts` (filter-aware).
-"""
-function dashboard_pane_charts(m::SPCWorkbenchModel; k::Int = 3)::Vector{ChartSpec}
-    vis = visible_charts(m)
+"""Selected ParamEntry.id or empty string when catalog selection is invalid."""
+function _selected_param_id(m::SPCWorkbenchModel)::String
+    (1 <= m.selected_param <= length(m.params)) || return ""
+    return m.params[m.selected_param].id
+end
+
+"""Display name for a param id (catalog name, else raw id)."""
+function _param_display_name(m::SPCWorkbenchModel, id::AbstractString)::String
+    isempty(id) && return ""
+    i = findfirst(p -> p.id == id, m.params)
+    i === nothing && return String(id)
+    return m.params[i].name
+end
+
+"""Effective compare pin list: non-empty `compare_param_ids`, else selected id alone."""
+function _effective_compare_pins(m::SPCWorkbenchModel)::Vector{String}
+    pins = String[String(p) for p in m.compare_param_ids if !isempty(strip(p))]
+    !isempty(pins) && return pins
+    pid = _selected_param_id(m)
+    isempty(pid) && return String[]
+    return String[pid]
+end
+
+function _param_id_is_pinned(m::SPCWorkbenchModel, id::AbstractString)::Bool
+    isempty(id) && return false
+    return any(p -> p == id, _effective_compare_pins(m))
+end
+
+"""Primary chart for a param among visible: active if matches, else first library match."""
+function _primary_chart_for_param(
+    vis::Vector{ChartSpec},
+    m::SPCWorkbenchModel,
+    pid::AbstractString,
+)::Union{ChartSpec,Nothing}
+    isempty(vis) && return nothing
+    isempty(pid) && return nothing
+    if !isempty(m.charts)
+        act = current_chart(m)
+        if act.param == pid && any(c -> c.id == act.id, vis)
+            return act
+        end
+    end
+    i = findfirst(c -> c.param == pid, vis)
+    return i === nothing ? nothing : vis[i]
+end
+
+"""Active-first stable order: current_chart first if in `elig`, then remaining in input order."""
+function _active_first(elig::Vector{ChartSpec}, m::SPCWorkbenchModel)::Vector{ChartSpec}
+    isempty(elig) && return ChartSpec[]
+    isempty(m.charts) && return copy(elig)
+    act = current_chart(m)
+    i = findfirst(c -> c.id == act.id, elig)
+    i === nothing && return copy(elig)  # active not eligible — reconcile must run before paint
+    out = ChartSpec[elig[i]]
+    for (j, c) in enumerate(elig)
+        j == i && continue
+        push!(out, c)
+    end
+    return out
+end
+
+"""Active-only eligible set when catalog selection is empty (index 0 / no id)."""
+function _primary_only_elig(vis::Vector{ChartSpec}, m::SPCWorkbenchModel)::Vector{ChartSpec}
     isempty(vis) && return ChartSpec[]
+    isempty(m.charts) && return ChartSpec[]
+    act = current_chart(m)
+    any(c -> c.id == act.id, vis) && return ChartSpec[act]
+    return ChartSpec[vis[1]]  # active filtered out → first visible only
+end
+
+function _display_set_param_active(m::SPCWorkbenchModel, vis::Vector{ChartSpec})::Vector{ChartSpec}
+    pid = _selected_param_id(m)
+    isempty(pid) && return _active_first(_primary_only_elig(vis, m), m)
+    same = ChartSpec[c for c in vis if c.param == pid]
+    isempty(same) && return ChartSpec[]  # no chart for selected — empty display
+    return _active_first(same, m)
+end
+
+function _display_set_compare(m::SPCWorkbenchModel, vis::Vector{ChartSpec})::Vector{ChartSpec}
+    pins = _effective_compare_pins(m)
+    elig = ChartSpec[]
+    for pid in pins
+        ch = _primary_chart_for_param(vis, m, pid)
+        ch !== nothing && push!(elig, ch)
+    end
+    return _active_first(elig, m)
+end
+
+function _display_set_legacy_neighbors(m::SPCWorkbenchModel, vis::Vector{ChartSpec})::Vector{ChartSpec}
+    # Today: active + following neighbors (active-suffix). head(k) applied in pane_charts.
+    isempty(vis) && return ChartSpec[]
+    if isempty(m.charts)
+        return vis
+    end
     act = current_chart(m)
     i = findfirst(c -> c.id == act.id, vis)
     i === nothing && (i = 1)
-    j = min(i + k - 1, length(vis))
-    return vis[i:j]
+    return vis[i:end]
+end
+
+"""
+    dashboard_display_set(m) -> Vector{ChartSpec}
+
+Charts eligible + ordered for dashboard panes (active-first within scope).
+Call `_reconcile_active_to_display!(m)` first on the dashboard paint path
+so active ∈ set when set non-empty (KD-PD-20).
+"""
+function dashboard_display_set(m::SPCWorkbenchModel)::Vector{ChartSpec}
+    vis = visible_charts(m)
+    isempty(vis) && return ChartSpec[]
+
+    scope = m.dashboard_scope
+    if scope === :legacy_neighbors || (scope !== :param_active && scope !== :compare && isempty(m.params))
+        return _display_set_legacy_neighbors(m, vis)
+    elseif scope === :compare
+        return _display_set_compare(m, vis)
+    else
+        # :param_active (and unknown scopes with params → treat as param-focused)
+        return _display_set_param_active(m, vis)
+    end
+end
+
+"""
+Ensure `current_chart ∈ display set` when set non-empty (scoped modes only).
+Returns true if active or selected_param changed (KD-PD-20).
+"""
+function _reconcile_active_to_display!(m::SPCWorkbenchModel)::Bool
+    m.dashboard_scope === :legacy_neighbors && return false
+    m.dashboard_scope !== :param_active && m.dashboard_scope !== :compare && return false
+    isempty(m.charts) && return false
+
+    ds = dashboard_display_set(m)
+    if isempty(ds)
+        # Chartless selected (param_active) or no pin charts — leave active; view paints empty
+        return false
+    end
+    act = current_chart(m)
+    any(c -> c.id == act.id, ds) && return false
+
+    # Active outside display set — rehome to display head
+    idx = findfirst(c -> c.id == ds[1].id, m.charts)
+    idx === nothing && return false
+    set_active_chart!(m, idx)
+    # param_active: selection already defines set — do not overwrite selected_param
+    # compare: sync selection to rehomed pin focus so PARAMS ▶ matches primary
+    if m.dashboard_scope === :compare
+        _sync_selected_param_from_active!(m)
+    end
+    return true
+end
+
+"""
+    dashboard_pane_charts(m; k=3) -> Vector{ChartSpec}
+
+First `k` of the ordered `dashboard_display_set`. Primary interactive plot is
+panes[1]; read-only extras are panes[2:end].
+
+Under `:legacy_neighbors` this is the classic active + following neighbors
+suffix. Under `:param_active` / `:compare`, active-first within the scoped
+eligible set (KD-PD-13). After reconcile: non-empty ⇒ panes[1].id == current_chart.id.
+"""
+function dashboard_pane_charts(m::SPCWorkbenchModel; k::Int = 3)::Vector{ChartSpec}
+    k = clamp(k, 1, 3)
+    ds = dashboard_display_set(m)
+    isempty(ds) && return ChartSpec[]
+    return ds[1:min(k, length(ds))]
 end
 
 export ToolEntry, ParamEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
 export select_param!, add_param_chart!, add_analysis_chart!
-export visible_charts, dashboard_pane_charts, effective_dashboard_max_panes
+export visible_charts, dashboard_pane_charts, dashboard_display_set, effective_dashboard_max_panes
 export default_fake_tools, default_fake_tool_params, build_fake_tool_table, materialize_param_chart!
 # set_filter_tool! / set_filter_type! / set_filter_owner! / clear_filters! stay package-private
 
@@ -4881,9 +5137,9 @@ function _update_library_mouse!(m::SPCWorkbenchModel, evt::MouseEvent)
         if lc !== nothing && lc.idx == abs_i && (m.tick - lc.tick) <= LIBRARY_DBLCLICK_TICKS
             m.library_selected = abs_i
             set_active_chart!(m, abs_i)
-            m.view_mode = :dashboard
             m.library_last_click = nothing
             m.last_event = "active chart $(m.active)"
+            _after_library_activate_to_dashboard!(m)
             return
         end
 
@@ -5432,9 +5688,9 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
                 ai = findfirst(c -> c.id == vis[pos].id, m.charts)
                 m.library_selected = ai === nothing ? 1 : ai
                 set_active_chart!(m, m.library_selected)
-                m.view_mode = :dashboard
                 m.library_last_click = nothing  # exit path: clear dblclick state
                 m.last_event = "active chart $(m.active)"
+                _after_library_activate_to_dashboard!(m)
             else
                 m.last_event = "No charts match filters"
             end
@@ -5746,11 +6002,11 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.last_event = "builder open"
             return
         elseif c == ']' || c == '>'
-            # GC-PR4: step only among visible_charts (absolute indices)
-            _cycle_active_visible!(m, +1)
+            # KD-PD-6: display-set cycle under param_active/compare; legacy = full visible
+            _cycle_dashboard_focus!(m, +1)
             return
         elseif c == '[' || c == '<'
-            _cycle_active_visible!(m, -1)
+            _cycle_dashboard_focus!(m, -1)
             return
         end
         _sync_active_back!(m)
@@ -7127,11 +7383,21 @@ function view(m::SPCWorkbenchModel, f::Frame)
     plot_rect = cols[1]
     side_rect = cols[2]
 
-    # Dashboard: up to k panes from active + following visible neighbors (not charts[2]/[3] lock)
+    # KD-PD-20: rehome active into display set before pane pick / series paint
+    if _reconcile_active_to_display!(m)
+        ch = current_chart(m)
+        n = length(m.data.values)
+    end
+    # Dashboard: up to k panes from ordered display set (legacy neighbors or scoped)
     # k is seed-coupled via dashboard_max_panes (KD-DC-2); hard clamp 1..3
     panes = dashboard_pane_charts(m; k = effective_dashboard_max_panes(m))
     npanes = length(panes)
-    is_dashboard_multi = (m.view_mode == :dashboard && npanes >= 2)
+    # KD-PD-14: empty display under product scopes → empty shell (no foreign series)
+    paint_primary_empty = (
+        (m.dashboard_scope === :param_active || m.dashboard_scope === :compare) &&
+        npanes == 0 && !_any_filter_active(m)
+    )
+    is_dashboard_multi = (m.view_mode == :dashboard && npanes >= 2 && !paint_primary_empty)
     active_plot_rect = plot_rect
     second_plot_rect = nothing
     third_plot_rect = nothing
@@ -7152,8 +7418,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
 
     # Dual secondary eligibility + temporary single-pane compress (KD-P2-15)
     # Resolve active context once for dual decision (reuse for primary draw below).
+    # KD-PD-14: empty shell never draws foreign dual series either.
     ch_for_dual = current_chart(m)
-    dual_ctx = (n > 0 && length(ch_for_dual.data.values) > 0) ?
+    dual_ctx = (!paint_primary_empty && n > 0 && length(ch_for_dual.data.values) > 0) ?
         resolve_chart_render_context(ch_for_dual; sigma_method = :mr) : nothing
     dual_eligible = dual_ctx !== nothing && _dual_secondary_eligible(m, dual_ctx)
     if dual_eligible && is_dashboard_multi && active_plot_rect.height < DUAL_MIN_OUTER_H
@@ -7193,17 +7460,27 @@ function view(m::SPCWorkbenchModel, f::Frame)
 
     # Active primary (+ optional dual secondary canvas under it — KD-P2-15/16/17)
     # Title: Tool first · Param; mouse chrome lives in left legend box (not in title).
-    empty_hint = (n == 0) ? " — No data — import CSV or clone a demo" : ""
+    empty_hint = if paint_primary_empty
+        if m.dashboard_scope === :compare
+            " — compare: no pinned charts"
+        else
+            " — no chart for param — press + to add"
+        end
+    elseif n == 0
+        " — No data — import CSV or clone a demo"
+    else
+        ""
+    end
     pri_title = _primary_dashboard_title(m; empty_hint = empty_hint)
     primary_outer = show_dual ? dual_split[1] : active_plot_rect
     secondary_outer = show_dual ? dual_split[2] : nothing
 
     ch_act = current_chart(m)
     ctx = dual_ctx === nothing ?
-        (n > 0 ? resolve_chart_render_context(ch_act; sigma_method = :mr) : nothing) :
+        (n > 0 && !paint_primary_empty ? resolve_chart_render_context(ch_act; sigma_method = :mr) : nothing) :
         dual_ctx
 
-    if n > 0 && ctx !== nothing && !isempty(ctx.primary_values)
+    if !paint_primary_empty && n > 0 && ctx !== nothing && !isempty(ctx.primary_values)
         plot_vals = ctx.primary_values
         n_plot = length(plot_vals)
         lz_disp = ctx.lz
