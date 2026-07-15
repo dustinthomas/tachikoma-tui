@@ -2156,7 +2156,7 @@ end
     selected_param::Int = 0          # 1-based index; 0 = none / empty catalog
     # Pane budget: field default 3 for :triple compat; seed policy overwrites on ensure bootstrap
     dashboard_max_panes::Int = 3
-    side_focus::Symbol = :none       # :none | :params (forward compat; keys in later PR)
+    side_focus::Symbol = :none       # :none | :params (PARAMS interactive focus)
     # Add-chart wizard modal (session flags; wiring in later PR)
     add_chart_open::Bool = false
     add_chart_mode::Symbol = :param  # :param | :analysis
@@ -3623,6 +3623,32 @@ function set_active_chart!(m::SPCWorkbenchModel, idx::Int)
     return nothing
 end
 
+"""
+    select_param!(m, idx)
+
+Select parameter catalog index (1-based). Single path (KD-DC-4):
+find chart with `c.param == p.id` → `set_active_chart!`; else highlight-only
+Message `"no chart for param — press + to add"`. **Never rematerialize.**
+Empty catalog ⇒ `selected_param = 0`.
+"""
+function select_param!(m::SPCWorkbenchModel, idx::Int)
+    if isempty(m.params)
+        m.selected_param = 0
+        return nothing
+    end
+    m.selected_param = clamp(idx, 1, length(m.params))
+    p = m.params[m.selected_param]
+    i = findfirst(c -> c.param == p.id, m.charts)
+    if i !== nothing
+        set_active_chart!(m, i)
+        m.last_event = "param $(p.name)"
+    else
+        # Highlight only — NEVER rematerialize / rewrite active chart series
+        m.last_event = "no chart for param — press + to add"
+    end
+    return nothing
+end
+
 # ── Tools registry pure CRUD (P2-PR4) ───────────────────────────────────
 # Master list `m.tools::Vector{ToolEntry}` is distinct from per-chart `ch.tools`
 # (filter assignment). Chart tool ids are assigned via builder field :tools.
@@ -4197,6 +4223,7 @@ function dashboard_pane_charts(m::SPCWorkbenchModel; k::Int = 3)::Vector{ChartSp
 end
 
 export ToolEntry, ParamEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
+export select_param!
 export visible_charts, dashboard_pane_charts
 export default_fake_tools, default_fake_tool_params, build_fake_tool_table, materialize_param_chart!
 # set_filter_tool! / set_filter_type! / set_filter_owner! / clear_filters! stay package-private
@@ -5216,6 +5243,13 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return
     end
 
+    # PARAMS side focus: Esc clears focus before global quit (KD-DC-13)
+    if m.side_focus === :params && evt.key == :escape
+        m.side_focus = :none
+        m.last_event = "params unfocused"
+        return
+    end
+
     # Global quit (dashboard only — modes already returned above)
     if evt.key == :escape || (evt.key == :char && evt.char == 'q')
         m.quit = true
@@ -5333,7 +5367,27 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             ch.usl = ch.target = ch.lsl = nothing
             m.last_event = "specs cleared"
             return
+        elseif c == ';'
+            # Toggle PARAMS side focus (KD-DC-13); catalog non-empty only
+            if !isempty(m.params)
+                m.side_focus = m.side_focus === :params ? :none : :params
+                m.last_event = m.side_focus === :params ? "params focused" : "params unfocused"
+            end
+            return
+        elseif (c == 'j' || c == 'J') && m.side_focus === :params
+            # j next / J prev when PARAMS focused only (j/J no-op when unfocused)
+            delta = c == 'j' ? 1 : -1
+            select_param!(m, m.selected_param + delta)
+            return
+        elseif m.side_focus === :params && '1' <= c <= '9'
+            # Param jump 1-9 when focused (absorbs digit; no WECO toggle)
+            idx = Int(c - '0')
+            if 1 <= idx <= length(m.params)
+                select_param!(m, idx)
+            end
+            return
         elseif '1' <= c <= '8'
+            # WECO toggle when side_focus !== :params (KD-DC-5)
             rid = "WECO-$(parse(Int, string(c)))"
             m.enabled_rules[rid] = !get(m.enabled_rules, rid, false)
             ch.enabled_rules[rid] = m.enabled_rules[rid]
@@ -5350,6 +5404,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.last_event = "help open"
             return
         elseif c == 'k' || c == 'K'
+            # Keymap always — even when side_focus === :params (KD-DC-13)
             _clear_weco_explain!(m)
             _clear_plot_click_memory!(m)
             m.view_mode = :keymap
@@ -5376,7 +5431,21 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         _sync_active_back!(m)
     end
 
+    # ↑↓: param prev/next when PARAMS focused; else no-op (pan is ←→ only)
+    if evt.key == :up
+        if m.side_focus === :params
+            select_param!(m, m.selected_param - 1)
+        end
+        return
+    elseif evt.key == :down
+        if m.side_focus === :params
+            select_param!(m, m.selected_param + 1)
+        end
+        return
+    end
+
     if evt.key == :left
+        # Pan always available (even when params focused — KD-DC-13 lock)
         if n > 0
             m.viewport.x0 = max(1, m.viewport.x0 - 2)
             m.viewport.x1 = max(m.viewport.x0 + MIN_X_SPAN - 1, m.viewport.x1 - 2)
@@ -6249,9 +6318,15 @@ end
 """Dashboard Keys panel structure. Compact = most-used; expanded = full contextual list."""
 function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
     if !expanded
+        # Include `; params` when catalog non-empty (space trade vs h-help)
+        row2 = if !isempty(m.params)
+            [("d", "table"), (";", "params"), ("q", "quit"), ("?", "more")]
+        else
+            [("d", "table"), ("q", "quit"), ("?", "more"), ("h", "help")]
+        end
         return [
             (:binds, [("p", "pause"), ("g", "live"), ("m", "lib"), ("x", "tools")]),
-            (:binds, [("d", "table"), ("q", "quit"), ("?", "more"), ("h", "help")]),
+            (:binds, row2),
         ]
     end
     return [
@@ -6266,6 +6341,8 @@ function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
         (:binds, [("u", "USL"), ("t", "Target"), ("l", "LSL"), ("s", "clear")]),
         (:binds, [("1-8", "WECO"), ("w", "explain"), ("c", "config"), ("v", "lines")]),
         (:binds, [("o", "visual")]),
+        (:section, "PARAMS / CHARTS"),
+        (:binds, [(";", "params focus"), ("j/J", "next/prev"), ("↑↓", "select"), ("1-9", "jump")]),
         (:section, "MOUSE"),
         (:note, "hover · click select · drag pan · dblclick viol = explain"),
         (:note, "WECO chip = explain · dash w=explain · lib w=save · config w=Save As"),
@@ -7167,8 +7244,8 @@ function _side_sec_charts_empty!(buf, side_inner, m::SPCWorkbenchModel)
 end
 
 """
-Full non-empty Side Stats body — sectionized with D1–D18 collapse (PR2).
-Order: STATS → HOVER → LINES → WECO → CHARTS.
+Full non-empty Side Stats body — sectionized with D1–D18 collapse + PARAMS (dashboard design).
+Order: STATS → PARAMS → HOVER → LINES → WECO → CHARTS.
 """
 function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
     x = side_inner.x
@@ -7182,7 +7259,7 @@ function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
     multi_or_filter = length(m.charts) > 1 || _any_filter_active(m)
     # KD-SS-17 compact profile (headerless prefs + force-drop ±1/±2)
     compact_h11 = side_inner.height <= 11
-    # Always reserve bubbles + Viols: N so Lines cannot starve WECO at any height
+    # Always reserve bubbles + Viols: N so Lines/PARAMS cannot starve WECO at any height
     # (fixes side_h 12–13 cliff when reserve was 0 above height 11).
     reserve_tail = 2
     drop_sigma12 = compact_h11 && (hover_active || multi_or_filter)
@@ -7190,6 +7267,8 @@ function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
     y = _side_sec_summary!(buf, x, y, bot, maxw, m, act_ctx, n_primary;
                            compact_h11=compact_h11, reserve_tail=reserve_tail,
                            hover_active=hover_active)
+    y = _side_sec_params!(buf, x, y, bot, maxw, m;
+                          reserve_tail=reserve_tail, compact_h11=compact_h11)
     y = _side_sec_hover!(buf, x, y, bot, maxw, m, act_ctx, act_ch, n_primary;
                          compact_h11=compact_h11)
     y = _side_sec_lines!(buf, x, y, bot, maxw, m, act_ctx;
@@ -7198,6 +7277,102 @@ function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
     y = _side_sec_weco!(buf, x, y, bot, maxw, m, act_ctx, act_ch, side_inner;
                         compact_h11=compact_h11)
     y = _side_sec_charts!(buf, x, y, bot, maxw, m)
+    return y
+end
+
+"""Tool id for PARAMS chip: selected param → any param tool_id → tools[1]."""
+function _params_tool_id(m::SPCWorkbenchModel)::String
+    if 1 <= m.selected_param <= length(m.params)
+        tid = m.params[m.selected_param].tool_id
+        !isempty(tid) && return tid
+    end
+    for p in m.params
+        !isempty(p.tool_id) && return p.tool_id
+    end
+    isempty(m.tools) || return m.tools[1].id
+    return ""
+end
+
+"""
+▸ PARAMS — tool chip + catalog rows with ▶ on selected (KD-DC-12 / KD-DC-18).
+
+Honors `reserve_tail` (never paints into WECO floor). Drop order under pressure:
+D0a non-selected rows (bottom-up) → D0b tool chip → D0c header → D0d selected row.
+Empty catalog ⇒ omit section (no paint).
+"""
+function _side_sec_params!(buf, x::Int, y::Int, bot::Int, maxw::Int,
+                           m::SPCWorkbenchModel;
+                           reserve_tail::Int = 2, compact_h11::Bool = false)::Int
+    isempty(m.params) && return y
+    effective_bot = bot - reserve_tail
+    rem = effective_bot - y + 1
+    rem < 1 && return y
+
+    n = length(m.params)
+    sel = (1 <= m.selected_param <= n) ? m.selected_param : 0
+    show_idx = collect(1:n)
+    show_hdr = true
+    show_chip = !isempty(_params_tool_id(m))
+
+    cost() = (show_hdr ? 1 : 0) + (show_chip ? 1 : 0) + length(show_idx)
+
+    # D0a: drop non-selected rows bottom-up
+    while cost() > rem && length(show_idx) > (sel > 0 ? 1 : 0)
+        drop_at = 0
+        for i in length(show_idx):-1:1
+            if show_idx[i] != sel
+                drop_at = i
+                break
+            end
+        end
+        drop_at == 0 && break
+        deleteat!(show_idx, drop_at)
+    end
+    # D0b: tool chip
+    if cost() > rem
+        show_chip = false
+    end
+    # D0c: header
+    if cost() > rem
+        show_hdr = false
+    end
+    # D0d: selected / remaining rows last
+    while cost() > rem && !isempty(show_idx)
+        if sel > 0
+            # Prefer keep selected: drop any non-selected first, then selected
+            drop_at = findlast(i -> show_idx[i] != sel, eachindex(show_idx))
+            drop_at === nothing && (drop_at = length(show_idx))
+            deleteat!(show_idx, drop_at)
+        else
+            pop!(show_idx)
+        end
+    end
+    isempty(show_idx) && return y  # section omitted entirely under pressure
+
+    if show_hdr
+        y = _side_section_header!(buf, x, y, effective_bot, maxw, "PARAMS")
+    end
+    if show_chip && y <= effective_bot
+        tid = _params_tool_id(m)
+        set_string!(buf, x, y, _side_trunc(string("◆ ", tid), maxw), tstyle(:text_dim))
+        y += 1
+    end
+    for i in show_idx
+        y > effective_bot && break
+        p = m.params[i]
+        is_sel = (i == sel)
+        mark = is_sel ? "▶" : " "
+        units = isempty(p.units) ? "—" : p.units
+        # "▶ 1 Name  units" — truncate name to fit
+        prefix = string(mark, " ", i, " ")
+        suffix = string("  ", units)
+        name_budget = max(1, maxw - length(prefix) - length(suffix))
+        name_s = _side_trunc(p.name, name_budget)
+        line = _side_trunc(string(prefix, name_s, suffix), maxw)
+        sty = is_sel ? tstyle(:accent, bold=true) : tstyle(:text_dim)
+        set_string!(buf, x, y, line, sty)
+        y += 1
+    end
     return y
 end
 

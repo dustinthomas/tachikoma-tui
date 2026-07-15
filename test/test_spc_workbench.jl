@@ -2046,6 +2046,40 @@ include("../src/spc_workbench_io.jl")
         @test m_t.charts[1].source === :series
     end
 
+    @testset "select_param! (KD-DC-4 single path; never rematerialize)" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m)
+        @test length(m.charts) == 1
+        @test m.selected_param == 1
+        @test m.active == 1
+        vals_before = copy(m.charts[1].data.values)
+
+        # Select param with chart → activate (already active) + last_event
+        select_param!(m, 1)
+        @test m.selected_param == 1
+        @test m.active == 1
+        @test occursin("param", m.last_event)
+        @test m.charts[1].data.values == vals_before  # never rematerialize
+
+        # Select param without chart → highlight only Message; chart unchanged
+        select_param!(m, 2)
+        @test m.selected_param == 2
+        @test m.active == 1
+        @test occursin("no chart for param", m.last_event)
+        @test m.charts[1].data.values == vals_before
+        @test m.charts[1].param == m.params[1].id  # active chart param untouched
+
+        # Clamp + empty catalog
+        select_param!(m, 99)
+        @test m.selected_param == length(m.params)
+        m.params = ParamEntry[]
+        select_param!(m, 1)
+        @test m.selected_param == 0
+    end
+
+    end
+
     @testset "dashboard_pane_charts (active neighborhood, no charts[2]/[3] lock)" begin
         d = generate_spc_workbench_data(12; seed = 11)
         m = SPCWorkbenchModel(data = d, paused = true)
@@ -4455,6 +4489,115 @@ end
             side = _side_full(tb, m)
             @test occursin("Viols:", side)
         end
+    end
+
+    # ── Dashboard design PR2: Side Stats PARAMS + select_param! keys ─────
+    @testset "side stats PARAMS: H=24 fake_tool paints ▸ PARAMS + tool chip" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true, seed_demos=:fake_tool)
+        _ensure_charts!(m)
+        tb = T.TestBackend(100, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
+        @test T.find_text(tb, "▸ PARAMS") !== nothing
+        side = _side_full(tb, m)
+        @test occursin("▸ PARAMS", side)
+        # Region-scoped tool chip (plot OOC also uses ◆ — do not whole-frame assert)
+        @test occursin("◆ Film-PTPECVD01", side) || occursin("Film-PTPECVD01", side)
+        # Selected marker + display name of params[1]
+        @test occursin("▶", side)
+        @test occursin("Thickness", side) || occursin(m.params[1].name, side)
+    end
+
+    @testset "side stats PARAMS: H=18 WECO floor green on triple + fake_tool" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        for seed in (:triple, :fake_tool)
+            m = SPCWorkbenchModel(data=d, paused=true, seed_demos=seed)
+            _ensure_charts!(m)
+            tb = T.TestBackend(80, 18); T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 18), [], []))
+            found = _side_weco_bubbles(tb, m)
+            @test found !== nothing
+            if found !== nothing
+                @test found.bubbles == "●●●●●○○○"
+            end
+            side = _side_full(tb, m)
+            @test occursin("Viols:", side)
+        end
+    end
+
+    @testset "PARAMS keys: ; focus, j/J/↑↓, digits, Esc, p pause, k keymap" begin
+        d = generate_spc_workbench_data(12; seed=42)
+        m = SPCWorkbenchModel(data=d, paused=true, seed_demos=:fake_tool)
+        _ensure_charts!(m)
+        @test m.side_focus === :none
+        @test m.selected_param == 1
+
+        # j unfocused is no-op
+        T.update!(m, T.KeyEvent('j'))
+        @test m.selected_param == 1
+        @test m.side_focus === :none
+
+        # WECO digits unfocused still toggle
+        @test m.enabled_rules["WECO-6"] == false
+        T.update!(m, T.KeyEvent('6'))
+        @test m.enabled_rules["WECO-6"] == true
+        T.update!(m, T.KeyEvent('6'))  # restore
+        @test m.enabled_rules["WECO-6"] == false
+
+        # ; focuses params
+        T.update!(m, T.KeyEvent(';'))
+        @test m.side_focus === :params
+        @test occursin("params", lowercase(m.last_event))
+
+        # j next → param 2 (no chart)
+        T.update!(m, T.KeyEvent('j'))
+        @test m.selected_param == 2
+        @test occursin("no chart for param", m.last_event)
+
+        # J / up prev → param 1
+        T.update!(m, T.KeyEvent('J'))
+        @test m.selected_param == 1
+        T.update!(m, T.KeyEvent('j'))
+        @test m.selected_param == 2
+        T.update!(m, T.KeyEvent(:up))
+        @test m.selected_param == 1
+        T.update!(m, T.KeyEvent(:down))
+        @test m.selected_param == 2
+
+        # digit jump when focused
+        T.update!(m, T.KeyEvent('3'))
+        @test m.selected_param == 3
+        # digit 6 focused: jump if in range else absorb — NOT WECO toggle
+        weco6_before = m.enabled_rules["WECO-6"]
+        T.update!(m, T.KeyEvent('1'))
+        @test m.selected_param == 1
+        @test m.enabled_rules["WECO-6"] == weco6_before  # untouched by focused digits
+
+        # p still pauses when focused
+        @test m.paused == true
+        T.update!(m, T.KeyEvent('p'))
+        @test m.paused == false
+        @test m.last_event == "resumed"
+        @test m.side_focus === :params
+        T.update!(m, T.KeyEvent('P'))
+        @test m.paused == true
+        @test m.last_event == "paused"
+
+        # k still opens keymap when focused
+        T.update!(m, T.KeyEvent('k'))
+        @test m.view_mode === :keymap
+        @test m.last_event == "keymap open"
+        T.update!(m, T.KeyEvent(:escape))  # close keymap
+        @test m.view_mode === :dashboard
+        @test m.side_focus === :params  # focus survives overlay
+
+        # Esc clears side_focus before quit
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.side_focus === :none
+        @test m.quit == false
+        # Second Esc quits
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.quit == true
     end
 
     @testset "side stats PR2: H=19/20 hover multi WECO floor (no height cliff)" begin
