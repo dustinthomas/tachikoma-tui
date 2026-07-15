@@ -2710,9 +2710,37 @@ end
         @test occursin("Cpk=", band_text)
     end
 
-    @testset "OOC ◆ WECO violation markers are yellow (:warning)" begin
-        # Pure OOC (no USL/LSL): WECO-1 diamond must use yellow/warning, not accent/error.
-        # Mutate legacy m.data before view/_ensure_charts! so Primary bootstraps the OOC point.
+    @testset "marker colors: OK ● green (:success), OOC ◆ red (:error)" begin
+        # In-spec / OK samples are green; pure OOC WECO diamonds are red (not yellow/primary).
+        green = T.tstyle(:success, bold=true)
+        red = T.tstyle(:error, bold=true)
+
+        # --- OK points: flat series, no specs, all :ok ---
+        vals_ok = Float64[1.0, 1.1, 0.9, 1.05, 0.95, 1.0, 1.02, 0.98, 1.0, 1.0]
+        d_ok = WorkbenchData(values=vals_ok, cl=1.0, sigma=0.5)
+        m_ok = SPCWorkbenchModel(data=d_ok, paused=true, seed_demos=:single)
+        m_ok.usl = nothing; m_ok.lsl = nothing
+        m_ok.visual_prefs["secondary_canvas"] = false
+        for k in keys(m_ok.show_chart_lines); m_ok.show_chart_lines[k] = false; end
+        _ensure_charts!(m_ok)
+        ch_ok = m_ok.charts[1]
+        ch_ok.usl = nothing; ch_ok.lsl = nothing
+        ch_ok.enabled_rules = Dict("WECO-$i" => false for i in 1:8)
+        m_ok.enabled_rules = ch_ok.enabled_rules
+        ctx_ok = resolve_chart_render_context(ch_ok)
+        @test all(i -> point_status(i, ctx_ok, ch_ok) == :ok, 1:length(vals_ok))
+        tb_ok = T.TestBackend(70, 16); T.reset!(tb_ok.buf)
+        T.view(m_ok, T.Frame(tb_ok.buf, T.Rect(1,1,70,16),[],[]))
+        found_green = false
+        for y in 1:16, x in 1:70
+            if T.char_at(tb_ok, x, y) == '●' && T.style_at(tb_ok, x, y) == green
+                found_green = true
+                break
+            end
+        end
+        @test found_green
+
+        # --- OOC ◆ red ---
         d = generate_spc_workbench_data(20; seed=123, hints=Dict{String,Any}("trigger"=>"WECO-1"))
         m = SPCWorkbenchModel(data=d, paused=true)
         m.usl = nothing
@@ -2727,15 +2755,12 @@ end
         ch = m.charts[1]
         ch.usl = nothing
         ch.lsl = nothing
-        # Confirm pure resolver marks index 1 as OOC (not OOS)
         ctx = resolve_chart_render_context(ch; sigma_method=:mr)
         @test point_status(1, ctx, ch) == :ooc
 
         tb = T.TestBackend(70, 16); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1,1,70,16),[],[]))
-        # Scan buffer for ◆ and assert yellow warning style
-        yellow = T.tstyle(:warning, bold=true)
-        found_yellow_diamond = false
+        found_red_diamond = false
         found_any_diamond = false
         for y in 1:16
             row = T.row_text(tb, y)
@@ -2743,14 +2768,14 @@ end
             for x in 1:length(row)
                 if T.char_at(tb, x, y) == '◆'
                     found_any_diamond = true
-                    if T.style_at(tb, x, y) == yellow
-                        found_yellow_diamond = true
+                    if T.style_at(tb, x, y) == red
+                        found_red_diamond = true
                     end
                 end
             end
         end
         @test found_any_diamond
-        @test found_yellow_diamond
+        @test found_red_diamond
     end
 
     @testset "no residual braille dots beside point markers" begin
@@ -3372,8 +3397,10 @@ end
         end
     end
 
-    @testset "side stats WECO: hover multi-highlight + leave clears warning (PR2)" begin
-        # Same-index multi: 8 points above CL with last beyond +3σ → WECO-1 + WECO-4 at #8
+    @testset "side stats WECO: cursor-driven light (OK green; OOC point-only red)" begin
+        # Vertical cursor / hover drives WECO chip illumination for the current sample.
+        # OK point → ON chips lit green (not red for series-wide viols elsewhere).
+        # OOC diamond point → only rules firing AT that index light red.
         cl, s = 0.0, 1.0
         vals = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 3.5]
         d = WorkbenchData(values = vals, cl = cl, sigma = s)
@@ -3395,84 +3422,101 @@ end
         @test "WECO-1" in rules8
         @test "WECO-4" in rules8
         @test length(rules8) >= 2
+        @test point_status(8, ctx, ch) == :ooc
+        @test point_status(1, ctx, ch) == :ok
+        @test isempty(weco_rules_at_index(viols, 1))
 
-        # No hover: enable-only styles
+        green = T.tstyle(:success)
+        green_bold = T.tstyle(:success, bold=true)
+        err_sty = T.tstyle(:error, bold=true)
+        dim = T.tstyle(:text_dim)
+
+        function _bubble_xs(tb, found)
+            xs = Int[]
+            for x in found.sa.x:T.right(found.sa)
+                glyph = T.char_at(tb, x, found.y)
+                (glyph == '●' || glyph == '○') && push!(xs, x)
+            end
+            return xs
+        end
+        function _is_green(sty)
+            return sty == green || sty == green_bold
+        end
+
+        # No cursor: enable-only (ON green, OFF dim) — no series-wide red
+        m.hovered = nothing
+        m.selected = nothing
         tb0 = T.TestBackend(100, 36); T.reset!(tb0.buf)
         T.view(m, T.Frame(tb0.buf, T.Rect(1, 1, 100, 36), [], []))
         found0 = _side_weco_bubbles(tb0, m)
         @test found0 !== nothing
-        warn_sty = T.tstyle(:warning, bold=true)
         if found0 !== nothing
-            bubble_xs0 = Int[]
-            for x in found0.sa.x:T.right(found0.sa)
-                ch = T.char_at(tb0, x, found0.y)
-                (ch == '●' || ch == '○') && push!(bubble_xs0, x)
-            end
-            @test length(bubble_xs0) == 8
-            @test T.style_at(tb0, bubble_xs0[1], found0.y) == T.tstyle(:success)
-            @test T.style_at(tb0, bubble_xs0[4], found0.y) == T.tstyle(:success)
-            @test T.style_at(tb0, bubble_xs0[1], found0.y) != warn_sty
+            xs0 = _bubble_xs(tb0, found0)
+            @test length(xs0) == 8
+            @test _is_green(T.style_at(tb0, xs0[1], found0.y))
+            @test _is_green(T.style_at(tb0, xs0[4], found0.y))
+            @test T.style_at(tb0, xs0[1], found0.y) != err_sty
+            @test T.style_at(tb0, xs0[4], found0.y) != err_sty
+            @test T.style_at(tb0, xs0[6], found0.y) == dim
         end
 
-        # Hover multi-rule OOC at index 8 → ≥2 chips warning bold
+        # Cursor on OOC red diamond (#8): only point violations light red
         m.hovered = 8
+        m.selected = 8
         tb1 = T.TestBackend(100, 36); T.reset!(tb1.buf)
         T.view(m, T.Frame(tb1.buf, T.Rect(1, 1, 100, 36), [], []))
         found1 = _side_weco_bubbles(tb1, m)
         @test found1 !== nothing
         if found1 !== nothing
-            bubble_xs1 = Int[]
-            for x in found1.sa.x:T.right(found1.sa)
-                ch = T.char_at(tb1, x, found1.y)
-                (ch == '●' || ch == '○') && push!(bubble_xs1, x)
-            end
-            @test length(bubble_xs1) == 8
-            n_warn = count(i -> T.style_at(tb1, bubble_xs1[i], found1.y) == warn_sty, 1:8)
-            @test n_warn >= 2
-            # Rules that fire at 8 (at least 1 and 4) are warning
+            xs1 = _bubble_xs(tb1, found1)
+            @test length(xs1) == 8
+            n_err = count(i -> T.style_at(tb1, xs1[i], found1.y) == err_sty, 1:8)
+            @test n_err >= 2
             for rid in rules8
                 k = parse(Int, replace(rid, "WECO-" => ""))
-                @test T.style_at(tb1, bubble_xs1[k], found1.y) == warn_sty
+                @test T.style_at(tb1, xs1[k], found1.y) == err_sty
             end
-            # Non-firing ON chip (e.g. WECO-2 if not in rules8) stays success
+            # ON rules that do NOT fire at this point stay green (not series-red)
             for k in 1:5
                 rid = "WECO-$k"
                 if rid ∉ rules8
-                    @test T.style_at(tb1, bubble_xs1[k], found1.y) == T.tstyle(:success)
+                    @test _is_green(T.style_at(tb1, xs1[k], found1.y))
+                    @test T.style_at(tb1, xs1[k], found1.y) != err_sty
                 end
             end
+            @test T.style_at(tb1, xs1[6], found1.y) == dim
         end
 
-        # Hover OK / non-viol index → no warning chips
+        # Cursor on green OK point (#1): lit green; no red chips (even if series has viols elsewhere)
         m.hovered = 1
-        @test isempty(weco_rules_at_index(viols, 1))
+        m.selected = 1
         tb_ok = T.TestBackend(100, 36); T.reset!(tb_ok.buf)
         T.view(m, T.Frame(tb_ok.buf, T.Rect(1, 1, 100, 36), [], []))
         found_ok = _side_weco_bubbles(tb_ok, m)
         @test found_ok !== nothing
         if found_ok !== nothing
-            bubble_xs_ok = Int[]
-            for x in found_ok.sa.x:T.right(found_ok.sa)
-                ch = T.char_at(tb_ok, x, found_ok.y)
-                (ch == '●' || ch == '○') && push!(bubble_xs_ok, x)
+            xs_ok = _bubble_xs(tb_ok, found_ok)
+            @test length(xs_ok) == 8
+            for k in 1:5
+                @test _is_green(T.style_at(tb_ok, xs_ok[k], found_ok.y))
+                @test T.style_at(tb_ok, xs_ok[k], found_ok.y) != err_sty
             end
-            @test all(i -> T.style_at(tb_ok, bubble_xs_ok[i], found_ok.y) != warn_sty, 1:8)
+            @test T.style_at(tb_ok, xs_ok[6], found_ok.y) == dim
         end
 
-        # Leave hover → warning cleared
+        # Clear cursor → back to enable-only green (no residual red from last OOC)
         m.hovered = nothing
+        m.selected = nothing
         tb2 = T.TestBackend(100, 36); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 36), [], []))
         found2 = _side_weco_bubbles(tb2, m)
         @test found2 !== nothing
         if found2 !== nothing
-            bubble_xs2 = Int[]
-            for x in found2.sa.x:T.right(found2.sa)
-                ch = T.char_at(tb2, x, found2.y)
-                (ch == '●' || ch == '○') && push!(bubble_xs2, x)
-            end
-            @test all(i -> T.style_at(tb2, bubble_xs2[i], found2.y) != warn_sty, 1:8)
-            @test T.style_at(tb2, bubble_xs2[1], found2.y) == T.tstyle(:success)
+            xs2 = _bubble_xs(tb2, found2)
+            @test length(xs2) == 8
+            @test _is_green(T.style_at(tb2, xs2[1], found2.y))
+            @test _is_green(T.style_at(tb2, xs2[4], found2.y))
+            @test T.style_at(tb2, xs2[1], found2.y) != err_sty
         end
     end
 

@@ -5982,12 +5982,14 @@ function _render_series_canvas!(
             if st == :oos
                 sym = '✕'; sty = tstyle(:error, bold = true)
             elseif st == :ooc
-                sym = '◆'; sty = tstyle(:warning, bold = true)
+                # WECO / OOC diamond: red (in violation)
+                sym = '◆'; sty = tstyle(:error, bold = true)
             else
-                sym = '●'; sty = tstyle(:primary, bold = true)
+                # In-spec / OK sample: green
+                sym = '●'; sty = tstyle(:success, bold = true)
             end
         else
-            sym = '●'; sty = tstyle(:primary, bold = true)
+            sym = '●'; sty = tstyle(:success, bold = true)
         end
         set_char!(buf, dx, dy, sym, sty)
     end
@@ -6763,9 +6765,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
                     if st2 == :oos
                         sym2 = '✕'; sty2 = tstyle(:error, bold=true)
                     elseif st2 == :ooc
-                        sym2 = '◆'; sty2 = tstyle(:warning, bold=true)  # yellow WECO / OOC diamond
+                        sym2 = '◆'; sty2 = tstyle(:error, bold=true)  # red WECO / OOC diamond
                     else
-                        sym2 = '●'; sty2 = tstyle(:primary, bold=true)
+                        sym2 = '●'; sty2 = tstyle(:success, bold=true)  # green in-spec
                     end
                     set_char!(buf, dx, dy, sym2, sty2)
                 end
@@ -6868,9 +6870,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
                     if st3 == :oos
                         sym3 = '✕'; sty3 = tstyle(:error, bold=true)
                     elseif st3 == :ooc
-                        sym3 = '◆'; sty3 = tstyle(:warning, bold=true)  # yellow WECO / OOC diamond
+                        sym3 = '◆'; sty3 = tstyle(:error, bold=true)  # red WECO / OOC diamond
                     else
-                        sym3 = '●'; sty3 = tstyle(:primary, bold=true)
+                        sym3 = '●'; sty3 = tstyle(:success, bold=true)  # green in-spec
                     end
                     set_char!(buf, dx, dy, sym3, sty3)
                 end
@@ -7160,8 +7162,14 @@ Optional blank gap before chrome when tall (D5).
 
 KD-WB-1 hybrid chrome: bare ●/○ under compact_h11 / same-row / maxw<24;
 boxed `[●]` chips when tall, not same-row, and maxw≥24. Digits at glyph_x
-(chip center when boxed). Hover multi-highlight: rules in
-`weco_rules_at_index(viols, hovered)` paint center glyph `:warning bold`.
+(chip center when boxed).
+
+Cursor-driven illumination (vertical cursor = `hovered` else `selected`):
+- No cursor: enable-only — ON `:success` green, OFF dim (no series-wide red).
+- Cursor on OK / in-spec point: ON chips lit green (not red for viols elsewhere).
+- Cursor on OOC/OOS point: **only** rules firing at that index paint `:error bold`
+  red; other ON chips stay green.
+
 Records `m.weco_bubble_geom` for PR3 hit-testing.
 """
 function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
@@ -7193,15 +7201,24 @@ function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     end
     rem < 1 && return y
 
-    # Hoist viols once for Viols list + hover multi-highlight (KD-WB-1)
+    # Hoist viols once for Viols list + cursor-point chip styling
     side_viols = weco_detect(act_ch.data.values, act_ctx.lz.cl, act_ctx.lz.sigma;
                              enabled_rules = act_ch.enabled_rules)
-    hover_rules = if (hi = m.hovered) !== nothing
-        weco_rules_at_index(side_viols, hi)
+    # Vertical cursor: hover (live explore) wins over sticky selected
+    cursor_idx = m.hovered !== nothing ? m.hovered : m.selected
+    point_rules = if cursor_idx !== nothing
+        weco_rules_at_index(side_viols, cursor_idx)
     else
         String[]
     end
-    hover_set = Set(hover_rules)
+    point_rule_set = Set(point_rules)
+    cursor_st = if cursor_idx !== nothing && act_ctx !== nothing
+        point_status(cursor_idx, act_ctx, act_ch)
+    else
+        nothing
+    end
+    # OOC/OOS under cursor → red only for that point's rules; OK/no cursor → green ON
+    ooc_cursor = cursor_st === :ooc || cursor_st === :oos
 
     # KD-WB-1: boxed only when tall, not same-row, and width allows 8×3 chips
     boxed = !compact_h11 && !same_row_label && maxw >= 24
@@ -7219,11 +7236,14 @@ function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
         on = get(act_ch.enabled_rules, rid, false)
         x_left = bx0 + (i - 1) * step
         glyph_x = boxed ? x_left + 1 : x_left
-        # Hover fire overrides enable style on center glyph only
-        if rid in hover_set
-            sty = tstyle(:warning, bold=true)
+        if !on
+            sty = tstyle(:text_dim)
+        elseif ooc_cursor && (rid in point_rule_set)
+            # Red diamond under cursor: only that point's violations light red
+            sty = tstyle(:error, bold=true)
         else
-            sty = on ? tstyle(:success) : tstyle(:text_dim)
+            # OK point under cursor, or no cursor, or ON without fire at OOC point → green
+            sty = tstyle(:success)
         end
         glyph = on ? '●' : '○'
         if boxed
