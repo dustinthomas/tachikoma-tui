@@ -312,8 +312,9 @@ std_or_0(vs) = length(vs) < 2 ? 0.0 : std(vs; corrected = true)
 
 Pure. Operates on the in-memory SharedTable only (no file I/O).
 Filter rows by `ch.tools` when non-empty (via `ch.col_tool`); map `ch.col_value`.
-When `ch.param_filter` is non-empty, keep rows whose `ch.col_param` cell equals
-`param_filter` (ParamEntry.id). Empty `param_filter` leaves charts unchanged.
+When both `param_filter` and `col_param` are non-empty, keep rows whose
+`col_param` cell equals `param_filter` (ParamEntry.id). Empty `param_filter`
+or empty `col_param` leaves param filtering off (existing charts unchanged).
 When `ch.col_lot` is set, each point_meta includes `"lot"` (group key for PR7b Xbar).
 """
 function compute_chart_series(table::SharedTable, ch::ChartSpec)
