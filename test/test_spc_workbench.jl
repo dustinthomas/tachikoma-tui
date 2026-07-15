@@ -2115,6 +2115,140 @@ include("../src/spc_workbench_io.jl")
         @test length(dashboard_pane_charts(m_s; k = effective_dashboard_max_panes(m_s))) == 1
     end
 
+    @testset "PR4: add_param_chart! / add_analysis_chart! / auto-bump (KD-DC-3/16)" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m)
+        @test length(m.charts) == 1
+        @test m.dashboard_max_panes == 1
+        p1 = m.params[1]
+        p2 = m.params[2]
+        vals_p1 = copy(m.charts[1].data.values)
+
+        # Duplicate param+type refuse (seed already has params[1] I_MR)
+        @test add_param_chart!(m, p1) === nothing
+        @test occursin("chart already exists", m.last_event)
+        @test length(m.charts) == 1
+        @test m.dashboard_max_panes == 1
+
+        # Param add for params[2] → Chart 2 + auto-bump panes 1→2
+        idx = add_param_chart!(m, p2)
+        @test idx == 2
+        @test length(m.charts) == 2
+        @test m.charts[2].param == p2.id
+        @test m.charts[2].name == p2.name
+        @test m.charts[2].param_filter == p2.id
+        @test m.charts[2].col_param == "Parameter"
+        @test m.charts[2].source === :table
+        @test length(m.charts[2].data.values) > 0
+        @test m.charts[1].data.values == vals_p1  # prior chart untouched
+        @test m.dashboard_max_panes == 2
+        @test effective_dashboard_max_panes(m) == 2
+        # Active is new chart (last) → neighborhood length 1; switch to first for 2 panes
+        set_active_chart!(m, 1)
+        @test length(dashboard_pane_charts(m; k = effective_dashboard_max_panes(m))) == 2
+
+        # Analysis Xbar_R from params[2] chart: subgroup_size=5, same param id
+        set_active_chart!(m, 2)
+        aidx = add_analysis_chart!(m, 2, Xbar_R)
+        @test aidx == 3
+        ach = m.charts[aidx]
+        @test ach.chart_type === Xbar_R
+        @test ach.param == p2.id
+        @test ach.subgroup_size == 5
+        @test occursin("Xbar-R", ach.name)
+        @test m.dashboard_max_panes == 3  # min(3, 3 visible)
+        # Duplicate analysis refuse
+        @test add_analysis_chart!(m, 2, Xbar_R) === nothing
+        @test occursin("chart already exists", m.last_event)
+        @test length(m.charts) == 3
+
+        # Attribute refuse (KD-DC-16)
+        @test add_analysis_chart!(m, 1, p_chart) === nothing
+        @test occursin("n/defects", m.last_event)
+        @test add_analysis_chart!(m, 1, np_chart) === nothing
+        @test add_analysis_chart!(m, 1, c_chart) === nothing
+        @test add_analysis_chart!(m, 1, u_chart) === nothing
+        @test length(m.charts) == 3
+
+        # Analysis I_MR from chart that already has I_MR for same param → refuse
+        set_active_chart!(m, 1)
+        @test add_analysis_chart!(m, 1, I_MR) === nothing
+        @test occursin("chart already exists", m.last_event)
+
+        # Xbar_S ok for params[1]
+        sidx = add_analysis_chart!(m, 1, Xbar_S)
+        @test sidx == 4
+        @test m.charts[sidx].chart_type === Xbar_S
+        @test m.charts[sidx].param == p1.id
+        @test m.charts[sidx].subgroup_size == 5
+        # panes already 3 — stay clamped
+        @test m.dashboard_max_panes == 3
+
+        # Library blank add_chart! still no auto-bump beyond current (already 3)
+        n_before = length(m.charts)
+        panes_before = m.dashboard_max_panes
+        blank = add_chart!(m; name = "Blank")
+        @test blank == n_before + 1
+        @test m.charts[blank].param == ""
+        @test m.dashboard_max_panes == panes_before  # blank path does not auto-bump
+    end
+
+    @testset "PR4: modal open/Esc never quit; library a still blank" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m)
+        @test m.add_chart_open === false
+
+        update!(m, KeyEvent('+'))
+        @test m.add_chart_open === true
+        @test m.add_chart_mode === :param
+        @test m.quit === false
+        @test occursin("add chart", m.last_event)
+
+        # Esc closes modal, never quit
+        update!(m, KeyEvent(:escape))
+        @test m.add_chart_open === false
+        @test m.quit === false
+        @test occursin("cancel", m.last_event)
+
+        # A alias re-opens
+        update!(m, KeyEvent('A'))
+        @test m.add_chart_open === true
+        update!(m, KeyEvent('q'))
+        @test m.add_chart_open === false
+        @test m.quit === false
+
+        # Tab toggles mode; ↓ moves selection; Enter confirms param add
+        update!(m, KeyEvent('+'))
+        @test m.add_chart_mode === :param
+        update!(m, KeyEvent(:tab))
+        @test m.add_chart_mode === :analysis
+        update!(m, KeyEvent(:tab))
+        @test m.add_chart_mode === :param
+        # Move to params[2] (seed has chart for params[1])
+        update!(m, KeyEvent(:down))
+        @test m.add_chart_selected == 2
+        n0 = length(m.charts)
+        panes0 = m.dashboard_max_panes
+        update!(m, KeyEvent(:enter))
+        @test m.add_chart_open === false
+        @test length(m.charts) == n0 + 1
+        @test m.charts[end].param == m.params[2].id
+        @test m.dashboard_max_panes == min(3, panes0 + 1)
+
+        # Library a still blank add_chart! (no wizard, no param wire)
+        m.view_mode = :library
+        n_lib = length(m.charts)
+        panes_lib = m.dashboard_max_panes
+        update!(m, KeyEvent('a'))
+        @test length(m.charts) == n_lib + 1
+        @test m.charts[end].name == "New chart" || startswith(m.charts[end].name, "New")
+        @test m.charts[end].param == ""
+        @test m.dashboard_max_panes == panes_lib  # blank library add does not auto-bump
+        @test m.add_chart_open === false
+    end
+
 
     @testset "dashboard_pane_charts (active neighborhood, no charts[2]/[3] lock)" begin
         d = generate_spc_workbench_data(12; seed = 11)
@@ -2982,6 +3116,44 @@ end
         rows3 = [T.row_text(tb3, i) for i in 1:28]
         full3 = join([string(r) for r in rows3 if r !== nothing], "\n")
         @test !occursin("Chart 2:", full3)
+    end
+
+    @testset "PR4: ADD CHART modal paint + param add shows Chart 2" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m)
+        # Dual off so multi-pane is not compressed (KD-DC-15 / suite pattern)
+        m.visual_prefs["secondary_canvas"] = false
+
+        T.update!(m, T.KeyEvent('+'))
+        @test m.add_chart_open === true
+        tb = T.TestBackend(90, 28); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 28), [], []))
+        @test T.find_text(tb, "▸ ADD CHART") !== nothing || T.find_text(tb, "ADD CHART") !== nothing
+        @test T.find_text(tb, "[● Param]") !== nothing
+        rows = [T.row_text(tb, i) for i in 1:28]
+        full = join([string(r) for r in rows if r !== nothing], "\n")
+        @test occursin("ADD CHART", full)
+        @test occursin("[● Param]", full) || occursin("Param", full)
+
+        # Esc closes without quit
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.add_chart_open === false
+        @test m.quit === false
+        tb_esc = T.TestBackend(90, 28); T.reset!(tb_esc.buf)
+        T.view(m, T.Frame(tb_esc.buf, T.Rect(1, 1, 90, 28), [], []))
+        @test T.find_text(tb_esc, "ADD CHART") === nothing
+
+        # Param add via API → Chart 2: in multi-pane view
+        @test add_param_chart!(m, m.params[2]) == 2
+        @test m.dashboard_max_panes == 2
+        set_active_chart!(m, 1)  # show panes 1+2 from active neighborhood
+        tb2 = T.TestBackend(90, 28); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 90, 28), [], []))
+        rows2 = [T.row_text(tb2, i) for i in 1:28]
+        full2 = join([string(r) for r in rows2 if r !== nothing], "\n")
+        @test occursin("Chart 2", full2)
+        @test occursin("Chart 2:", full2) || occursin(m.params[2].name, full2)
     end
 
     @testset "dashboard_pane_charts view: active=2 secondary is next neighbor (not duplicate)" begin
