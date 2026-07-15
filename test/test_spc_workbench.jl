@@ -7696,6 +7696,16 @@ const _sync_active_back! = TachikomaTUI._sync_active_back!
         ))
         @test bad isa String
         @test occursin("dashboard_max_panes", bad)
+
+        # Bool <: Integer — must not silently load as 1/0
+        for bv in (true, false)
+            bad_bool = workbench_from_dict(Dict{String,Any}(
+                "version" => 1, "active" => 1, "charts" => base_charts,
+                "dashboard_max_panes" => bv,
+            ))
+            @test bad_bool isa String
+            @test occursin("dashboard_max_panes", bad_bool)
+        end
     end
 
     @testset "tempfile round-trip: values, WECO, specs, active, chart_type wire" begin
@@ -9341,12 +9351,52 @@ const _ensure_charts! = TachikomaTUI._ensure_charts!
         @test m.tools[1].id == "Film-PTPECVD01"
         @test m.tools[1].description == "PlasmaTherm PECVD"
         @test m.paused === true
+        # Single-chart HTML → pane heuristic 1
+        @test m.dashboard_max_panes == 1
         ctx = resolve_chart_render_context(ch)
         @test ctx.secondary_name == "MR"
         @test ctx.secondary_bar ≈ mean(abs.(diff(ch.data.values)))
         dumped = workbench_to_dict(m)
         @test !haskey(dumped, "admins")
         @test !haskey(dumped, "passcodes")
+    end
+
+    @testset "HTML multi-chart import applies KD-DC-6 pane heuristic" begin
+        # Multi-chart archive into panes=1 session must restore multi-pane budget
+        d = _mini_html_archive()
+        # Second chart (same table/tools mapping shape)
+        push!(d["charts"], Dict{String,Any}(
+            "id" => "CHT-film-2",
+            "name" => "Film-Secondary",
+            "param" => "PECVD Oxide",
+            "type" => "I-MR",
+            "units" => "nm",
+            "subgroupSize" => 5,
+            "col_value" => "Value",
+            "col_n" => "n",
+            "col_tool" => "Tool",
+            "col_time" => "Timestamp",
+            "col_lot" => "Wafer",
+            "tools" => ["Film-PTPECVD01"],
+            "limitsMode" => "auto",
+            "usl" => 1320, "target" => 1300, "lsl" => 1280,
+            "rules" => Dict("WECO-1" => true),
+        ))
+        # Fresh construct
+        m = html_state_to_workbench(d)
+        @test m isa SPCWorkbenchModel
+        @test length(m.charts) == 2
+        @test m.dashboard_max_panes == 2  # min(3, 2)
+
+        # In-place: prior :fake_tool-like panes=1 must be overwritten by heuristic
+        m2 = SPCWorkbenchModel(data = generate_spc_workbench_data(8; seed = 3),
+            paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m2)
+        @test m2.dashboard_max_panes == 1
+        err = html_state_to_workbench!(m2, d)
+        @test err === nothing
+        @test length(m2.charts) == 2
+        @test m2.dashboard_max_panes == 2
     end
 
     @testset "extract_html_spc_state from script tag + strip" begin

@@ -1131,6 +1131,11 @@ function _table_to_dict(table::SharedTable)::Dict{String,Any}
     )
 end
 
+"""KD-DC-6 absent-key heuristic: ≥2 charts → min(3, n); else 1."""
+function _dashboard_max_panes_from_chart_count(n::Int)::Int
+    n >= 2 ? min(3, n) : 1
+end
+
 """
 Fully validate + parse session dict into charts/active/session fields.
 Returns (charts, active, session_namedtuple) or error String.
@@ -1199,6 +1204,8 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
     # KD-DC-6: dashboard_max_panes optional; present → clamp 1..3; absent → chart-count heuristic
     dashboard_max_panes = if haskey(d, "dashboard_max_panes") && d["dashboard_max_panes"] !== nothing
         raw_panes = d["dashboard_max_panes"]
+        # Bool <: Integer — reject so true/false never silently become 1/0
+        raw_panes isa Bool && return "dashboard_max_panes must be integer"
         panes_i = try
             Int(raw_panes)
         catch
@@ -1206,8 +1213,7 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
         end
         clamp(panes_i, 1, 3)
     else
-        nch = length(charts)
-        nch >= 2 ? min(3, nch) : 1
+        _dashboard_max_panes_from_chart_count(length(charts))
     end
 
     return (
@@ -1291,6 +1297,7 @@ end
 
 Serialize workbench session to JSON-ready Dict (schema v1).
 Always writes per-chart `live_enabled` and `col_lot`. Never writes admins/passcodes.
+Always writes clamped `dashboard_max_panes` (1..3 via `effective_dashboard_max_panes`).
 
 Optional `table` (SharedTable as `{columns, rows}`) is written only when
 non-empty (`columns` or `rows` non-empty); omitted when empty to keep fixtures
@@ -1767,9 +1774,13 @@ function _apply_html_parsed!(m::SPCWorkbenchModel, parsed::NamedTuple)
     # Session defaults (KD-P2-21); per-chart rules stay on chart objects.
     m.default_rules = parsed.default_rules
     m.table = parsed.table
+    # HTML archives lack dashboard_max_panes — apply KD-DC-6 chart-count heuristic
+    # so multi-chart imports stay multi-pane (not stuck at prior session panes=1).
+    m.dashboard_max_panes = _dashboard_max_panes_from_chart_count(length(parsed.charts))
     m.library_selected = clamp(parsed.active, 1, length(parsed.charts))
     m.paused = true  # archive import pauses live (same spirit as CSV)
     _clear_load_ephemerals!(m)
+    # Charts non-empty → _ensure_charts! will NOT re-seed dashboard_max_panes
     _ensure_charts!(m)
     return nothing
 end
