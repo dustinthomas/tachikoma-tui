@@ -3226,6 +3226,123 @@ end
         @test occursin("Chart 2:", full2) || occursin(m.params[2].name, full2)
     end
 
+    # ── PR5: visual polish — frozen locators + region-scoped ◆ + titles ───
+    # Local region extract (mirrors later _side_full; defined early for PR5 suite order)
+    function _pr5_side_text(tb, m)
+        sa = m.side_area
+        sa.width < 1 && return ""
+        rows = String[]
+        for y in sa.y:T.bottom(sa)
+            chars = Char[T.char_at(tb, x, y) for x in sa.x:T.right(sa)]
+            push!(rows, rstrip(String(chars)))
+        end
+        return join(rows, "\n")
+    end
+
+    @testset "PR5: frozen locators PARAMS / ADD CHART / mode chips / Dashboard:" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m)
+        m.visual_prefs["secondary_canvas"] = false
+
+        # Dashboard primary title keeps Dashboard: + [active/total]; tool chip when known
+        tb = T.TestBackend(100, 28); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 28), [], []))
+        rows = [T.row_text(tb, i) for i in 1:28]
+        full = join([string(r) for r in rows if r !== nothing], "\n")
+        @test occursin("Dashboard:", full)
+        @test occursin("[1/1]", full) || occursin("[$(m.active)/$(length(m.charts))]", full)
+        @test occursin("SPC Workbench [dashboard]", full)
+        # Tool chip on primary / header (Film-PTPECVD01 from fake_tool)
+        @test occursin("Film-PTPECVD01", full)
+
+        # Side Stats: ▸ PARAMS + region-scoped ◆ tool chip (not whole-frame-only)
+        @test T.find_text(tb, "▸ PARAMS") !== nothing
+        side = _pr5_side_text(tb, m)
+        @test occursin("▸ PARAMS", side)
+        @test occursin("◆ Film-PTPECVD01", side)
+        # Whole-frame may also match plot OOC ◆ — region assert is required
+        @test occursin("◆", side)
+
+        # Add-chart modal frozen locators + mode chips
+        T.update!(m, T.KeyEvent('+'))
+        @test m.add_chart_open === true
+        tb2 = T.TestBackend(100, 28); T.reset!(tb2.buf)
+        T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 100, 28), [], []))
+        @test T.find_text(tb2, "▸ ADD CHART") !== nothing
+        @test T.find_text(tb2, "[● Param]") !== nothing
+        rows2 = [T.row_text(tb2, i) for i in 1:28]
+        full2 = join([string(r) for r in rows2 if r !== nothing], "\n")
+        @test occursin("[○ Analysis]", full2) || occursin("Analysis", full2)
+        T.update!(m, T.KeyEvent(:tab))
+        tb3 = T.TestBackend(100, 28); T.reset!(tb3.buf)
+        T.view(m, T.Frame(tb3.buf, T.Rect(1, 1, 100, 28), [], []))
+        rows3 = [T.row_text(tb3, i) for i in 1:28]
+        full3 = join([string(r) for r in rows3 if r !== nothing], "\n")
+        @test occursin("[● Analysis]", full3) || occursin("[○ Param]", full3)
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.add_chart_open === false
+    end
+
+    @testset "PR5: Tools page ▸ TOOLS header + fake_tool list polish" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m)
+        @test !isempty(m.tools)
+        T.update!(m, T.KeyEvent('x'))
+        @test m.view_mode == :tools
+        tb = T.TestBackend(80, 22); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, 22), [], []))
+        @test T.find_text(tb, "▸ TOOLS") !== nothing
+        @test T.find_text(tb, "TOOLS REGISTRY") !== nothing  # legacy substring still present
+        full = join([string(T.row_text(tb, i)) for i in 1:22 if T.row_text(tb, i) !== nothing], "\n")
+        @test occursin("Film-PTPECVD01", full)
+        @test occursin("tool", full) || occursin("Tools", full) || occursin("TOOLS", full)
+        # No dashboard bleed
+        @test T.find_text(tb, "SPC Workbench [dashboard]") === nothing
+        @test T.find_text(tb, "Side Stats") === nothing
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.view_mode == :dashboard
+    end
+
+    @testset "PR5: multi-pane Chart 2:/Chart 3: prefixes preserved; Dashboard: on primary" begin
+        d = generate_spc_workbench_data(15; seed = 99)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m)
+        m.visual_prefs["secondary_canvas"] = false
+        m.charts[1].name = "Alpha"
+        m.charts[2].name = "Bravo"
+        m.charts[3].name = "Charlie"
+        set_active_chart!(m, 1)
+        tb = T.TestBackend(90, 28); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 90, 28), [], []))
+        rows = [T.row_text(tb, i) for i in 1:28]
+        full = join([string(r) for r in rows if r !== nothing], "\n")
+        @test occursin("Dashboard:", full)
+        @test occursin("Dashboard: Alpha", full) || occursin("Alpha [1/3]", full)
+        @test occursin("Chart 2:", full)
+        @test occursin("Chart 3:", full)
+        @test occursin("Chart 2: Bravo", full) || occursin("Bravo (read-only", full)
+        @test occursin("Chart 3: Charlie", full) || occursin("Charlie (read-only", full)
+    end
+
+    @testset "PR5: PARAMS focus paints ▸ PARAMS; region ◆ chip only on side" begin
+        d = generate_spc_workbench_data(12; seed = 42)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m)
+        T.update!(m, T.KeyEvent(';'))
+        @test m.side_focus === :params
+        tb = T.TestBackend(100, 24); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 24), [], []))
+        side = _pr5_side_text(tb, m)
+        @test occursin("▸ PARAMS", side)
+        @test occursin("◆ Film-PTPECVD01", side)
+        # Focused header may show ● after PARAMS
+        @test occursin("PARAMS", side)
+        T.update!(m, T.KeyEvent(:escape))
+        @test m.side_focus === :none
+    end
+
     @testset "dashboard_pane_charts view: active=2 secondary is next neighbor (not duplicate)" begin
         m = SPCWorkbenchModel(data = generate_spc_workbench_data(15; seed = 99), paused = true)
         _ensure_charts!(m)

@@ -7138,7 +7138,8 @@ function view(m::SPCWorkbenchModel, f::Frame)
 
     # header — short title only; key bindings live in bottom Keys panel
     nch_hdr = length(m.charts)
-    hdr = "SPC Workbench [dashboard]  chart $(m.active)/$(max(1, nch_hdr))"
+    # Keep SPC Workbench [dashboard] + chart n/m; optional dim tool/param chips (PR5)
+    hdr = "SPC Workbench [dashboard]  chart $(m.active)/$(max(1, nch_hdr))$(_dashboard_title_chips(m))"
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
 
     # A6: empty filter match — plot message + side list (Charts: 0/N) + bottom panels
@@ -7159,9 +7160,11 @@ function view(m::SPCWorkbenchModel, f::Frame)
     end
 
     # Active primary (+ optional dual secondary canvas under it — KD-P2-15/16/17)
+    # Locked tokens: `Dashboard:` prefix + `[active/total]`; optional · tool/param chips (PR5)
     chname = isempty(m.charts) ? "Data" : current_chart(m).name
     empty_hint = (n == 0) ? " — No data — import CSV or clone a demo" : ""
-    pri_title = "Dashboard: $(chname) [$(m.active)/$(length(m.charts))] (│ hover  ┃ select  drag pan  wheel zoom)  [ ] switch$(empty_hint)"
+    chips = _dashboard_title_chips(m)
+    pri_title = "Dashboard: $(chname) [$(m.active)/$(length(m.charts))]$(chips) (│ hover  ┃ select  drag pan  wheel zoom)  [ ] switch$(empty_hint)"
     primary_outer = show_dual ? dual_split[1] : active_plot_rect
     secondary_outer = show_dual ? dual_split[2] : nothing
 
@@ -7604,6 +7607,47 @@ function _params_tool_id(m::SPCWorkbenchModel)::String
 end
 
 """
+Dim suffix chips for dashboard titles (PR5 / KD-DC-10).
+
+Returns ` · tool` and optional ` · param` when the display name differs from the
+chart title. Empty when nothing known — callers keep the locked `Dashboard:` /
+`[active/total]` prefixes and only append this suffix.
+"""
+function _dashboard_title_chips(m::SPCWorkbenchModel)::String
+    bits = String[]
+    tid = ""
+    pname = ""
+    chname = ""
+    if !isempty(m.charts)
+        ch = current_chart(m)
+        chname = ch.name
+        if !isempty(ch.tools)
+            tid = String(ch.tools[1])
+        end
+        if !isempty(ch.param)
+            i = findfirst(p -> p.id == ch.param, m.params)
+            if i !== nothing
+                pe = m.params[i]
+                pname = pe.name
+                if isempty(tid) && !isempty(pe.tool_id)
+                    tid = pe.tool_id
+                end
+            end
+        end
+    end
+    if isempty(tid)
+        tid = _params_tool_id(m)
+    end
+    # Param display chip only when distinct from chart block title (avoid double name)
+    if !isempty(pname) && pname != chname
+        push!(bits, pname)
+    end
+    !isempty(tid) && push!(bits, tid)
+    isempty(bits) && return ""
+    return " · " * join(bits, " · ")
+end
+
+"""
 ▸ PARAMS — tool chip + catalog rows with ▶ on selected (KD-DC-12 / KD-DC-18).
 
 Honors `reserve_tail` (WECO floor) **and** upcoming HOVER rows so hover cannot
@@ -7665,12 +7709,16 @@ function _side_sec_params!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     end
     isempty(show_idx) && return y  # section omitted entirely under pressure
 
+    focused = m.side_focus === :params
     if show_hdr
-        y = _side_section_header!(buf, x, y, effective_bot, maxw, "PARAMS")
+        # Focused: `▸ PARAMS ●` still matches frozen locator `▸ PARAMS` (PR5)
+        hdr = focused ? "PARAMS ●" : "PARAMS"
+        y = _side_section_header!(buf, x, y, effective_bot, maxw, hdr)
     end
     if show_chip && y <= effective_bot
         tid = _params_tool_id(m)
-        set_string!(buf, x, y, _side_trunc(string("◆ ", tid), maxw), tstyle(:text_dim))
+        chip_sty = focused ? tstyle(:accent) : tstyle(:text_dim)
+        set_string!(buf, x, y, _side_trunc(string("◆ ", tid), maxw), chip_sty)
         y += 1
     end
     for i in show_idx
@@ -7685,7 +7733,13 @@ function _side_sec_params!(buf, x::Int, y::Int, bot::Int, maxw::Int,
         name_budget = max(1, maxw - length(prefix) - length(suffix))
         name_s = _side_trunc(p.name, name_budget)
         line = _side_trunc(string(prefix, name_s, suffix), maxw)
-        sty = is_sel ? tstyle(:accent, bold=true) : tstyle(:text_dim)
+        sty = if is_sel
+            tstyle(:accent, bold = true)
+        elseif focused
+            tstyle(:text)  # readable list while params-focused
+        else
+            tstyle(:text_dim)
+        end
         set_string!(buf, x, y, line, sty)
         y += 1
     end
@@ -8106,20 +8160,30 @@ function _render_library_page!(buf, area, m)
     end
 end
 
-# ── Tools registry page (P2-PR4) — master list m.tools; assign via builder ─
+# ── Tools registry page (P2-PR4 / PR5 polish) — master list m.tools; assign via builder ─
 function _render_tools_page!(buf, area, m)
     content, chrome = _split_mode_chrome(area)
     m.tools_area = content
+    # Frozen locator: `▸ TOOLS` (also keeps legacy `TOOLS REGISTRY` substring)
     set_string!(buf, content.x + 1, content.y,
-        "TOOLS REGISTRY  ·  Esc/q → dashboard", tstyle(:title, bold=true))
+        "▸ TOOLS REGISTRY  ·  Esc/q → dashboard", tstyle(:title, bold=true))
     y = content.y + 2
     ntools = length(m.tools)
     if ntools >= 1
         m.tools_selected = clamp(m.tools_selected, 1, ntools)
     end
-    set_string!(buf, content.x + 2, y,
-        "Tools: $ntools   selected=$(m.tools_selected)   (registry ≠ chart tools list)",
-        tstyle(:text_dim))
+    # Summary: focus tool · N tools (design mockup) + registry note
+    if ntools == 0
+        set_string!(buf, content.x + 2, y,
+            "0 tools   (registry ≠ chart tools list)",
+            tstyle(:text_dim))
+    else
+        focus_id = m.tools[m.tools_selected].id
+        plural = ntools == 1 ? "tool" : "tools"
+        set_string!(buf, content.x + 2, y,
+            "$focus_id · $ntools $plural   selected=$(m.tools_selected)   (registry ≠ chart tools)",
+            tstyle(:text_dim))
+    end
     y += 2
     capacity = _tools_visible_capacity(m)
     _sync_tools_scroll!(m, ntools, capacity)
@@ -8390,7 +8454,7 @@ function _render_presets_list_body!(buf, content, m; y::Int)
     return y
 end
 
-"""Centered add-chart wizard modal (PR4). Locators: ▸ ADD CHART, [● Param]."""
+"""Centered add-chart wizard modal (PR4/PR5). Locators: ▸ ADD CHART, [● Param]."""
 function _render_add_chart_modal!(buf, area, m::SPCWorkbenchModel)
     aw = area.width
     ah = area.height
@@ -8414,13 +8478,15 @@ function _render_add_chart_modal!(buf, area, m::SPCWorkbenchModel)
     bot = bottom(inner)
     maxw = max(1, inner.width - 1)
     y = inner.y
-    # Mode chips
+    # Mode chips — active mode accent-bold; inactive dim (frozen [● Param]/[● Analysis])
     if m.add_chart_mode === :param
         chip = "[● Param]  [○ Analysis]     Tab switch mode"
+        chip_sty = tstyle(:accent, bold = true)
     else
         chip = "[○ Param]  [● Analysis]     Tab switch mode"
+        chip_sty = tstyle(:accent, bold = true)
     end
-    set_string!(buf, inner.x, y, _side_trunc(chip, maxw), tstyle(:text))
+    set_string!(buf, inner.x, y, _side_trunc(chip, maxw), chip_sty)
     y += 1
     if y <= bot
         set_string!(buf, inner.x, y, _side_trunc("─"^maxw, maxw), tstyle(:text_dim))
@@ -8429,9 +8495,12 @@ function _render_add_chart_modal!(buf, area, m::SPCWorkbenchModel)
     _clamp_add_chart_selected!(m)
     if m.add_chart_mode === :param
         if y <= bot
+            # Tool context chip when catalog knows a tool (region-friendly, not plot ◆)
+            tid = _params_tool_id(m)
+            mode_lbl = isempty(tid) ? "Mode :param — pick parameter" : "Mode :param · $tid — pick parameter"
             set_string!(
                 buf, inner.x, y,
-                _side_trunc("Mode :param — pick parameter", maxw),
+                _side_trunc(mode_lbl, maxw),
                 tstyle(:text_dim),
             )
             y += 1
@@ -8459,9 +8528,10 @@ function _render_add_chart_modal!(buf, area, m::SPCWorkbenchModel)
         end
     else
         if y <= bot
+            src = isempty(m.charts) ? "—" : current_chart(m).name
             set_string!(
                 buf, inner.x, y,
-                _side_trunc("Mode :analysis — pick type (from active)", maxw),
+                _side_trunc("Mode :analysis — from $src", maxw),
                 tstyle(:text_dim),
             )
             y += 1
@@ -8479,7 +8549,7 @@ function _render_add_chart_modal!(buf, area, m::SPCWorkbenchModel)
     if y <= bot
         set_string!(
             buf, inner.x, y,
-            _side_trunc("Enter confirm · Esc/q cancel · ↑↓ select", maxw),
+            _side_trunc("Enter confirm · Esc/q cancel · ↑↓ select · Tab mode", maxw),
             tstyle(:text_dim),
         )
     end
