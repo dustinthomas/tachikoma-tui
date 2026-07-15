@@ -1846,6 +1846,8 @@ include("../src/spc_workbench_io.jl")
         @test ch.param == m_ft.params[1].id          # identity lock: id, not name
         @test ch.param == "thk_1_3um"
         @test ch.name == m_ft.params[1].name
+        @test ch.param != ch.name                     # id and display name must diverge
+        @test ch.param != m_ft.params[1].name
         @test ch.units == m_ft.params[1].units
         @test ch.tools == ["Film-PTPECVD01"]
         @test ch.usl == m_ft.params[1].usl

@@ -2461,11 +2461,13 @@ function default_fake_tool_params()::Vector{ParamEntry}
 end
 
 """
+    _seed_fake_tool_session!(m)
+
 Bootstrap tools + params + one series chart for `seed_demos = :fake_tool` (PR1a).
 
 Series path only — SharedTable long fill lands in PR1b. `ch.param` = ParamEntry.id.
 """
-function _seed_fake_tool_charts!(m::SPCWorkbenchModel)
+function _seed_fake_tool_session!(m::SPCWorkbenchModel)
     m.tools = default_fake_tools()
     m.params = default_fake_tool_params()
     m.selected_param = 1
@@ -2499,7 +2501,7 @@ function _ensure_charts!(m::SPCWorkbenchModel)
         # reset if charts already non-empty — user/load may have changed panes).
         _seed_dashboard_max_panes!(m, seed)
         if seed === :fake_tool
-            _seed_fake_tool_charts!(m)
+            _seed_fake_tool_session!(m)
         elseif seed === :none
             push!(m.charts, ChartSpec(
                 name = "Primary",
