@@ -42,7 +42,7 @@ Session
 
 This is the home screen after launch (and after closing library/builder/etc.).
 
-How many chart panes you see is controlled by **`dashboard_max_panes`** (clamped 1…3). Seed policy sets it: **`:triple` → 3**, **`:fake_tool` / `:single` / `:none` → 1**. Adding a chart via the **Add Chart** wizard can raise the budget up to 3 so new panes appear.
+How many chart panes you see is controlled by **`dashboard_max_panes`** (clamped 1…3). Seed policy sets it: **`:triple` → 3**, **`:fake_tool` / `:single` / `:none` → 1**. The **Add Chart** wizard raises the budget only for **same-param analysis** stacks (up to 3). Adding another **parameter** chart does **not** multi-pane by itself — use **Compare** (`=` + pins) for side-by-side params.
 
 ### Navigate charts
 
@@ -121,7 +121,7 @@ Library **`a`** remains **blank add chart** — it does **not** open this wizard
 | **Param** | Chart for another catalog parameter (same tool when seeded from fake_tool) |
 | **Analysis** | Second analysis of the **active** chart’s parameter — v1 types: **I-MR**, **X̄-R**, **X̄-S** only |
 
-Duplicates (same parameter id + chart type) are refused. A successful wizard add can **auto-raise** `dashboard_max_panes` up to 3 so the new pane is visible.
+Duplicates (same parameter id + chart type) are refused. **Analysis** adds may raise `dashboard_max_panes` to `min(3, same-param chart count)` so stacked analyses of one param appear. **Param** adds do **not** raise the budget — multi-param side-by-side is **Compare** (`,` pin + `=`), not wizard auto-bump.
 
 ### Specs and WECO
 

@@ -137,7 +137,7 @@ By default it seeds **three demo charts** (Primary / Secondary / Tertiary). That
 | `:single` | 1 chart | empty | **1** |
 | `:none` | 1 empty Primary (no random series) | empty | **1** |
 
-`dashboard_max_panes` is **seed-coupled** (field default 3 for triple compat; `_ensure_charts!` overwrites when bootstrapping empty charts). Wizard add-chart paths can auto-bump the budget up to 3.
+`dashboard_max_panes` is **seed-coupled** (field default 3 for triple compat; `_ensure_charts!` overwrites when bootstrapping empty charts). Scope-aware bump: analysis stacks may raise to `min(3, same-param count)`; param adds do not; multi-param side-by-side is Compare (`=` + pins).
 
 **Sources:** `src/spc_workbench.jl`, `src/spc_workbench_io.jl`  
 **Detailed contracts:** `docs/src/spc-workbench.md` · **Operator guide:** `docs/user/workbench.md`
@@ -231,7 +231,7 @@ Selecting a param activates the chart with matching `ch.param == ParamEntry.id`,
 
 - **Param mode:** new chart for a catalog parameter (materialize from SharedTable when present).
 - **Analysis mode:** same param id as active chart, different type — v1: I-MR / X̄-R / X̄-S only.
-- Successful wizard add may auto-bump `dashboard_max_panes` to `min(3, visible count)`.
+- Analysis adds may raise `dashboard_max_panes` to `min(3, same-param count)`; param adds do not (Compare for multi-param).
 
 **Important lock:** live is only `g`/`G`. **`L` is LSL edit.** **`p` stays pause; `k` stays keymap.**
 

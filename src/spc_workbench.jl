@@ -3726,16 +3726,40 @@ function select_param!(m::SPCWorkbenchModel, idx::Int)
     return nothing
 end
 
-# ── Add-chart wizard (PR4 / KD-DC-3 / KD-DC-16 / KD-DC-17) ───────────────
+# ── Add-chart wizard (PR4 / KD-PD-3 / KD-DC-16 / KD-DC-17) ───────────────
 
 """Analysis types offered in the add-chart modal (v1: individuals + Xbar only)."""
 const ADD_CHART_ANALYSIS_TYPES = ChartType[I_MR, Xbar_R, Xbar_S]
 
-"""KD-DC-3: wizard-only pane auto-bump when visible charts exceed budget."""
-function _auto_bump_dashboard_panes!(m::SPCWorkbenchModel)
-    n = length(visible_charts(m))
-    if n > m.dashboard_max_panes
-        m.dashboard_max_panes = min(3, n)
+"""
+Scope-aware pane budget bump (KD-PD-3). Never uses full library length.
+
+| `reason` | Action |
+|----------|--------|
+| `:param` | No bump (cross-param multi-pane needs Compare) |
+| `:analysis` | `max(current, min(3, count same-param in visible))` |
+| `:compare` | `max(current, min(3, max(1, n_effective_pins)))` |
+"""
+function _maybe_bump_panes_for_display!(m::SPCWorkbenchModel; reason::Symbol)
+    if reason === :param
+        # New / other param chart: never raise for cross-param multi-pane
+        return nothing
+    elseif reason === :analysis
+        # Same-param analysis stack only (current_chart is the newly activated analysis)
+        src = current_chart(m)
+        n_same = count(c -> c.param == src.param, visible_charts(m))
+        target = min(3, n_same)
+        if target > m.dashboard_max_panes
+            m.dashboard_max_panes = target
+        end
+        return nothing
+    elseif reason === :compare
+        n_pins = length(_effective_compare_pins(m))
+        target = min(3, max(1, n_pins))
+        if target > m.dashboard_max_panes
+            m.dashboard_max_panes = target
+        end
+        return nothing
     end
     return nothing
 end
@@ -3754,8 +3778,9 @@ end
 
 Create a chart for catalog parameter `p`. Uses `materialize_param_chart!` when
 the session SharedTable has rows; otherwise wires metadata with empty series.
-Refuses duplicate (same param id + chart type). Auto-bumps `dashboard_max_panes`
-(KD-DC-3). Returns new 1-based index or `nothing` on refuse.
+Refuses duplicate (same param id + chart type). Does **not** raise
+`dashboard_max_panes` (KD-PD-3 `reason=:param` — multi-param side-by-side is
+Compare). Returns new 1-based index or `nothing` on refuse.
 """
 function add_param_chart!(
     m::SPCWorkbenchModel,
@@ -3806,8 +3831,8 @@ function add_param_chart!(
     if pi !== nothing
         m.selected_param = pi
     end
-    _auto_bump_dashboard_panes!(m)  # PR4 will replace with scope-aware bump
-    m.last_event = "added param chart $idx"
+    _maybe_bump_panes_for_display!(m; reason = :param)
+    m.last_event = "added param chart $(p.name) · = Compare for side-by-side"
     return idx
 end
 
@@ -3820,7 +3845,8 @@ defaults to 5 when source has nothing useful (KD-DC-16).
 
 Refuses attribute types (`p`/`np`/`c`/`u`) and duplicates (same param id + type).
 Rematerializes from table when source is `:table` and table non-empty; else
-copies series values. Auto-bumps panes (KD-DC-3).
+copies series values. May raise panes for same-param stack only (KD-PD-3
+`reason=:analysis` → `min(3, count same-param visible)`).
 """
 function add_analysis_chart!(
     m::SPCWorkbenchModel,
@@ -3891,7 +3917,7 @@ function add_analysis_chart!(
     idx = length(m.charts)
     m.library_selected = idx
     set_active_chart!(m, idx)
-    _auto_bump_dashboard_panes!(m)
+    _maybe_bump_panes_for_display!(m; reason = :analysis)
     m.last_event = "added analysis chart $idx"
     return idx
 end
@@ -4790,22 +4816,6 @@ function dashboard_pane_charts(m::SPCWorkbenchModel; k::Int = 3)::Vector{ChartSp
     ds = dashboard_display_set(m)
     isempty(ds) && return ChartSpec[]
     return ds[1:min(k, length(ds))]
-end
-
-"""Bump pane budget for compare pins (PR3). Full scope-aware formulas land in PR4.
-
-`:compare` only — leave `_auto_bump_dashboard_panes!` for wizard paths until PR4.
-"""
-function _maybe_bump_panes_for_display!(m::SPCWorkbenchModel; reason::Symbol)
-    if reason === :compare
-        n_pins = length(_effective_compare_pins(m))
-        target = min(3, max(1, n_pins))
-        if target > m.dashboard_max_panes
-            m.dashboard_max_panes = target
-        end
-    end
-    # :param / :analysis → PR4
-    return nothing
 end
 
 """

@@ -2517,13 +2517,14 @@ include("../src/spc_workbench_io.jl")
         @test length(dashboard_pane_charts(m_s; k = effective_dashboard_max_panes(m_s))) == 1
     end
 
-    @testset "PR4: add_param_chart! / add_analysis_chart! / auto-bump (KD-DC-3/16)" begin
+    @testset "PR4: add_param_chart! / add_analysis_chart! / scope-aware bump (KD-PD-3/16)" begin
         d = generate_spc_workbench_data(12; seed = 7)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
         _ensure_charts!(m)
-        # Seed: one chart per catalog param; single-pane until wizard auto-bumps
+        # Seed: one chart per catalog param; single-pane until same-param analysis bumps
         @test length(m.charts) == length(m.params) >= 3
         @test m.dashboard_max_panes == 1
+        @test m.dashboard_scope === :param_active
         p1 = m.params[1]
         p2 = m.params[2]
         n0 = length(m.charts)
@@ -2536,7 +2537,8 @@ include("../src/spc_workbench_io.jl")
         @test length(m.charts) == n0
         @test m.dashboard_max_panes == 1
 
-        # Analysis Xbar_R from params[2] chart: subgroup_size=5, same param id + auto-bump panes
+        # Analysis Xbar_R from params[2] chart: same-param stack → bump to min(3, n_same)=2
+        # (NOT library length — KD-PD-3; total visible charts >> 2)
         set_active_chart!(m, 2)
         aidx = add_analysis_chart!(m, 2, Xbar_R)
         @test aidx == n0 + 1
@@ -2546,8 +2548,11 @@ include("../src/spc_workbench_io.jl")
         @test ach.subgroup_size == 5
         @test occursin("Xbar-R", ach.name)
         @test m.charts[1].data.values == vals_p1  # prior chart untouched
-        @test m.dashboard_max_panes == min(3, length(m.charts))
-        @test m.dashboard_max_panes >= 2
+        n_same_p2 = count(c -> c.param == p2.id, visible_charts(m))
+        @test n_same_p2 == 2
+        @test m.dashboard_max_panes == min(3, n_same_p2)
+        @test m.dashboard_max_panes == 2
+        @test m.dashboard_max_panes < length(visible_charts(m))  # not library-length bump
         # Duplicate analysis refuse
         @test add_analysis_chart!(m, 2, Xbar_R) === nothing
         @test occursin("chart already exists", m.last_event)
@@ -2566,22 +2571,52 @@ include("../src/spc_workbench_io.jl")
         @test add_analysis_chart!(m, 1, I_MR) === nothing
         @test occursin("chart already exists", m.last_event)
 
-        # Xbar_S ok for params[1]
+        # Xbar_S for params[1]: n_same(p1)=2 → target 2; budget already 2 from p2 analysis
         sidx = add_analysis_chart!(m, 1, Xbar_S)
         @test sidx == n0 + 2
         @test m.charts[sidx].chart_type === Xbar_S
         @test m.charts[sidx].param == p1.id
         @test m.charts[sidx].subgroup_size == 5
-        # panes clamp at 3
-        @test m.dashboard_max_panes == 3
+        @test m.dashboard_max_panes == 2  # same-param count only; not library length
 
-        # Library blank add_chart! still no auto-bump beyond current (already 3)
+        # Same-param stack can reach 3: add Xbar_R for p1 (I_MR seed + Xbar_S + Xbar_R)
+        sidx2 = add_analysis_chart!(m, 1, Xbar_R)
+        @test sidx2 !== nothing
+        n_same_p1 = count(c -> c.param == p1.id, visible_charts(m))
+        @test n_same_p1 == 3
+        @test m.dashboard_max_panes == 3  # min(3, n_same)
+
+        # Library blank add_chart! still no auto-bump beyond current
         n_before = length(m.charts)
         panes_before = m.dashboard_max_panes
         blank = add_chart!(m; name = "Blank")
         @test blank == n_before + 1
         @test m.charts[blank].param == ""
         @test m.dashboard_max_panes == panes_before  # blank path does not auto-bump
+
+        # Negative: add_param for missing param does NOT bump; param_active surface is single-param
+        m2 = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m2)
+        @test m2.dashboard_max_panes == 1
+        # Drop params[2] chart so we can re-add it via wizard path
+        idx_p2 = findfirst(c -> c.param == m2.params[2].id, m2.charts)
+        @test idx_p2 !== nothing
+        delete_chart!(m2, idx_p2)
+        set_active_chart!(m2, 1)
+        m2.selected_param = 1
+        m2.dashboard_max_panes = 1
+        n_before_add = length(m2.charts)
+        new_idx = add_param_chart!(m2, m2.params[2])
+        @test new_idx == n_before_add + 1
+        @test m2.dashboard_max_panes == 1  # reason=:param → no bump (KD-PD-3)
+        @test m2.selected_param == 2
+        @test occursin("Compare", m2.last_event) || occursin("added param chart", m2.last_event)
+        # Under param_active even if budget forced high: only the new param's charts
+        m2.dashboard_max_panes = 3
+        panes = dashboard_pane_charts(m2; k = effective_dashboard_max_panes(m2))
+        @test length(panes) == 1
+        @test all(c -> c.param == m2.params[2].id, panes)
+        @test panes[1].id == current_chart(m2).id
     end
 
     @testset "PR4: modal open/Esc never quit; library a still blank" begin
@@ -2622,7 +2657,10 @@ include("../src/spc_workbench_io.jl")
         update!(m, KeyEvent(:enter))
         @test m.add_chart_open === false
         @test length(m.charts) == n0 + 1
-        @test m.dashboard_max_panes == min(3, max(panes0 + 1, length(m.charts)))
+        # KD-PD-3: analysis bumps to min(3, same-param count), not library length
+        n_same = count(c -> c.param == current_chart(m).param, visible_charts(m))
+        @test m.dashboard_max_panes == min(3, max(panes0, n_same))
+        @test m.dashboard_max_panes == 2  # seed I_MR + new analysis for active param
 
         # Library a still blank add_chart! (no wizard, no param wire)
         m.view_mode = :library
@@ -3615,7 +3653,7 @@ end
         @test !occursin("Chart 2:", full3)
     end
 
-    @testset "PR4: ADD CHART modal paint + param add shows Chart 2" begin
+    @testset "PR4: ADD CHART modal paint + analysis multi-pane; cross-param no Chart 2" begin
         d = generate_spc_workbench_data(12; seed = 7)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
         _ensure_charts!(m)
@@ -3641,18 +3679,46 @@ end
         T.view(m, T.Frame(tb_esc.buf, T.Rect(1, 1, 90, 28), [], []))
         @test T.find_text(tb_esc, "ADD CHART") === nothing
 
-        # Analysis add via API → multi-pane when panes auto-bump (params already seeded)
+        # PD-V6: Analysis add → same-param multi-pane (KD-PD-3 reason=:analysis)
         n0 = length(m.charts)
         aidx = add_analysis_chart!(m, 1, Xbar_R)
         @test aidx == n0 + 1
         @test m.dashboard_max_panes >= 2
-        set_active_chart!(m, 1)  # show panes 1+2 from active neighborhood
+        @test m.dashboard_max_panes == 2  # min(3, same-param count), not library length
+        pid1 = m.params[1].id
+        set_active_chart!(m, findfirst(c -> c.param == pid1 && c.chart_type === I_MR, m.charts))
         tb2 = T.TestBackend(90, 28); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 90, 28), [], []))
         rows2 = [T.row_text(tb2, i) for i in 1:28]
         full2 = join([string(r) for r in rows2 if r !== nothing], "\n")
         @test occursin("Chart 2", full2)
         @test occursin("Chart 2:", full2)
+        panes_a = dashboard_pane_charts(m; k = effective_dashboard_max_panes(m))
+        @test length(panes_a) == 2
+        @test all(c -> c.param == pid1, panes_a)
+
+        # PD-V7 negative: cross-param add_param does not show other-param Chart 2 under param_active
+        m3 = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m3)
+        m3.visual_prefs["secondary_canvas"] = false
+        idx_drop = findfirst(c -> c.param == m3.params[2].id, m3.charts)
+        delete_chart!(m3, idx_drop)
+        set_active_chart!(m3, 1)
+        m3.selected_param = 1
+        m3.dashboard_max_panes = 1
+        add_param_chart!(m3, m3.params[2])
+        @test m3.dashboard_max_panes == 1
+        @test m3.selected_param == 2
+        # Even with forced k=3, only the newly selected param appears (no other-param Chart 2)
+        m3.dashboard_max_panes = 3
+        panes_x = dashboard_pane_charts(m3; k = effective_dashboard_max_panes(m3))
+        @test length(panes_x) == 1
+        @test panes_x[1].param == m3.params[2].id
+        tb3 = T.TestBackend(90, 28); T.reset!(tb3.buf)
+        T.view(m3, T.Frame(tb3.buf, T.Rect(1, 1, 90, 28), [], []))
+        rows3 = [T.row_text(tb3, i) for i in 1:28]
+        full3 = join([string(r) for r in rows3 if r !== nothing], "\n")
+        @test !occursin("Chart 2:", full3)
     end
 
     # ── PR5: visual polish — frozen locators + region-scoped ◆ + titles ───

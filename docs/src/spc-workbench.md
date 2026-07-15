@@ -36,8 +36,15 @@ model and both runners. Do **not** change that default. Use `:fake_tool`,
 **Seed-coupled pane budget:** model field default `dashboard_max_panes = 3`
 (triple-compat). When `_ensure_charts!` bootstraps an empty chart list it calls
 `_seed_dashboard_max_panes!` (`:triple` → 3, else 1). Non-empty charts (e.g.
-JSON load) do **not** re-seed the budget. Wizard `add_param_chart!` /
-`add_analysis_chart!` may auto-bump to `min(3, length(visible_charts))`.
+JSON load) do **not** re-seed the budget. Scope-aware bump
+(`_maybe_bump_panes_for_display!`, KD-PD-3):
+
+| Path | Bump |
+|------|------|
+| `add_param_chart!` (`reason=:param`) | **None** — multi-param needs Compare |
+| `add_analysis_chart!` (`reason=:analysis`) | `max(current, min(3, count same-param visible))` |
+| Enter Compare / pin while Compare (`reason=:compare`) | `max(current, min(3, n_effective_pins))` |
+
 View uses `k = effective_dashboard_max_panes(m)` (clamped 1…3).
 
 `:fake_tool` data is **synthetic** (`default_fake_tools`,
@@ -108,8 +115,9 @@ Full key absorb while open (KD-DC-17). Esc/`q` close modal only — **never quit
 | **Param** | Chart for selected catalog `ParamEntry`; materialize from SharedTable when rows exist; refuse duplicate `(param id, chart_type)` |
 | **Analysis** | Clone from **active** chart: same `param` id / tools / specs / column maps; type from v1 list **I-MR, X̄-R, X̄-S** only; refuse attributes / duplicates |
 
-Successful wizard adds auto-bump `dashboard_max_panes` when visible charts exceed
-the budget (wizard paths only — not blank library `add_chart!`).
+**Analysis** wizard adds may raise `dashboard_max_panes` for the same-param stack
+only (`min(3, n_same)`). **Param** adds do not bump (use Compare for multi-param).
+Blank library `add_chart!` never bumps.
 
 ### Config (`view_mode = :config`)
 
