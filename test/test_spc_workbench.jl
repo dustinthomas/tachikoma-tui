@@ -2241,6 +2241,157 @@ include("../src/spc_workbench_io.jl")
         @test all(c -> c.param == m_lib.params[2].id, dashboard_display_set(m_lib))
     end
 
+    @testset "PR3: compare mode (=) and param pins (,) + title chips" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m)
+        @test m.dashboard_scope === :param_active
+        @test isempty(m.compare_param_ids)
+        select_param!(m, 1)
+        name1 = m.params[1].name
+        name2 = m.params[2].name
+
+        # PD-V15 / KD-PD-16: title budget retains Dashboard: + mode chip
+        t50 = _primary_dashboard_title(m; maxw = 50)
+        @test occursin("Dashboard:", t50)
+        @test occursin("[● Param]", t50) || occursin("[●P]", t50)
+        @test length(t50) <= 50
+        t40 = _primary_dashboard_title(m; maxw = 40)
+        @test occursin("Dashboard:", t40)
+        @test occursin("[● Param]", t40) || occursin("[●P]", t40) || occursin("[●", t40)
+        @test length(t40) <= 40
+
+        # PD-V4b: pin while param_active → CTA message; still single-param surface
+        T.update!(m, T.KeyEvent(','))
+        @test m.params[1].id in m.compare_param_ids
+        @test m.dashboard_scope === :param_active
+        @test occursin("pinned", m.last_event)
+        @test occursin(name1, m.last_event)
+        @test occursin("press = for Compare", m.last_event)
+        @test length(dashboard_pane_charts(m; k = 3)) == 1
+
+        # PD-V3: = enter compare
+        T.update!(m, T.KeyEvent('='))
+        @test m.dashboard_scope === :compare
+        @test occursin("scope: compare", m.last_event)
+        @test occursin("pinned", m.last_event)
+        t_cmp = _primary_dashboard_title(m; maxw = 50)
+        @test occursin("[● Compare]", t_cmp) || occursin("[●C]", t_cmp)
+        @test length(t_cmp) <= 50
+
+        # Pin second while Compare (no press-= CTA); bumps panes for multi-param
+        select_param!(m, 2)  # unpinned first → KD-PD-2A
+        @test occursin("not pinned", m.last_event)
+        act_before = current_chart(m).id
+        T.update!(m, T.KeyEvent(','))
+        @test m.params[2].id in m.compare_param_ids
+        @test occursin("pinned", m.last_event)
+        @test occursin(name2, m.last_event)
+        @test !occursin("press = for Compare", m.last_event)
+        @test m.dashboard_max_panes >= 2
+        ds = dashboard_display_set(m)
+        @test length(ds) == 2
+        @test all(c -> c.param in m.compare_param_ids, ds)
+
+        # PD-V4c: unpinned select keeps primary on pinned focus
+        act_pin = current_chart(m).id
+        select_param!(m, 3)
+        @test m.selected_param == 3
+        @test !(m.params[3].id in m.compare_param_ids)
+        @test current_chart(m).id == act_pin  # primary unchanged
+        @test current_chart(m).param in m.compare_param_ids
+        @test occursin("not pinned", m.last_event)
+
+        # Pin limit 3
+        T.update!(m, T.KeyEvent(','))  # pin param 3
+        @test length(m.compare_param_ids) == 3
+        # fourth would need another param — catalog has 3; force pin limit via API
+        toggle_compare_pin!(m, "ghost_pin_limit")
+        @test m.last_event == "compare pin limit 3"
+        @test length(m.compare_param_ids) == 3
+
+        # Unpin
+        select_param!(m, 3)
+        T.update!(m, T.KeyEvent(','))
+        @test !(m.params[3].id in m.compare_param_ids)
+        @test occursin("unpinned", m.last_event)
+
+        # PD-V5: = leave compare → param_active; pins sticky
+        pins_before = copy(m.compare_param_ids)
+        T.update!(m, T.KeyEvent('='))
+        @test m.dashboard_scope === :param_active
+        @test m.last_event == "scope: param"
+        @test m.compare_param_ids == pins_before
+        t_back = _primary_dashboard_title(m)
+        @test occursin("[● Param]", t_back)
+
+        # PD-V11: keys do not quit / open config
+        @test m.view_mode === :dashboard
+        T.update!(m, T.KeyEvent('='))
+        @test m.view_mode === :dashboard
+        @test m.dashboard_scope === :compare
+        T.update!(m, T.KeyEvent(','))
+        @test m.view_mode === :dashboard
+
+        # Compact Keys freeze when catalog (KD-PD-18)
+        entries = _contextual_key_entries(m; expanded = false)
+        flat = join([string(e) for e in entries], " ")
+        @test occursin("=", flat) && occursin("scope", flat)
+        @test occursin(",", flat) && occursin("pin", flat)
+        @test occursin(";", flat) && occursin("params", flat)
+        @test occursin("?", flat)
+        exp = _contextual_key_entries(m; expanded = true)
+        exp_flat = join([string(e) for e in exp], " ")
+        @test occursin("scope", exp_flat) && occursin("pin", exp_flat)
+        @test occursin("Shift+,", exp_flat) || occursin("chart-cycle", exp_flat)
+
+        # Visual: enter compare + 2 pins → Chart 2 + [● Compare] at W≥80
+        m_v = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m_v)
+        m_v.visual_prefs["secondary_canvas"] = false
+        select_param!(m_v, 1)
+        T.update!(m_v, T.KeyEvent(','))
+        select_param!(m_v, 2)
+        T.update!(m_v, T.KeyEvent(','))
+        T.update!(m_v, T.KeyEvent('='))
+        @test m_v.dashboard_scope === :compare
+        @test length(m_v.compare_param_ids) == 2
+        tb = T.TestBackend(100, 28); T.reset!(tb.buf)
+        T.view(m_v, T.Frame(tb.buf, T.Rect(1, 1, 100, 28), [], []))
+        rows = [T.row_text(tb, i) for i in 1:28]
+        full = join([string(r) for r in rows if r !== nothing], "\n")
+        @test occursin("[● Compare]", full) || occursin("Compare", full)
+        @test occursin("Chart 2", full)
+        # pin while param: Message CTA only (no multi-pane)
+        m_p = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m_p)
+        m_p.visual_prefs["secondary_canvas"] = false
+        select_param!(m_p, 1)
+        T.update!(m_p, T.KeyEvent(','))
+        select_param!(m_p, 2)
+        T.update!(m_p, T.KeyEvent(','))
+        @test m_p.dashboard_scope === :param_active
+        tb2 = T.TestBackend(100, 28); T.reset!(tb2.buf)
+        T.view(m_p, T.Frame(tb2.buf, T.Rect(1, 1, 100, 28), [], []))
+        full2 = join([string(T.row_text(tb2, i)) for i in 1:28 if T.row_text(tb2, i) !== nothing], "\n")
+        @test !occursin("Chart 2:", full2)
+        @test occursin("[● Param]", full2) || occursin("Param", full2)
+
+        # Empty catalog: = and , are no-ops (triple / legacy)
+        m_t = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m_t)
+        @test isempty(m_t.params)
+        scope0 = m_t.dashboard_scope
+        T.update!(m_t, T.KeyEvent('='))
+        @test m_t.dashboard_scope === scope0
+        T.update!(m_t, T.KeyEvent(','))
+        @test isempty(m_t.compare_param_ids)
+        # Compact keys for empty catalog keep d/+ /q/? (not forced = ,)
+        e_t = _contextual_key_entries(m_t; expanded = false)
+        flat_t = join([string(e) for e in e_t], " ")
+        @test occursin("quit", flat_t) || occursin("q", flat_t)
+    end
+
     @testset "TDD: fake_tool seed denser + WECO failures on all params" begin
         params = default_fake_tool_params()
         table = build_fake_tool_table(; params = params, seed = 42)

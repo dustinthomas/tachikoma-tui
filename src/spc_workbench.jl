@@ -4792,9 +4792,84 @@ function dashboard_pane_charts(m::SPCWorkbenchModel; k::Int = 3)::Vector{ChartSp
     return ds[1:min(k, length(ds))]
 end
 
+"""Bump pane budget for compare pins (PR3). Full scope-aware formulas land in PR4.
+
+`:compare` only — leave `_auto_bump_dashboard_panes!` for wizard paths until PR4.
+"""
+function _maybe_bump_panes_for_display!(m::SPCWorkbenchModel; reason::Symbol)
+    if reason === :compare
+        n_pins = length(_effective_compare_pins(m))
+        target = min(3, max(1, n_pins))
+        if target > m.dashboard_max_panes
+            m.dashboard_max_panes = target
+        end
+    end
+    # :param / :analysis → PR4
+    return nothing
+end
+
+"""
+    toggle_dashboard_scope!(m)
+
+Toggle `:param_active` ↔ `:compare` when the parameter catalog is non-empty (KD-PD-4).
+
+- Entering compare seeds `compare_param_ids` with the selected id if pins are empty,
+  bumps pane budget for pin count, Message `"scope: compare (n pinned)"`.
+- Leaving compare keeps pins sticky; Message `"scope: param"`.
+- From `:legacy_neighbors` with a catalog, `=` enters compare (leaving → `:param_active`).
+  Empty catalog / `:triple` demos leave scope alone (no-op).
+"""
+function toggle_dashboard_scope!(m::SPCWorkbenchModel)
+    isempty(m.params) && return nothing
+    if m.dashboard_scope === :compare
+        m.dashboard_scope = :param_active
+        m.last_event = "scope: param"
+    else
+        # :param_active or :legacy_neighbors (catalog present) → compare
+        m.dashboard_scope = :compare
+        if isempty(m.compare_param_ids)
+            pid = _selected_param_id(m)
+            !isempty(pid) && push!(m.compare_param_ids, pid)
+        end
+        _maybe_bump_panes_for_display!(m; reason = :compare)
+        n = length(_effective_compare_pins(m))
+        m.last_event = "scope: compare ($n pinned)"
+    end
+    return nothing
+end
+
+"""
+    toggle_compare_pin!(m, param_id=_selected_param_id(m))
+
+Pin/unpin a param id for Compare (max 3). Does **not** auto-enter compare (KD-PD-17).
+
+Messages use **display names**. Pin while `:param_active` includes CTA `"press = for Compare"`.
+"""
+function toggle_compare_pin!(m::SPCWorkbenchModel, param_id::AbstractString = _selected_param_id(m))
+    isempty(param_id) && return nothing
+    name = _param_display_name(m, param_id)
+    i = findfirst(==(param_id), m.compare_param_ids)
+    if i === nothing
+        length(m.compare_param_ids) >= 3 && (m.last_event = "compare pin limit 3"; return nothing)
+        push!(m.compare_param_ids, String(param_id))
+        if m.dashboard_scope === :compare
+            _maybe_bump_panes_for_display!(m; reason = :compare)
+            m.last_event = "pinned $(name)"
+        else
+            m.last_event = "pinned $(name) — press = for Compare"
+        end
+    else
+        deleteat!(m.compare_param_ids, i)
+        m.last_event = "unpinned $(name)"
+        m.dashboard_scope === :compare && _maybe_bump_panes_for_display!(m; reason = :compare)
+    end
+    return nothing
+end
+
 export ToolEntry, ParamEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
 export select_param!, add_param_chart!, add_analysis_chart!
 export visible_charts, dashboard_pane_charts, dashboard_display_set, effective_dashboard_max_panes
+export toggle_dashboard_scope!, toggle_compare_pin!
 export default_fake_tools, default_fake_tool_params, build_fake_tool_table, materialize_param_chart!
 # set_filter_tool! / set_filter_type! / set_filter_owner! / clear_filters! stay package-private
 
@@ -5948,6 +6023,15 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             # Open add-chart wizard (dashboard only; library keeps a/A = blank add)
             _open_add_chart_modal!(m)
             return
+        elseif c == '='
+            # KD-PD-4: toggle param_active ↔ compare (catalog non-empty only)
+            !isempty(m.params) && toggle_dashboard_scope!(m)
+            return
+        elseif c == ','
+            # KD-PD-4 / KD-PD-17: pin/unpin selected param (does not auto-enter compare)
+            # Hazard: Shift+, is '<' and still chart-cycles (see expanded Keys note)
+            !isempty(m.params) && toggle_compare_pin!(m)
+            return
         elseif c == ';'
             # Toggle PARAMS side focus (KD-DC-13); catalog non-empty only
             if !isempty(m.params)
@@ -6900,9 +6984,9 @@ end
 """Dashboard Keys panel structure. Compact = most-used; expanded = full contextual list."""
 function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
     if !expanded
-        # Include `; params` / `+ add` when catalog non-empty (space trade vs h-help)
+        # KD-PD-18: catalog non-empty freezes compact row `= , ; ?` (+ stays expanded only)
         row2 = if !isempty(m.params)
-            [("+", "add"), (";", "params"), ("q", "quit"), ("?", "more")]
+            [("=", "scope"), (",", "pin"), (";", "params"), ("?", "more")]
         else
             [("d", "table"), ("+", "add"), ("q", "quit"), ("?", "more")]
         end
@@ -6924,11 +7008,13 @@ function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
         (:binds, [("1-8", "WECO"), ("w", "explain"), ("c", "config"), ("v", "lines")]),
         (:binds, [("o", "visual")]),
     ]
-    # Gate PARAMS binds on non-empty catalog (same policy as compact)
+    # Gate PARAMS / scope / pin binds on non-empty catalog (same policy as compact)
     if !isempty(m.params)
-        push!(entries, (:section, "PARAMS / CHARTS"))
-        push!(entries, (:binds, [("+", "add chart"), (";", "params focus"), ("j/J", "next/prev"), ("↑↓", "select")]))
-        push!(entries, (:binds, [("1-9", "jump"), ("A", "add chart")]))
+        push!(entries, (:section, "PARAMS / DISPLAY"))
+        push!(entries, (:binds, [("=", "scope"), (",", "pin"), (";", "params"), ("j/J", "next/prev")]))
+        push!(entries, (:binds, [("+", "add chart"), ("A", "add"), ("1-9", "jump"), ("↑↓", "select")]))
+        push!(entries, (:binds, [("[ ]", "cycle display")]))
+        push!(entries, (:note, "Shift+, is chart-cycle < — use unshifted comma to pin"))
     else
         push!(entries, (:section, "CHARTS"))
         push!(entries, (:binds, [("+", "add chart"), ("A", "add chart")]))
@@ -7473,9 +7559,11 @@ function view(m::SPCWorkbenchModel, f::Frame)
     else
         ""
     end
-    pri_title = _primary_dashboard_title(m; empty_hint = empty_hint)
     primary_outer = show_dual ? dual_split[1] : active_plot_rect
     secondary_outer = show_dual ? dual_split[2] : nothing
+    # Title budget ≈ plot outer width minus Block chrome (KD-PD-16)
+    title_maxw = max(0, primary_outer.width - 4)
+    pri_title = _primary_dashboard_title(m; empty_hint = empty_hint, maxw = title_maxw)
 
     ch_act = current_chart(m)
     ctx = dual_ctx === nothing ?
@@ -7554,7 +7642,10 @@ function view(m::SPCWorkbenchModel, f::Frame)
         ch2 = panes[2]
         n2_raw = length(ch2.data.values)
         if n2_raw > 0 && second_plot_rect.width > 4 && second_plot_rect.height > 3
-            blk2 = Block(title = "Chart 2: $(ch2.name) (read-only view)", border_style = tstyle(:border), title_style = tstyle(:text_dim))
+            ch2_label = m.dashboard_scope === :compare ?
+                _param_display_name(m, ch2.param) : ch2.name
+            isempty(ch2_label) && (ch2_label = ch2.name)
+            blk2 = Block(title = "Chart 2: $(ch2_label) (read-only view)", border_style = tstyle(:border), title_style = tstyle(:text_dim))
             inn2 = render(blk2, second_plot_rect, buf)
             cw2, ch2h = inn2.width, inn2.height
             if cw2 > 0 && ch2h > 0
@@ -8070,12 +8161,57 @@ function _dashboard_title_chips(m::SPCWorkbenchModel)::String
     return " · " * join(bits, " · ")
 end
 
-"""
-Primary plot Block title: `Dashboard: TOOL · Param [a/n]` (no mouse chrome).
+"""Mode chip token for primary title (KD-PD-16). Empty when no catalog / legacy."""
+function _mode_chip_token(m::SPCWorkbenchModel; mini::Bool = false)::String
+    isempty(m.params) && return ""
+    if m.dashboard_scope === :compare
+        return mini ? " [●C]" : " [● Compare]"
+    elseif m.dashboard_scope === :param_active
+        return mini ? " [●P]" : " [● Param]"
+    end
+    return ""
+end
 
-Tool name first, then parameter — eye-catching via separate `title_style` on the Block.
+"""Assemble primary title pieces. `tool`/`param` may be empty; chip includes leading space."""
+function _assemble_primary_title(
+    tool::AbstractString,
+    param::AbstractString,
+    idx::AbstractString,
+    empty_hint::AbstractString,
+    chip::AbstractString;
+    use_idx::Bool = true,
+    use_body::Bool = true,
+)::String
+    mid = if !use_body
+        ""
+    elseif !isempty(tool) && !isempty(param)
+        "$(tool) · $(param)"
+    elseif !isempty(param)
+        String(param)
+    elseif !isempty(tool)
+        String(tool)
+    else
+        "Data"
+    end
+    body = use_body ? mid : ""
+    # When body empty but use_body true with no tool/param → "Data" already set
+    if use_body && isempty(body)
+        body = "Data"
+    end
+    return string("Dashboard: ", body, use_idx ? idx : "", empty_hint, chip)
+end
+
 """
-function _primary_dashboard_title(m::SPCWorkbenchModel; empty_hint::AbstractString = "")::String
+Primary plot Block title: `Dashboard: TOOL · Param [a/n] [● Param]` (no mouse chrome).
+
+KD-PD-16 truncation priority when `maxw > 0`:
+1. keep `Dashboard:`  2. keep mode chip  3. index  4. param name  5. drop tool first.
+"""
+function _primary_dashboard_title(
+    m::SPCWorkbenchModel;
+    empty_hint::AbstractString = "",
+    maxw::Int = 0,
+)::String
     tid, pname = _chart_tool_param_labels(m)
     nch = max(1, length(m.charts))
     # KD-PD-14: empty shell has no primary chart index — show — not foreign active
@@ -8086,16 +8222,62 @@ function _primary_dashboard_title(m::SPCWorkbenchModel; empty_hint::AbstractStri
     else
         string(isempty(m.charts) ? 1 : clamp(m.active, 1, nch))
     end
-    body = if !isempty(tid) && !isempty(pname)
-        "$(tid) · $(pname)"
-    elseif !isempty(pname)
-        pname
-    elseif !isempty(tid)
-        tid
-    else
-        "Data"
+    # Compare body prefers "Compare (n)" mid-segment (focus param optional)
+    body_param = pname
+    if m.dashboard_scope === :compare && !isempty(m.params)
+        n_pins = length(_effective_compare_pins(m))
+        body_param = isempty(pname) ? "Compare ($n_pins)" : "Compare ($n_pins) · $(pname)"
     end
-    return "Dashboard: $(body) [$(act_s)/$(nch)]$(empty_hint)"
+    chip = _mode_chip_token(m)
+    idx = " [$(act_s)/$(nch)]"
+
+    full = _assemble_primary_title(tid, body_param, idx, empty_hint, chip)
+    maxw <= 0 && return full
+    length(full) <= maxw && return full
+
+    # 1) Drop tool first
+    s = _assemble_primary_title("", body_param, idx, empty_hint, chip)
+    length(s) <= maxw && return s
+
+    # 2) Shorten param / body to fit around fixed prefix+idx+hint+chip
+    fixed = length("Dashboard: ") + length(idx) + length(empty_hint) + length(chip)
+    room = maxw - fixed
+    if room >= 1 && !isempty(body_param)
+        pshort = _side_trunc(body_param, room)
+        s = _assemble_primary_title("", pshort, idx, empty_hint, chip)
+        length(s) <= maxw && return s
+    end
+
+    # 3) Drop index
+    s = _assemble_primary_title("", body_param, idx, empty_hint, chip; use_idx = false)
+    length(s) <= maxw && return s
+    fixed2 = length("Dashboard: ") + length(empty_hint) + length(chip)
+    room2 = maxw - fixed2
+    if room2 >= 1 && !isempty(body_param)
+        pshort = _side_trunc(body_param, room2)
+        s = _assemble_primary_title("", pshort, idx, empty_hint, chip; use_idx = false)
+        length(s) <= maxw && return s
+    end
+
+    # 4) Body = "…" or omit; retain full chip
+    s = string("Dashboard: ", empty_hint, lstrip(chip))
+    # Prefer "Dashboard: [● Param]" form (chip has leading space)
+    s = string("Dashboard:", chip, empty_hint)  # chip starts with space → "Dashboard: [● Param]"
+    length(s) <= maxw && return s
+    s = string("Dashboard: ", lstrip(chip), empty_hint)
+    length(s) <= maxw && return s
+
+    # 5) Mini chip extreme: "Dashboard:[●P]" / "Dashboard:[●C]"
+    mini = _mode_chip_token(m; mini = true)
+    if !isempty(mini)
+        s = string("Dashboard:", mini, empty_hint)  # "Dashboard: [●P]"
+        length(s) <= maxw && return s
+        s = string("Dashboard:", lstrip(mini), empty_hint)  # "Dashboard:[●P]"
+        length(s) <= maxw && return s
+    end
+    # Hard truncate last resort (should not hit maxw ≥ 20 with catalog)
+    s = string("Dashboard:", isempty(mini) ? "" : lstrip(mini), empty_hint)
+    return length(s) > maxw ? first(s, maxw) : s
 end
 
 """
@@ -8214,13 +8396,23 @@ function _side_sec_params!(buf, x::Int, y::Int, bot::Int, maxw::Int,
         p = m.params[i]
         is_sel = (i == sel)
         mark = is_sel ? "▶" : " "
+        pinned = any(id -> id == p.id, m.compare_param_ids)
+        pin_sfx = pinned ? " ★" : ""
         units = isempty(p.units) ? "—" : p.units
-        # "▶ 1 Name  units" — truncate name to fit
+        # "▶ 1 Name  units ★" — drop units first, then truncate name; keep ★ (KD-PD-17)
         prefix = string(mark, " ", i, " ")
-        suffix = string("  ", units)
-        name_budget = max(1, maxw - length(prefix) - length(suffix))
+        suffix_full = string("  ", units, pin_sfx)
+        suffix_nunits = pin_sfx  # units dropped under pressure
+        name_budget = max(1, maxw - length(prefix) - length(suffix_full))
+        if length(prefix) + 1 + length(suffix_full) > maxw
+            # Drop units first so ★ can stay
+            name_budget = max(1, maxw - length(prefix) - length(suffix_nunits))
+            suffix = suffix_nunits
+        else
+            suffix = suffix_full
+        end
         name_s = _side_trunc(p.name, name_budget)
-        # Colorized pieces: index accent, name success/text, units dim
+        # Colorized pieces: index accent, name success/text, units dim; pin ★ warning in Compare
         if is_sel
             line = _side_trunc(string(prefix, name_s, suffix), maxw)
             set_string!(buf, x, y, line, tstyle(:success, bold = true))
