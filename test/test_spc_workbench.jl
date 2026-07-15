@@ -1839,9 +1839,9 @@ include("../src/spc_workbench_io.jl")
         @test !isempty(m_ft.tools)
         @test m_ft.tools[1].id == "Film-PTPECVD01"
         @test length(m_ft.params) >= 3
-        @test length(m_ft.charts) == 1
+        @test length(m_ft.charts) == length(m_ft.params)  # one chart per catalog param
         @test m_ft.selected_param == 1
-        @test m_ft.dashboard_max_panes == 1
+        @test m_ft.dashboard_max_panes == 1                # still single-pane dashboard
         ch = m_ft.charts[1]
         @test ch.param == m_ft.params[1].id          # identity lock: id, not name
         @test ch.param == "thk_1_3um"
@@ -1881,10 +1881,11 @@ include("../src/spc_workbench_io.jl")
         @test m_n.selected_param == 0
 
         # Re-ensure with non-empty charts must NOT reset dashboard_max_panes
+        n_ft = length(m_ft.charts)
         m_ft.dashboard_max_panes = 2
         _ensure_charts!(m_ft)
         @test m_ft.dashboard_max_panes == 2
-        @test length(m_ft.charts) == 1
+        @test length(m_ft.charts) == n_ft
 
         # seed_demos model default remains :triple
         m_def = SPCWorkbenchModel(data = d, paused = true)
@@ -2050,25 +2051,32 @@ include("../src/spc_workbench_io.jl")
         d = generate_spc_workbench_data(12; seed = 7)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
         _ensure_charts!(m)
-        @test length(m.charts) == 1
+        # Seed builds one chart per catalog param so each is switchable
+        @test length(m.charts) == length(m.params) >= 3
         @test m.selected_param == 1
         @test m.active == 1
         vals_before = copy(m.charts[1].data.values)
 
-        # Select param with chart → activate (already active) + last_event
+        # Select param with chart → activate + last_event; never rematerialize series
         select_param!(m, 1)
         @test m.selected_param == 1
         @test m.active == 1
         @test occursin("param", m.last_event)
-        @test m.charts[1].data.values == vals_before  # never rematerialize
+        @test m.charts[1].data.values == vals_before
 
-        # Select param without chart → highlight only Message; chart unchanged
+        # Select second catalog param → activate its chart (same identity lock)
         select_param!(m, 2)
         @test m.selected_param == 2
-        @test m.active == 1
+        @test m.charts[m.active].param == m.params[2].id
+        @test m.charts[1].data.values == vals_before  # first series untouched
+        @test occursin("param", m.last_event)
+
+        # Select param without chart → highlight only Message; no rematerialize
+        push!(m.params, ParamEntry(id = "ghost_param", name = "Ghost", tool_id = "Film-PTPECVD01"))
+        select_param!(m, length(m.params))
+        @test m.selected_param == length(m.params)
         @test occursin("no chart for param", m.last_event)
         @test m.charts[1].data.values == vals_before
-        @test m.charts[1].param == m.params[1].id  # active chart param untouched
 
         # Clamp + empty catalog
         select_param!(m, 99)
@@ -2076,6 +2084,41 @@ include("../src/spc_workbench_io.jl")
         m.params = ParamEntry[]
         select_param!(m, 1)
         @test m.selected_param == 0
+    end
+
+    @testset "TDD: fake_tool seed denser + WECO failures on all params" begin
+        params = default_fake_tool_params()
+        table = build_fake_tool_table(; params = params, seed = 42)
+        # More points so rule patterns and OOC markers are visible
+        for p in params
+            n_p = count(r -> r["Parameter"] == p.id, table.rows)
+            @test n_p >= 36
+        end
+        # Primary param series must trigger at least one WECO / OOC index
+        ch = ChartSpec()
+        materialize_param_chart!(ch, table, params[1])
+        ctx = resolve_chart_render_context(ch; sigma_method = :mr)
+        @test length(ch.data.values) >= 36
+        @test !isempty(ctx.viol_indices)  # seeded failures for WECO demo
+        # Other params also materialize with failures (not pure quiet noise)
+        for p in params[2:end]
+            chp = ChartSpec()
+            materialize_param_chart!(chp, table, p)
+            ctxp = resolve_chart_render_context(chp; sigma_method = :mr)
+            @test length(chp.data.values) >= 36
+            @test !isempty(ctxp.viol_indices)
+        end
+        # Session seed: one chart per param, still single-pane dashboard
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m)
+        @test length(m.charts) == length(m.params)
+        @test m.dashboard_max_panes == 1
+        @test all(i -> m.charts[i].param == m.params[i].id, eachindex(m.params))
+        for ch in m.charts
+            ctx = resolve_chart_render_context(ch; sigma_method = :mr)
+            @test !isempty(ctx.viol_indices)
+        end
     end
 
     @testset "PR3: effective_dashboard_max_panes pure clamp (KD-DC-2)" begin
@@ -2119,49 +2162,37 @@ include("../src/spc_workbench_io.jl")
         d = generate_spc_workbench_data(12; seed = 7)
         m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
         _ensure_charts!(m)
-        @test length(m.charts) == 1
+        # Seed: one chart per catalog param; single-pane until wizard auto-bumps
+        @test length(m.charts) == length(m.params) >= 3
         @test m.dashboard_max_panes == 1
         p1 = m.params[1]
         p2 = m.params[2]
+        n0 = length(m.charts)
         vals_p1 = copy(m.charts[1].data.values)
 
-        # Duplicate param+type refuse (seed already has params[1] I_MR)
+        # Duplicate param+type refuse (seed already has each catalog param as I_MR)
         @test add_param_chart!(m, p1) === nothing
         @test occursin("chart already exists", m.last_event)
-        @test length(m.charts) == 1
+        @test add_param_chart!(m, p2) === nothing
+        @test length(m.charts) == n0
         @test m.dashboard_max_panes == 1
 
-        # Param add for params[2] → Chart 2 + auto-bump panes 1→2
-        idx = add_param_chart!(m, p2)
-        @test idx == 2
-        @test length(m.charts) == 2
-        @test m.charts[2].param == p2.id
-        @test m.charts[2].name == p2.name
-        @test m.charts[2].param_filter == p2.id
-        @test m.charts[2].col_param == "Parameter"
-        @test m.charts[2].source === :table
-        @test length(m.charts[2].data.values) > 0
-        @test m.charts[1].data.values == vals_p1  # prior chart untouched
-        @test m.dashboard_max_panes == 2
-        @test effective_dashboard_max_panes(m) == 2
-        # Active is new chart (last) → neighborhood length 1; switch to first for 2 panes
-        set_active_chart!(m, 1)
-        @test length(dashboard_pane_charts(m; k = effective_dashboard_max_panes(m))) == 2
-
-        # Analysis Xbar_R from params[2] chart: subgroup_size=5, same param id
+        # Analysis Xbar_R from params[2] chart: subgroup_size=5, same param id + auto-bump panes
         set_active_chart!(m, 2)
         aidx = add_analysis_chart!(m, 2, Xbar_R)
-        @test aidx == 3
+        @test aidx == n0 + 1
         ach = m.charts[aidx]
         @test ach.chart_type === Xbar_R
         @test ach.param == p2.id
         @test ach.subgroup_size == 5
         @test occursin("Xbar-R", ach.name)
-        @test m.dashboard_max_panes == 3  # min(3, 3 visible)
+        @test m.charts[1].data.values == vals_p1  # prior chart untouched
+        @test m.dashboard_max_panes == min(3, length(m.charts))
+        @test m.dashboard_max_panes >= 2
         # Duplicate analysis refuse
         @test add_analysis_chart!(m, 2, Xbar_R) === nothing
         @test occursin("chart already exists", m.last_event)
-        @test length(m.charts) == 3
+        @test length(m.charts) == n0 + 1
 
         # Attribute refuse (KD-DC-16)
         @test add_analysis_chart!(m, 1, p_chart) === nothing
@@ -2169,7 +2200,7 @@ include("../src/spc_workbench_io.jl")
         @test add_analysis_chart!(m, 1, np_chart) === nothing
         @test add_analysis_chart!(m, 1, c_chart) === nothing
         @test add_analysis_chart!(m, 1, u_chart) === nothing
-        @test length(m.charts) == 3
+        @test length(m.charts) == n0 + 1
 
         # Analysis I_MR from chart that already has I_MR for same param → refuse
         set_active_chart!(m, 1)
@@ -2178,11 +2209,11 @@ include("../src/spc_workbench_io.jl")
 
         # Xbar_S ok for params[1]
         sidx = add_analysis_chart!(m, 1, Xbar_S)
-        @test sidx == 4
+        @test sidx == n0 + 2
         @test m.charts[sidx].chart_type === Xbar_S
         @test m.charts[sidx].param == p1.id
         @test m.charts[sidx].subgroup_size == 5
-        # panes already 3 — stay clamped
+        # panes clamp at 3
         @test m.dashboard_max_panes == 3
 
         # Library blank add_chart! still no auto-bump beyond current (already 3)
@@ -2219,23 +2250,20 @@ include("../src/spc_workbench_io.jl")
         @test m.add_chart_open === false
         @test m.quit === false
 
-        # Tab toggles mode; ↓ moves selection; Enter confirms param add
+        # Tab toggles mode; analysis path adds chart (all params already seeded as I_MR)
         update!(m, KeyEvent('+'))
         @test m.add_chart_mode === :param
         update!(m, KeyEvent(:tab))
         @test m.add_chart_mode === :analysis
-        update!(m, KeyEvent(:tab))
-        @test m.add_chart_mode === :param
-        # Move to params[2] (seed has chart for params[1])
-        update!(m, KeyEvent(:down))
-        @test m.add_chart_selected == 2
         n0 = length(m.charts)
         panes0 = m.dashboard_max_panes
+        # Enter confirms analysis type (cursor on I_MR first — may refuse if already I_MR for active)
+        # Move down to Xbar-R (index 2 of analysis list) if needed
+        update!(m, KeyEvent(:down))  # typically Xbar_R
         update!(m, KeyEvent(:enter))
         @test m.add_chart_open === false
         @test length(m.charts) == n0 + 1
-        @test m.charts[end].param == m.params[2].id
-        @test m.dashboard_max_panes == min(3, panes0 + 1)
+        @test m.dashboard_max_panes == min(3, max(panes0 + 1, length(m.charts)))
 
         # Library a still blank add_chart! (no wizard, no param wire)
         m.view_mode = :library
@@ -3160,12 +3188,12 @@ end
         @test occursin("Chart 2", full)
         @test occursin("Secondary", full)
 
-        # :fake_tool — single pane; no Chart 2 label in TestBackend
+        # :fake_tool — multi-param charts but single pane; no Chart 2 label in TestBackend
         m_ft = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
         _ensure_charts!(m_ft)
         @test m_ft.dashboard_max_panes == 1
         @test effective_dashboard_max_panes(m_ft) == 1
-        @test length(m_ft.charts) == 1
+        @test length(m_ft.charts) == length(m_ft.params) >= 3
         m_ft.visual_prefs["secondary_canvas"] = false
         tb2 = T.TestBackend(90, 28); T.reset!(tb2.buf)
         T.view(m_ft, T.Frame(tb2.buf, T.Rect(1, 1, 90, 28), [], []))
@@ -3214,16 +3242,18 @@ end
         T.view(m, T.Frame(tb_esc.buf, T.Rect(1, 1, 90, 28), [], []))
         @test T.find_text(tb_esc, "ADD CHART") === nothing
 
-        # Param add via API → Chart 2: in multi-pane view
-        @test add_param_chart!(m, m.params[2]) == 2
-        @test m.dashboard_max_panes == 2
+        # Analysis add via API → multi-pane when panes auto-bump (params already seeded)
+        n0 = length(m.charts)
+        aidx = add_analysis_chart!(m, 1, Xbar_R)
+        @test aidx == n0 + 1
+        @test m.dashboard_max_panes >= 2
         set_active_chart!(m, 1)  # show panes 1+2 from active neighborhood
         tb2 = T.TestBackend(90, 28); T.reset!(tb2.buf)
         T.view(m, T.Frame(tb2.buf, T.Rect(1, 1, 90, 28), [], []))
         rows2 = [T.row_text(tb2, i) for i in 1:28]
         full2 = join([string(r) for r in rows2 if r !== nothing], "\n")
         @test occursin("Chart 2", full2)
-        @test occursin("Chart 2:", full2) || occursin(m.params[2].name, full2)
+        @test occursin("Chart 2:", full2)
     end
 
     # ── PR5: visual polish — frozen locators + region-scoped ◆ + titles ───
@@ -3245,15 +3275,15 @@ end
         _ensure_charts!(m)
         m.visual_prefs["secondary_canvas"] = false
 
-        # Dashboard primary title keeps Dashboard: + [active/total]; tool chip when known
+        # Dashboard primary title keeps Dashboard: + [active/total]; tool first when known
         tb = T.TestBackend(100, 28); T.reset!(tb.buf)
         T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 100, 28), [], []))
         rows = [T.row_text(tb, i) for i in 1:28]
         full = join([string(r) for r in rows if r !== nothing], "\n")
         @test occursin("Dashboard:", full)
-        @test occursin("[1/1]", full) || occursin("[$(m.active)/$(length(m.charts))]", full)
+        @test occursin("[$(m.active)/$(length(m.charts))]", full)
         @test occursin("SPC Workbench [dashboard]", full)
-        # Tool chip on primary / header (Film-PTPECVD01 from fake_tool)
+        # Tool on primary / header (Film-PTPECVD01 from fake_tool)
         @test occursin("Film-PTPECVD01", full)
 
         # Side Stats: ▸ PARAMS + region-scoped ◆ tool chip (not whole-frame-only)
@@ -3324,6 +3354,77 @@ end
         @test occursin("Chart 3:", full)
         @test occursin("Chart 2: Bravo", full) || occursin("Bravo (read-only", full)
         @test occursin("Chart 3: Charlie", full) || occursin("Charlie (read-only", full)
+    end
+
+    @testset "TDD visual: tool-first title, legend box, Side Stats polish" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m)
+        m.visual_prefs["secondary_canvas"] = false
+        tb = T.TestBackend(110, 30); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 110, 30), [], []))
+        rows = [T.row_text(tb, i) for i in 1:30]
+        full = join([string(r) for r in rows if r !== nothing], "\n")
+
+        # 1) Chart top-line: Tool first then Parameter (not param-only name)
+        # Locked prefix Dashboard: remains; tool id before param display name
+        @test occursin("Dashboard:", full)
+        @test occursin("Film-PTPECVD01", full)
+        # Tool appears before Thickness on the Dashboard title line
+        dash_line = something(findfirst(r -> r !== nothing && occursin("Dashboard:", string(r)), rows), 0)
+        @test dash_line > 0
+        dl = string(rows[dash_line])
+        i_tool = findfirst("Film-PTPECVD01", dl)
+        i_param = findfirst("Thickness", dl)
+        @test i_tool !== nothing && i_param !== nothing
+        @test first(i_tool) < first(i_param)
+        # Mouse chrome removed from title (moved to legend box)
+        @test !occursin("hover  ┃ select  drag pan", dl)
+
+        # 2) Legend box top-right, horizontal strip, full box outline
+        @test occursin("hover", full)
+        @test occursin("select", full) || occursin("┃", full) || occursin("sel", full)
+        @test occursin("pan", full) || occursin("drag", full)
+        has_box = occursin("╭", full) || occursin("┌", full) || occursin("│", full)
+        @test has_box
+        pa = m.plot_area
+        @test pa.width > 5 && pa.height > 3
+        # Top-right region of plot (not bottom-left)
+        x0 = max(pa.x, T.right(pa) - 50)
+        y1 = min(T.bottom(pa), pa.y + 5)
+        legend_blob = join([
+            rstrip(String([T.char_at(tb, x, y) for x in x0:T.right(pa)]))
+            for y in pa.y:y1
+        ], "\n")
+        @test occursin("Keys", legend_blob) || occursin("hover", legend_blob)
+        # Horizontal: at least two chrome tokens share one row (not tall vertical stack)
+        horiz = any(r -> count(t -> occursin(t, r), ("hover", "sel", "drag", "pan", "wheel", "switch", "┃", "│")) >= 2,
+                    split(legend_blob, "\n"))
+        @test horiz
+        # Not in bottom-left (old placement)
+        bl_blob = join([
+            rstrip(String([T.char_at(tb, x, y) for x in pa.x:min(T.right(pa), pa.x + 18)]))
+            for y in max(pa.y, T.bottom(pa) - 6):T.bottom(pa)
+        ], "\n")
+        @test !occursin("Keys", bl_blob)
+
+        # 3) Side Stats title clean (no parentheses trailer)
+        @test T.find_text(tb, "Side Stats") !== nothing
+        side_title_hits = filter(r -> r !== nothing && occursin("Side Stats", string(r)), rows)
+        @test !isempty(side_title_hits)
+        for r in side_title_hits
+            s = string(r)
+            @test !occursin("Side Stats (", s)
+            @test !occursin("• dashboard)", s)
+        end
+        side = _pr5_side_text(tb, m)
+        # Tool name present on side
+        @test occursin("Film-PTPECVD01", side)
+        # Section headers present (clear divisions)
+        @test occursin("▸ STATS", side) || occursin("STATS", side)
+        @test occursin("▸ PARAMS", side)
+        # Numeric labels still present
+        @test occursin("n=", side) || occursin("Cpk=", side) || occursin("cl=", side)
     end
 
     @testset "PR5: PARAMS focus paints ▸ PARAMS; region ◆ chip only on side" begin
@@ -5009,10 +5110,11 @@ end
         @test m.side_focus === :params
         @test occursin("params", lowercase(m.last_event))
 
-        # j next → param 2 (no chart)
+        # j next → param 2 (seeded chart → activate)
         T.update!(m, T.KeyEvent('j'))
         @test m.selected_param == 2
-        @test occursin("no chart for param", m.last_event)
+        @test m.charts[m.active].param == m.params[2].id
+        @test occursin("param", m.last_event)
 
         # J / up prev → param 1
         T.update!(m, T.KeyEvent('J'))
@@ -5022,6 +5124,16 @@ end
         T.update!(m, T.KeyEvent(:up))
         @test m.selected_param == 1
         T.update!(m, T.KeyEvent(:down))
+        @test m.selected_param == 2
+
+        # Ghost param without chart → highlight-only message
+        push!(m.params, ParamEntry(id = "ghost_ui", name = "Ghost UI", tool_id = "Film-PTPECVD01"))
+        T.update!(m, T.KeyEvent('4'))
+        @test m.selected_param == 4
+        @test occursin("no chart for param", m.last_event)
+        # restore catalog length for later digit tests
+        pop!(m.params)
+        T.update!(m, T.KeyEvent('2'))
         @test m.selected_param == 2
 
         # digit jump when focused

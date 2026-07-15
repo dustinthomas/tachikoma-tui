@@ -2486,26 +2486,56 @@ function default_fake_tool_params()::Vector{ParamEntry}
 end
 
 """
-    build_fake_tool_table(; params=default_fake_tool_params(), seed=42, rows_per_param=16) -> SharedTable
+Inject deterministic OOC / WECO-demo spikes into a value series (mutates `vals`).
 
-Synthetic long-format SharedTable for the demo PECVD tool (PR1b).
+Uses the sample mean/σ so violations survive re-estimation of control limits.
+Patterns: beyond-3σ OOC spikes, 2-of-3 beyond-2σ, and an 8-point same-side run.
+"""
+function _inject_spc_demo_failures!(vals::Vector{Float64})::Vector{Float64}
+    n = length(vals)
+    n < 20 && return vals
+    cl = mean(vals)
+    s = std(vals; corrected = true)
+    (s <= 0 || !isfinite(s)) && (s = 1.0)
+    # WECO-1 class OOC (beyond 3σ of sample)
+    vals[max(1, n - 4)] = cl + 4.5 * s
+    vals[max(1, n - 11)] = cl - 4.2 * s
+    # WECO-2 class: 2 of last 3 beyond 2σ same side
+    vals[max(1, n - 2)] = cl + 2.55 * s
+    vals[max(1, n - 1)] = cl + 2.65 * s
+    # WECO-4 class: 8 consecutive points on one side of CL
+    base = max(1, n - 24)
+    for k in 0:7
+        idx = base + k
+        idx <= n && (vals[idx] = cl + 1.2 * s)
+    end
+    return vals
+end
+
+"""
+    build_fake_tool_table(; params=default_fake_tool_params(), seed=42, rows_per_param=40) -> SharedTable
+
+Synthetic long-format SharedTable for the demo PECVD tool (PR1b + denser WECO demo).
 Columns: Timestamp, Tool, Lot, Wafer, Parameter, Units, Value.
 `Parameter` cell = `ParamEntry.id`. Tool = Film-PTPECVD01. Not loaded from fixture CSV.
+Default `rows_per_param=40` with injected OOC/WECO patterns so rules light up in demos.
 """
 function build_fake_tool_table(;
     params::Vector{ParamEntry} = default_fake_tool_params(),
     seed::Int = 42,
-    rows_per_param::Int = 16,
+    rows_per_param::Int = 40,
 )::SharedTable
-    n_per = clamp(rows_per_param, 12, 20)
+    n_per = clamp(rows_per_param, 12, 48)
     cols = ["Timestamp", "Tool", "Lot", "Wafer", "Parameter", "Units", "Value"]
     rows = Dict{String,String}[]
     rng = MersenneTwister(seed)
     t = 1
     for p in params
         tool = isempty(p.tool_id) ? "Film-PTPECVD01" : p.tool_id
+        vals = Float64[p.μ + p.σ * randn(rng) for _ in 1:n_per]
+        _inject_spc_demo_failures!(vals)
         for i in 1:n_per
-            v = p.μ + p.σ * randn(rng)
+            v = vals[i]
             lot = "L$(1000 + ((t - 1) ÷ 4))"
             wafer = "W$(mod1(i, 8))"
             # Sequential wall-clock labels (not parsed as real times; labels only)
@@ -2555,25 +2585,27 @@ end
 """
     _seed_fake_tool_session!(m)
 
-Bootstrap tools + params + long SharedTable + one table-sourced chart for
-`seed_demos = :fake_tool` (PR1b). Primary chart is materialize_param_chart! for params[1].
+Bootstrap tools + params + long SharedTable + **one chart per catalog param** for
+`seed_demos = :fake_tool`. Dashboard stays single-pane (`dashboard_max_panes=1`);
+switch params via Side Stats / `select_param!`. Series include denser WECO-demo spikes.
 """
 function _seed_fake_tool_session!(m::SPCWorkbenchModel)
     m.tools = default_fake_tools()
     m.params = default_fake_tool_params()
     m.selected_param = 1
     m.table = build_fake_tool_table(; params = m.params, seed = 42)
-    p = m.params[1]
-    ch = ChartSpec(enabled_rules = copy(m.enabled_rules))
-    materialize_param_chart!(ch, m.table, p)
-    # Re-fit viewport with session line visibility after materialize defaults
-    if !isempty(ch.data.values)
-        ch.viewport = _boot_viewport(ch.data; usl = ch.usl, lsl = ch.lsl, show_lines = m.show_chart_lines)
+    empty!(m.charts)
+    for p in m.params
+        ch = ChartSpec(enabled_rules = copy(m.enabled_rules))
+        materialize_param_chart!(ch, m.table, p)
+        if !isempty(ch.data.values)
+            ch.viewport = _boot_viewport(ch.data; usl = ch.usl, lsl = ch.lsl, show_lines = m.show_chart_lines)
+        end
+        push!(m.charts, ch)
     end
-    push!(m.charts, ch)
     m.active = 1
     m.library_selected = 1
-    m.last_event = "fake tool seed loaded"
+    m.last_event = "fake tool seed loaded ($(length(m.params)) params)"
     return nothing
 end
 
@@ -7160,11 +7192,9 @@ function view(m::SPCWorkbenchModel, f::Frame)
     end
 
     # Active primary (+ optional dual secondary canvas under it — KD-P2-15/16/17)
-    # Locked tokens: `Dashboard:` prefix + `[active/total]`; optional · tool/param chips (PR5)
-    chname = isempty(m.charts) ? "Data" : current_chart(m).name
+    # Title: Tool first · Param; mouse chrome lives in left legend box (not in title).
     empty_hint = (n == 0) ? " — No data — import CSV or clone a demo" : ""
-    chips = _dashboard_title_chips(m)
-    pri_title = "Dashboard: $(chname) [$(m.active)/$(length(m.charts))]$(chips) (│ hover  ┃ select  drag pan  wheel zoom)  [ ] switch$(empty_hint)"
+    pri_title = _primary_dashboard_title(m; empty_hint = empty_hint)
     primary_outer = show_dual ? dual_split[1] : active_plot_rect
     secondary_outer = show_dual ? dual_split[2] : nothing
 
@@ -7197,9 +7227,14 @@ function view(m::SPCWorkbenchModel, f::Frame)
             draw_hover = true,
             usl = m.usl,
             lsl = m.lsl,
+            # Accent title (tool/param) vs dim border — eye-catching, not outline color
+            title_style = tstyle(:accent, bold = true),
+            border_style = tstyle(:border),
         )
         # Primary-only ownership: plot_area set by helper; viewport Y from primary fit only
         ch_act.viewport = m.viewport
+        # Legend box: mouse/key chrome, top-right horizontal strip
+        _render_plot_legend_box!(buf, m.plot_area)
 
         # Dual secondary: ephemeral Viewport; never mutates m.viewport / m.plot_area (KD-P2-16)
         if show_dual && secondary_outer !== nothing
@@ -7225,9 +7260,14 @@ function view(m::SPCWorkbenchModel, f::Frame)
         end
     else
         # Empty / no primary: still draw a Block shell and bind mouse area to primary outer
-        plot_block = Block(title = pri_title, border_style = tstyle(:border), title_style = tstyle(:title))
+        plot_block = Block(
+            title = pri_title,
+            border_style = tstyle(:border),
+            title_style = tstyle(:accent, bold = true),
+        )
         plot_inner = render(plot_block, primary_outer, buf)
         m.plot_area = plot_inner
+        _render_plot_legend_box!(buf, m.plot_area)
     end
 
     # Read-only extra panes from dashboard_pane_charts (panes[2], panes[3]) — not m.charts[2]/[3]
@@ -7512,7 +7552,12 @@ and `m.side_outer` to the layout outer rect. Clears `m.weco_bubble_geom` each pa
 """
 function _render_side_stats!(buf, side_rect, m::SPCWorkbenchModel;
                              variant::Symbol = :full)
-    side_block = Block(title="Side Stats (chart $(m.active)/$(max(1,length(m.charts))) • dashboard)", border_style=tstyle(:border))
+    # Clean title — no parenthetical trailer; accent so it stands off the border
+    side_block = Block(
+        title = "Side Stats",
+        border_style = tstyle(:border),
+        title_style = tstyle(:accent, bold = true),
+    )
     side_inner = render(side_block, side_rect, buf)
     m.side_outer = side_rect
     m.side_area = side_inner
@@ -7528,9 +7573,20 @@ function _render_side_stats!(buf, side_rect, m::SPCWorkbenchModel;
     if n > 0
         _render_side_stats_body!(buf, side_inner, m)
     else
-        set_string!(buf, x, y, "n=0", tstyle(:text))
+        set_string!(buf, x, y, "n=0", tstyle(:warning, bold = true))
     end
     return
+end
+
+"""Dim horizontal rule between Side Stats sections when height allows."""
+function _side_sec_gap!(buf, x::Int, y::Int, bot::Int, maxw::Int; force::Bool = false)::Int
+    y > bot && return y
+    rem = bot - y + 1
+    # Need gap row + at least 1 body row after unless forced
+    (!force && rem < 3) && return y
+    rule_w = min(maxw, max(8, maxw - 1))
+    set_string!(buf, x, y, repeat("─", rule_w), tstyle(:border))
+    return y + 1
 end
 
 """Empty-filter body: optional ▸ CHARTS + required `Charts: 0/N` + ` (no match)` (KD-SS-14)."""
@@ -7575,20 +7631,40 @@ function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
     reserve_tail = 2
     drop_sigma12 = compact_h11 && (hover_active || multi_or_filter)
 
+    # Tool identity always visible at top of side body (accent chip)
+    tid = _params_tool_id(m)
+    if isempty(tid) && !isempty(act_ch.tools)
+        tid = String(act_ch.tools[1])
+    end
+    # Gaps only when tall enough — short H=18 WECO geometry stays stable
+    allow_gap = side_inner.height >= 20
+
+    # Skip top tool chip under compact H — PARAMS section still paints ◆ tool
+    if !isempty(tid) && y <= bot && !compact_h11
+        set_string!(buf, x, y, _side_trunc(string("◆ ", tid), maxw), tstyle(:accent, bold = true))
+        y += 1
+        allow_gap && (y = _side_sec_gap!(buf, x, y, bot, maxw))
+    end
+
     y = _side_sec_summary!(buf, x, y, bot, maxw, m, act_ctx, n_primary;
                            compact_h11=compact_h11, reserve_tail=reserve_tail,
                            hover_active=hover_active)
+    allow_gap && (y = _side_sec_gap!(buf, x, y, bot, maxw))
     # PARAMS reserves WECO floor + upcoming HOVER so hover cannot steal Viols: (KD-DC-18)
     y = _side_sec_params!(buf, x, y, bot, maxw, m;
                           reserve_tail=reserve_tail, compact_h11=compact_h11,
                           hover_active=hover_active)
+    allow_gap && (y = _side_sec_gap!(buf, x, y, bot, maxw))
     y = _side_sec_hover!(buf, x, y, bot, maxw, m, act_ctx, act_ch, n_primary;
                          compact_h11=compact_h11, reserve_tail=reserve_tail)
+    allow_gap && (y = _side_sec_gap!(buf, x, y, bot, maxw))
     y = _side_sec_lines!(buf, x, y, bot, maxw, m, act_ctx;
                          reserve_tail=reserve_tail, drop_sigma12=drop_sigma12,
                          compact_h11=compact_h11)
+    allow_gap && (y = _side_sec_gap!(buf, x, y, bot, maxw))
     y = _side_sec_weco!(buf, x, y, bot, maxw, m, act_ctx, act_ch, side_inner;
                         compact_h11=compact_h11)
+    allow_gap && (y = _side_sec_gap!(buf, x, y, bot, maxw))
     y = _side_sec_charts!(buf, x, y, bot, maxw, m)
     return y
 end
@@ -7607,20 +7683,14 @@ function _params_tool_id(m::SPCWorkbenchModel)::String
 end
 
 """
-Dim suffix chips for dashboard titles (PR5 / KD-DC-10).
-
-Returns ` · tool` and optional ` · param` when the display name differs from the
-chart title. Empty when nothing known — callers keep the locked `Dashboard:` /
-`[active/total]` prefixes and only append this suffix.
+Tool / param identity for titles. Returns `(tool_id, param_display_name)`.
 """
-function _dashboard_title_chips(m::SPCWorkbenchModel)::String
-    bits = String[]
+function _chart_tool_param_labels(m::SPCWorkbenchModel)::Tuple{String,String}
     tid = ""
     pname = ""
-    chname = ""
     if !isempty(m.charts)
         ch = current_chart(m)
-        chname = ch.name
+        pname = ch.name
         if !isempty(ch.tools)
             tid = String(ch.tools[1])
         end
@@ -7638,13 +7708,79 @@ function _dashboard_title_chips(m::SPCWorkbenchModel)::String
     if isempty(tid)
         tid = _params_tool_id(m)
     end
-    # Param display chip only when distinct from chart block title (avoid double name)
-    if !isempty(pname) && pname != chname
-        push!(bits, pname)
-    end
+    return (tid, pname)
+end
+
+"""
+Dim suffix chips for header strip (PR5 / KD-DC-10).
+
+Order: **tool first**, then param when known. Empty when nothing known.
+"""
+function _dashboard_title_chips(m::SPCWorkbenchModel)::String
+    tid, pname = _chart_tool_param_labels(m)
+    bits = String[]
     !isempty(tid) && push!(bits, tid)
+    !isempty(pname) && push!(bits, pname)
     isempty(bits) && return ""
     return " · " * join(bits, " · ")
+end
+
+"""
+Primary plot Block title: `Dashboard: TOOL · Param [a/n]` (no mouse chrome).
+
+Tool name first, then parameter — eye-catching via separate `title_style` on the Block.
+"""
+function _primary_dashboard_title(m::SPCWorkbenchModel; empty_hint::AbstractString = "")::String
+    tid, pname = _chart_tool_param_labels(m)
+    nch = max(1, length(m.charts))
+    act = isempty(m.charts) ? 1 : clamp(m.active, 1, nch)
+    body = if !isempty(tid) && !isempty(pname)
+        "$(tid) · $(pname)"
+    elseif !isempty(pname)
+        pname
+    elseif !isempty(tid)
+        tid
+    else
+        "Data"
+    end
+    return "Dashboard: $(body) [$(act)/$(nch)]$(empty_hint)"
+end
+
+"""
+Compact **horizontal** legend box in the **top-right** of the primary plot.
+
+Full Block outline; chrome removed from the chart title so Tool/Param stand out.
+Wide/short strip so it sits clear of left Y-axis ticks and bottom series markers.
+"""
+function _render_plot_legend_box!(buf, plot_inner::Rect)
+    # Only on roomy plots — avoid covering axis ticks / OOC markers on short backends
+    plot_inner.width < 40 && return
+    plot_inner.height < 14 && return
+    # Leave right columns free for USL/UCL/CL tags painted on the plot edge
+    right_margin = 7
+    # Horizontal strip: wide, short (title border + 1 body row)
+    avail = plot_inner.width - right_margin
+    avail < 30 && return
+    lw = min(44, max(30, avail - 4))
+    lh = 3
+    # Top-right, inset from right edge so limit labels stay readable
+    leg_x = right(plot_inner) - right_margin - lw + 1
+    leg_x < plot_inner.x && (leg_x = plot_inner.x)
+    leg_outer = Rect(leg_x, plot_inner.y, lw, lh)
+    blk = Block(
+        title = "Keys",
+        border_style = tstyle(:accent),
+        title_style = tstyle(:warning, bold = true),
+    )
+    inner = render(blk, leg_outer, buf)
+    maxw = max(1, inner.width)
+    # Single horizontal chrome line (eye-catching warning)
+    line = "│hover · ┃sel · drag · wheel · [ ]sw"
+    y = inner.y
+    if y <= bottom(inner)
+        set_string!(buf, inner.x, y, _side_trunc(line, maxw), tstyle(:warning, bold = true))
+    end
+    return
 end
 
 """
@@ -7717,8 +7853,8 @@ function _side_sec_params!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     end
     if show_chip && y <= effective_bot
         tid = _params_tool_id(m)
-        chip_sty = focused ? tstyle(:accent) : tstyle(:text_dim)
-        set_string!(buf, x, y, _side_trunc(string("◆ ", tid), maxw), chip_sty)
+        # Always accent — tool id must not sink into dim background
+        set_string!(buf, x, y, _side_trunc(string("◆ ", tid), maxw), tstyle(:accent, bold = true))
         y += 1
     end
     for i in show_idx
@@ -7732,15 +7868,19 @@ function _side_sec_params!(buf, x::Int, y::Int, bot::Int, maxw::Int,
         suffix = string("  ", units)
         name_budget = max(1, maxw - length(prefix) - length(suffix))
         name_s = _side_trunc(p.name, name_budget)
-        line = _side_trunc(string(prefix, name_s, suffix), maxw)
-        sty = if is_sel
-            tstyle(:accent, bold = true)
-        elseif focused
-            tstyle(:text)  # readable list while params-focused
+        # Colorized pieces: index accent, name success/text, units dim
+        if is_sel
+            line = _side_trunc(string(prefix, name_s, suffix), maxw)
+            set_string!(buf, x, y, line, tstyle(:success, bold = true))
         else
-            tstyle(:text_dim)
+            idx_s = string(i, " ")
+            set_string!(buf, x, y, string(mark, " "), tstyle(:text_dim))
+            cx = x + 2
+            set_string!(buf, cx, y, idx_s, tstyle(:warning, bold = true))
+            cx += length(idx_s)
+            room = max(1, maxw - (cx - x))
+            set_string!(buf, cx, y, _side_trunc(string(name_s, suffix), room), tstyle(:text))
         end
-        set_string!(buf, x, y, line, sty)
         y += 1
     end
     return y
@@ -7762,14 +7902,23 @@ function _side_sec_summary!(buf, x::Int, y::Int, bot::Int, maxw::Int,
         y = _side_section_header!(buf, x, y, bot, maxw, "STATS")
     end
     lz = act_ctx.lz
-    # Core top-first while room (never drop while n>0 and rem≥1)
+    # Core top-first while room — numbers in accent/success so they don't blend
     if y <= bot
         mode_lbl = _manual_limits_effective(current_chart(m)) ? "limits:manual" : "limits:auto"
-        set_string!(buf, x, y, _side_trunc("n=$n_primary $mode_lbl", maxw), tstyle(:text))
+        n_s = "n=$n_primary"
+        rest = " $mode_lbl"
+        if length(n_s) + length(rest) <= maxw
+            set_string!(buf, x, y, n_s, tstyle(:success, bold = true))
+            set_string!(buf, x + length(n_s), y, rest, tstyle(:text_dim))
+        else
+            set_string!(buf, x, y, _side_trunc(n_s * rest, maxw), tstyle(:success, bold = true))
+        end
         y += 1
     end
     if y <= bot
-        cl_sigma = "cl=$(round(lz.cl; digits=2)) σ=$(round(lz.sigma; digits=2))"
+        cl_s = "cl=$(round(lz.cl; digits=2))"
+        sig_s = " σ=$(round(lz.sigma; digits=2))"
+        extra = ""
         if act_ctx.secondary_bar !== nothing && !isempty(act_ctx.secondary_name)
             sec_lbl = if act_ctx.secondary_name == "R"
                 "Rbar"
@@ -7780,9 +7929,17 @@ function _side_sec_summary!(buf, x::Int, y::Int, bot::Int, maxw::Int,
             else
                 act_ctx.secondary_name
             end
-            cl_sigma *= " $sec_lbl=$(round(act_ctx.secondary_bar; digits=2))"
+            extra = " $sec_lbl=$(round(act_ctx.secondary_bar; digits=2))"
         end
-        set_string!(buf, x, y, _side_trunc(cl_sigma, maxw), tstyle(:text_dim))
+        line = cl_s * sig_s * extra
+        # Paint cl= accent; remainder warning-dim if fits
+        if length(cl_s) < maxw
+            set_string!(buf, x, y, cl_s, tstyle(:accent, bold = true))
+            set_string!(buf, x + length(cl_s), y, _side_trunc(sig_s * extra, max(1, maxw - length(cl_s))),
+                        tstyle(:warning, bold = true))
+        else
+            set_string!(buf, x, y, _side_trunc(line, maxw), tstyle(:accent, bold = true))
+        end
         y += 1
     end
     if y <= bot
