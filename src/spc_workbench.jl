@@ -291,6 +291,9 @@ empty_workbench_data() = WorkbenchData(values = Float64[], cl = 0.0, sigma = 0.0
     # PR7b: optional Lot/Wafer/Chip (or Tool/Timestamp) column for table Xbar subgroups.
     # Empty → series-chunk of `subgroup_size` on materialized individuals (PR7).
     col_lot::String = ""
+    # PR1b: optional Parameter column map + filter (ParamEntry.id). Empty filter → no param row filter.
+    col_param::String = ""
+    param_filter::String = ""
 end
 
 # ── SharedTable + copy-on-map materialize (PR6 / KD25) ──────────────────
@@ -309,6 +312,9 @@ std_or_0(vs) = length(vs) < 2 ? 0.0 : std(vs; corrected = true)
 
 Pure. Operates on the in-memory SharedTable only (no file I/O).
 Filter rows by `ch.tools` when non-empty (via `ch.col_tool`); map `ch.col_value`.
+When both `param_filter` and `col_param` are non-empty, keep rows whose
+`col_param` cell equals `param_filter` (ParamEntry.id). Empty `param_filter`
+or empty `col_param` leaves param filtering off (existing charts unchanged).
 When `ch.col_lot` is set, each point_meta includes `"lot"` (group key for PR7b Xbar).
 """
 function compute_chart_series(table::SharedTable, ch::ChartSpec)
@@ -319,11 +325,21 @@ function compute_chart_series(table::SharedTable, ch::ChartSpec)
     col_t = ch.col_tool
     col_time = ch.col_time
     col_lot = ch.col_lot
+    col_param = ch.col_param
+    param_filter = ch.param_filter
     filter_tools = !isempty(ch.tools) && !isempty(col_t)
+    # Require both map + filter string so empty-filter charts stay unchanged.
+    filter_param = !isempty(param_filter) && !isempty(col_param)
     for row in table.rows
         if filter_tools
             tool_val = get(row, col_t, "")
             if !(String(tool_val) in ch.tools)
+                continue
+            end
+        end
+        if filter_param
+            pcell = get(row, col_param, "")
+            if String(pcell) != param_filter
                 continue
             end
         end
@@ -346,6 +362,9 @@ function compute_chart_series(table::SharedTable, ch::ChartSpec)
         )
         if !isempty(col_lot)
             pm["lot"] = String(get(row, col_lot, ""))
+        end
+        if !isempty(col_param)
+            pm["param"] = String(get(row, col_param, ""))
         end
         push!(point_meta, pm)
     end
@@ -1689,6 +1708,7 @@ export ChartType, ChartSpec, empty_workbench_data, CHART_TYPE_WIRE, parse_chart_
 export I_MR, Xbar_R, Xbar_S, p_chart, np_chart, c_chart, u_chart
 export SharedTable, mean_or_0, std_or_0, compute_chart_series, materialize_chart_from_table!
 export shared_table_from_columns_rows, fill_shared_table!
+export materialize_param_chart!, build_fake_tool_table
 
 # UI requires Tachikoma (slices 2+). Pure tests include will pull it in.
 using Tachikoma
@@ -2013,6 +2033,22 @@ end
     description::String = ""
 end
 
+"""Parameter catalog entry (tool parameter vocabulary). `id` is the stable wire key
+stored in `ChartSpec.param` (never the display `name`)."""
+@kwdef struct ParamEntry
+    id::String
+    name::String
+    units::String = ""
+    tool_id::String = ""
+    value_col::String = "Value"
+    default_chart_type::ChartType = I_MR
+    μ::Float64 = 0.0
+    σ::Float64 = 1.0
+    usl::Union{Float64,Nothing} = nothing
+    target::Union{Float64,Nothing} = nothing
+    lsl::Union{Float64,Nothing} = nothing
+end
+
 # ── Model (slice 2+) ────────────────────────────────────────────────────
 
 """WECO chip row geometry for hit-testing (PR3) and hover paint (PR2)."""
@@ -2113,8 +2149,19 @@ end
     # Prefill only for export prompts — never silent write to default path
     last_export_path::String = ""
     # Seed policy when charts empty — NEVER flip default from :triple
-    seed_demos::Symbol = :triple     # :triple | :single | :none
+    seed_demos::Symbol = :triple     # :triple | :single | :none | :fake_tool
     tools::Vector{ToolEntry} = ToolEntry[]
+    # Parameter catalog (dashboard single-chart design / PR1a); empty ⇒ selected_param = 0
+    params::Vector{ParamEntry} = ParamEntry[]
+    selected_param::Int = 0          # 1-based index; 0 = none / empty catalog
+    # Pane budget: field default 3 for :triple compat; seed policy overwrites on ensure bootstrap
+    dashboard_max_panes::Int = 3
+    side_focus::Symbol = :none       # :none | :params (PARAMS interactive focus)
+    # Add-chart wizard modal (PR4 / KD-DC-17)
+    add_chart_open::Bool = false
+    add_chart_mode::Symbol = :param  # :param | :analysis
+    add_chart_selected::Int = 1
+    add_chart_analysis::ChartType = I_MR
     # Tools registry UI (P2-PR4) — master list of ToolEntry; chart assign stays builder ch.tools
     tools_selected::Int = 1
     tools_scroll::Int = 0
@@ -2394,17 +2441,151 @@ function _boot_viewport(d::WorkbenchData; usl=nothing, lsl=nothing, show_lines=D
 end
 
 function _normalize_seed_demos(seed::Symbol)::Symbol
-    if seed === :triple || seed === :single || seed === :none
+    if seed === :triple || seed === :single || seed === :none || seed === :fake_tool
         return seed
     end
     @warn "unknown seed_demos=$(seed); treating as :triple"
     return :triple
 end
 
+"""Seed-coupled pane budget: `:triple` → 3, all other seeds → 1 (KD-DC-2)."""
+function _seed_dashboard_max_panes!(m::SPCWorkbenchModel, seed::Symbol)
+    m.dashboard_max_panes = seed === :triple ? 3 : 1
+    return nothing
+end
+
+"""Hard-clamped pane budget for dashboard layout (KD-DC-2). Always 1..3."""
+function effective_dashboard_max_panes(m::SPCWorkbenchModel)::Int
+    return clamp(m.dashboard_max_panes, 1, 3)
+end
+
+"""Synthetic fake-tool registry (Film-PTPECVD01). Not loaded from fixture CSV."""
+function default_fake_tools()::Vector{ToolEntry}
+    return [
+        ToolEntry(id = "Film-PTPECVD01", description = "PECVD oxide film tool (demo)"),
+    ]
+end
+
+"""Synthetic parameter catalog for the demo PECVD tool (stable `id` keys)."""
+function default_fake_tool_params()::Vector{ParamEntry}
+    tid = "Film-PTPECVD01"
+    return [
+        ParamEntry(
+            id = "thk_1_3um", name = "Thickness 1.3µm", units = "nm", tool_id = tid,
+            μ = 1300.0, σ = 4.5, usl = 1320.0, target = 1300.0, lsl = 1280.0,
+        ),
+        ParamEntry(
+            id = "n_oxide", name = "Refractive Index", units = "", tool_id = tid,
+            μ = 1.46, σ = 0.008, usl = 1.48, target = 1.46, lsl = 1.44,
+        ),
+        ParamEntry(
+            id = "thk_hsq", name = "HSQ Thickness", units = "nm", tool_id = tid,
+            μ = 600.0, σ = 12.0, usl = 640.0, target = 600.0, lsl = 560.0,
+        ),
+    ]
+end
+
+"""
+    build_fake_tool_table(; params=default_fake_tool_params(), seed=42, rows_per_param=16) -> SharedTable
+
+Synthetic long-format SharedTable for the demo PECVD tool (PR1b).
+Columns: Timestamp, Tool, Lot, Wafer, Parameter, Units, Value.
+`Parameter` cell = `ParamEntry.id`. Tool = Film-PTPECVD01. Not loaded from fixture CSV.
+"""
+function build_fake_tool_table(;
+    params::Vector{ParamEntry} = default_fake_tool_params(),
+    seed::Int = 42,
+    rows_per_param::Int = 16,
+)::SharedTable
+    n_per = clamp(rows_per_param, 12, 20)
+    cols = ["Timestamp", "Tool", "Lot", "Wafer", "Parameter", "Units", "Value"]
+    rows = Dict{String,String}[]
+    rng = MersenneTwister(seed)
+    t = 1
+    for p in params
+        tool = isempty(p.tool_id) ? "Film-PTPECVD01" : p.tool_id
+        for i in 1:n_per
+            v = p.μ + p.σ * randn(rng)
+            lot = "L$(1000 + ((t - 1) ÷ 4))"
+            wafer = "W$(mod1(i, 8))"
+            # Sequential wall-clock labels (not parsed as real times; labels only)
+            hh = (t - 1) ÷ 3600
+            mm = ((t - 1) % 3600) ÷ 60
+            ss = (t - 1) % 60
+            ts = "2026-01-01T$(lpad(string(hh), 2, '0')):$(lpad(string(mm), 2, '0')):$(lpad(string(ss), 2, '0'))Z"
+            push!(rows, Dict{String,String}(
+                "Timestamp" => ts,
+                "Tool" => tool,
+                "Lot" => lot,
+                "Wafer" => wafer,
+                "Parameter" => p.id,
+                "Units" => p.units,
+                "Value" => string(v),
+            ))
+            t += 1
+        end
+    end
+    return SharedTable(columns = cols, rows = rows)
+end
+
+"""
+    materialize_param_chart!(ch, table, p) -> ChartSpec
+
+Wire `ChartSpec` to a catalog parameter and copy-on-map series from SharedTable
+via `param_filter` / `col_param` (PR1b). `ch.param` and `param_filter` = ParamEntry.id.
+"""
+function materialize_param_chart!(ch::ChartSpec, table::SharedTable, p::ParamEntry)
+    ch.param = p.id
+    ch.param_filter = p.id
+    ch.col_param = "Parameter"
+    ch.units = p.units
+    ch.tools = isempty(p.tool_id) ? String[] : String[p.tool_id]
+    ch.col_value = "Value"
+    ch.col_tool = "Tool"
+    ch.col_time = "Timestamp"
+    ch.chart_type = p.default_chart_type
+    ch.usl = p.usl
+    ch.target = p.target
+    ch.lsl = p.lsl
+    ch.name = p.name
+    materialize_chart_from_table!(ch, table)
+    return ch
+end
+
+"""
+    _seed_fake_tool_session!(m)
+
+Bootstrap tools + params + long SharedTable + one table-sourced chart for
+`seed_demos = :fake_tool` (PR1b). Primary chart is materialize_param_chart! for params[1].
+"""
+function _seed_fake_tool_session!(m::SPCWorkbenchModel)
+    m.tools = default_fake_tools()
+    m.params = default_fake_tool_params()
+    m.selected_param = 1
+    m.table = build_fake_tool_table(; params = m.params, seed = 42)
+    p = m.params[1]
+    ch = ChartSpec(enabled_rules = copy(m.enabled_rules))
+    materialize_param_chart!(ch, m.table, p)
+    # Re-fit viewport with session line visibility after materialize defaults
+    if !isempty(ch.data.values)
+        ch.viewport = _boot_viewport(ch.data; usl = ch.usl, lsl = ch.lsl, show_lines = m.show_chart_lines)
+    end
+    push!(m.charts, ch)
+    m.active = 1
+    m.library_selected = 1
+    m.last_event = "fake tool seed loaded"
+    return nothing
+end
+
 function _ensure_charts!(m::SPCWorkbenchModel)
     if isempty(m.charts)
         seed = _normalize_seed_demos(m.seed_demos)
-        if seed === :none
+        # Seed-coupled pane budget only when bootstrapping empty charts (do not
+        # reset if charts already non-empty — user/load may have changed panes).
+        _seed_dashboard_max_panes!(m, seed)
+        if seed === :fake_tool
+            _seed_fake_tool_session!(m)
+        elseif seed === :none
             push!(m.charts, ChartSpec(
                 name = "Primary",
                 data = empty_workbench_data(),
@@ -3380,6 +3561,8 @@ function clone_chart!(m::SPCWorkbenchModel, idx::Int)::Int
         col_tool = src.col_tool,
         col_time = src.col_time,
         col_lot = src.col_lot,
+        col_param = src.col_param,
+        param_filter = src.param_filter,
     )
     push!(m.charts, cloned)
     new_idx = length(m.charts)
@@ -3443,6 +3626,309 @@ function set_active_chart!(m::SPCWorkbenchModel, idx::Int)
     m.library_selected = idx
     _ensure_charts!(m)  # sync legacy mirrors from new active
     return nothing
+end
+
+"""
+    select_param!(m, idx)
+
+Select parameter catalog index (1-based). Single path (KD-DC-4):
+find chart with `c.param == p.id` → `set_active_chart!`; else highlight-only
+Message `"no chart for param — press + to add"`. **Never rematerialize.**
+Empty catalog ⇒ `selected_param = 0`.
+"""
+function select_param!(m::SPCWorkbenchModel, idx::Int)
+    if isempty(m.params)
+        m.selected_param = 0
+        return nothing
+    end
+    m.selected_param = clamp(idx, 1, length(m.params))
+    p = m.params[m.selected_param]
+    i = findfirst(c -> c.param == p.id, m.charts)
+    if i !== nothing
+        set_active_chart!(m, i)
+        m.last_event = "param $(p.name)"
+    else
+        # Highlight only — NEVER rematerialize / rewrite active chart series
+        m.last_event = "no chart for param — press + to add"
+    end
+    return nothing
+end
+
+# ── Add-chart wizard (PR4 / KD-DC-3 / KD-DC-16 / KD-DC-17) ───────────────
+
+"""Analysis types offered in the add-chart modal (v1: individuals + Xbar only)."""
+const ADD_CHART_ANALYSIS_TYPES = ChartType[I_MR, Xbar_R, Xbar_S]
+
+"""KD-DC-3: wizard-only pane auto-bump when visible charts exceed budget."""
+function _auto_bump_dashboard_panes!(m::SPCWorkbenchModel)
+    n = length(visible_charts(m))
+    if n > m.dashboard_max_panes
+        m.dashboard_max_panes = min(3, n)
+    end
+    return nothing
+end
+
+"""True when a chart already exists for this param id + chart type (duplicate policy).
+
+Empty `param` is still a shared identity (blank library charts) — second same-type
+analysis clone is refused (KD-DC-16).
+"""
+function _chart_exists_for_param_type(m::SPCWorkbenchModel, param_id::AbstractString, ct::ChartType)::Bool
+    return any(c -> c.param == param_id && c.chart_type == ct, m.charts)
+end
+
+"""
+    add_param_chart!(m, p; chart_type=nothing) -> Union{Int,Nothing}
+
+Create a chart for catalog parameter `p`. Uses `materialize_param_chart!` when
+the session SharedTable has rows; otherwise wires metadata with empty series.
+Refuses duplicate (same param id + chart type). Auto-bumps `dashboard_max_panes`
+(KD-DC-3). Returns new 1-based index or `nothing` on refuse.
+"""
+function add_param_chart!(
+    m::SPCWorkbenchModel,
+    p::ParamEntry;
+    chart_type = nothing,
+)::Union{Int,Nothing}
+    ct = chart_type === nothing ? p.default_chart_type : ChartType(chart_type)
+    if _chart_exists_for_param_type(m, p.id, ct)
+        m.last_event = "chart already exists for param/type"
+        return nothing
+    end
+    ch = ChartSpec(
+        enabled_rules = copy(m.default_rules),
+        chart_type = ct,
+    )
+    if !isempty(m.table.rows)
+        materialize_param_chart!(ch, m.table, p)
+        # materialize sets p.default_chart_type — honor explicit chart_type
+        if ch.chart_type != ct
+            ch.chart_type = ct
+            materialize_chart_from_table!(ch, m.table; show_lines = m.show_chart_lines)
+        end
+        if !isempty(ch.data.values)
+            ch.viewport = _boot_viewport(
+                ch.data; usl = ch.usl, lsl = ch.lsl, show_lines = m.show_chart_lines,
+            )
+        end
+    else
+        ch.param = p.id
+        ch.name = p.name
+        ch.units = p.units
+        ch.tools = isempty(p.tool_id) ? String[] : String[p.tool_id]
+        ch.usl = p.usl
+        ch.target = p.target
+        ch.lsl = p.lsl
+        ch.chart_type = ct
+        ch.data = empty_workbench_data()
+        ch.viewport = Viewport(x0 = 0, x1 = 0, ylo = 0.0, yhi = 1.0)
+        ch.live_enabled = false
+        ch.source = :series
+    end
+    push!(m.charts, ch)
+    idx = length(m.charts)
+    m.library_selected = idx
+    set_active_chart!(m, idx)
+    _auto_bump_dashboard_panes!(m)
+    m.last_event = "added param chart $idx"
+    return idx
+end
+
+"""
+    add_analysis_chart!(m, src_idx, chart_type) -> Union{Int,Nothing}
+
+Clone analysis chart from source index: same param id / units / tools / specs /
+column maps. Sets `chart_type`; name = \"\$(src) · \$(wire)\". Subgroup size
+defaults to 5 when source has nothing useful (KD-DC-16).
+
+Refuses attribute types (`p`/`np`/`c`/`u`) and duplicates (same param id + type).
+Rematerializes from table when source is `:table` and table non-empty; else
+copies series values. Auto-bumps panes (KD-DC-3).
+"""
+function add_analysis_chart!(
+    m::SPCWorkbenchModel,
+    src_idx::Int,
+    chart_type::ChartType,
+)::Union{Int,Nothing}
+    if is_attribute_chart(chart_type) ||
+       !(chart_type === I_MR || chart_type === Xbar_R || chart_type === Xbar_S)
+        m.last_event = "analysis type needs n/defects columns"
+        return nothing
+    end
+    n = length(m.charts)
+    (src_idx < 1 || src_idx > n) && (m.last_event = "no source chart"; return nothing)
+    src = m.charts[src_idx]
+    if _chart_exists_for_param_type(m, src.param, chart_type)
+        m.last_event = "chart already exists for param/type"
+        return nothing
+    end
+    # subgroup_size: copy if useful (≥2), else default 5 for Xbar paths
+    sg = src.subgroup_size >= 2 ? src.subgroup_size : 5
+    type_s = chart_type_to_string(chart_type)
+    ch = ChartSpec(
+        name = "$(src.name) · $(type_s)",
+        chart_type = chart_type,
+        enabled_rules = copy(m.default_rules),
+        param = src.param,
+        units = src.units,
+        owner = src.owner,
+        tools = copy(src.tools),
+        usl = src.usl,
+        target = src.target,
+        lsl = src.lsl,
+        subgroup_size = sg,
+        limits_mode = src.limits_mode,
+        manual_cl = src.manual_cl,
+        manual_ucl = src.manual_ucl,
+        manual_lcl = src.manual_lcl,
+        col_value = src.col_value,
+        col_n = src.col_n,
+        col_tool = src.col_tool,
+        col_time = src.col_time,
+        col_lot = src.col_lot,
+        col_param = src.col_param,
+        param_filter = src.param_filter,
+        live_enabled = false,
+    )
+    if src.source === :table && !isempty(m.table.rows)
+        materialize_chart_from_table!(ch, m.table; show_lines = m.show_chart_lines)
+        if !isempty(ch.data.values)
+            ch.viewport = _boot_viewport(
+                ch.data; usl = ch.usl, lsl = ch.lsl, show_lines = m.show_chart_lines,
+            )
+        end
+    else
+        d = WorkbenchData(
+            values = copy(src.data.values),
+            cl = src.data.cl,
+            sigma = src.data.sigma,
+            meta = deepcopy(src.data.meta),
+        )
+        ch.data = d
+        ch.source = :series
+        ch.viewport = _boot_viewport(
+            d; usl = ch.usl, lsl = ch.lsl, show_lines = m.show_chart_lines,
+        )
+    end
+    push!(m.charts, ch)
+    idx = length(m.charts)
+    m.library_selected = idx
+    set_active_chart!(m, idx)
+    _auto_bump_dashboard_panes!(m)
+    m.last_event = "added analysis chart $idx"
+    return idx
+end
+
+function _close_add_chart_modal!(m::SPCWorkbenchModel)
+    m.add_chart_open = false
+    return nothing
+end
+
+"""Open add-chart wizard: force-close WECO explain; close file browser if open."""
+function _open_add_chart_modal!(m::SPCWorkbenchModel)
+    if m.file_browser_open
+        _close_file_browser!(m)
+    end
+    _clear_weco_explain!(m)
+    m.add_chart_open = true
+    m.add_chart_mode = :param
+    if !isempty(m.params) && 1 <= m.selected_param <= length(m.params)
+        m.add_chart_selected = m.selected_param
+    else
+        m.add_chart_selected = 1
+    end
+    m.add_chart_analysis = I_MR
+    m.last_event = "add chart open"
+    return nothing
+end
+
+function _add_chart_list_len(m::SPCWorkbenchModel)::Int
+    if m.add_chart_mode === :analysis
+        return length(ADD_CHART_ANALYSIS_TYPES)
+    end
+    return length(m.params)
+end
+
+function _clamp_add_chart_selected!(m::SPCWorkbenchModel)
+    n = _add_chart_list_len(m)
+    if n < 1
+        m.add_chart_selected = 1
+    else
+        m.add_chart_selected = clamp(m.add_chart_selected, 1, n)
+    end
+    if m.add_chart_mode === :analysis && 1 <= m.add_chart_selected <= length(ADD_CHART_ANALYSIS_TYPES)
+        m.add_chart_analysis = ADD_CHART_ANALYSIS_TYPES[m.add_chart_selected]
+    end
+    return nothing
+end
+
+function _confirm_add_chart!(m::SPCWorkbenchModel)
+    if m.add_chart_mode === :param
+        if isempty(m.params)
+            m.last_event = "no params in catalog"
+            return
+        end
+        _clamp_add_chart_selected!(m)
+        p = m.params[m.add_chart_selected]
+        idx = add_param_chart!(m, p)
+        if idx !== nothing
+            _close_add_chart_modal!(m)
+        end
+        return
+    end
+    # :analysis — clone from active chart
+    if isempty(m.charts)
+        m.last_event = "no source chart"
+        return
+    end
+    _clamp_add_chart_selected!(m)
+    ct = ADD_CHART_ANALYSIS_TYPES[m.add_chart_selected]
+    m.add_chart_analysis = ct
+    idx = add_analysis_chart!(m, m.active, ct)
+    if idx !== nothing
+        _close_add_chart_modal!(m)
+    end
+    return nothing
+end
+
+"""Full absorb while add-chart modal open (KD-DC-17). Esc/q never quit."""
+function _handle_add_chart_keys!(m::SPCWorkbenchModel, evt::KeyEvent)
+    if evt.key == :escape || (evt.key == :char && (evt.char == 'q' || evt.char == 'Q'))
+        _close_add_chart_modal!(m)
+        m.last_event = "add chart cancel"
+        return
+    end
+    if evt.key == :tab || (evt.key == :char && evt.char == '\t')
+        m.add_chart_mode = m.add_chart_mode === :param ? :analysis : :param
+        m.add_chart_selected = 1
+        _clamp_add_chart_selected!(m)
+        m.last_event = "add chart mode $(m.add_chart_mode)"
+        return
+    end
+    if evt.key == :up
+        n = _add_chart_list_len(m)
+        if n >= 1
+            m.add_chart_selected = max(1, m.add_chart_selected - 1)
+            _clamp_add_chart_selected!(m)
+            m.last_event = "add chart sel $(m.add_chart_selected)"
+        end
+        return
+    end
+    if evt.key == :down
+        n = _add_chart_list_len(m)
+        if n >= 1
+            m.add_chart_selected = min(n, m.add_chart_selected + 1)
+            _clamp_add_chart_selected!(m)
+            m.last_event = "add chart sel $(m.add_chart_selected)"
+        end
+        return
+    end
+    if evt.key == :enter || (evt.key == :char && evt.char == ' ')
+        _confirm_add_chart!(m)
+        return
+    end
+    # Absorb all other keys (no pause, WECO digits, pan, quit)
+    return
 end
 
 # ── Tools registry pure CRUD (P2-PR4) ───────────────────────────────────
@@ -4018,8 +4504,10 @@ function dashboard_pane_charts(m::SPCWorkbenchModel; k::Int = 3)::Vector{ChartSp
     return vis[i:j]
 end
 
-export ToolEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
-export visible_charts, dashboard_pane_charts
+export ToolEntry, ParamEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
+export select_param!, add_param_chart!, add_analysis_chart!
+export visible_charts, dashboard_pane_charts, effective_dashboard_max_panes
+export default_fake_tools, default_fake_tool_params, build_fake_tool_table, materialize_param_chart!
 # set_filter_tool! / set_filter_type! / set_filter_owner! / clear_filters! stay package-private
 
 # Builder form field order (P2-PR5: col maps + subgroup + owner)
@@ -4728,7 +5216,8 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return
     end
 
-    # KD-SE-8 modal order: pending_overwrite → pending_delete → file_browser → prompt
+    # KD-SE-8 / KD-DC-17 modal order:
+    # pending_overwrite → pending_delete → file_browser → add_chart → prompt
 
     # pending_overwrite: y confirms save; any other key cancels (explorer stays closed)
     if m.pending_overwrite
@@ -4814,6 +5303,12 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     # File explorer modal (KD-SE-2)
     if m.file_browser_open
         _handle_file_browser_keys!(m, evt)
+        return
+    end
+
+    # Add-chart wizard modal (KD-DC-17) — full absorb; Esc/q never quit
+    if m.add_chart_open
+        _handle_add_chart_keys!(m, evt)
         return
     end
 
@@ -5037,6 +5532,13 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         return
     end
 
+    # PARAMS side focus: Esc clears focus before global quit (KD-DC-13)
+    if m.side_focus === :params && evt.key == :escape
+        m.side_focus = :none
+        m.last_event = "params unfocused"
+        return
+    end
+
     # Global quit (dashboard only — modes already returned above)
     if evt.key == :escape || (evt.key == :char && evt.char == 'q')
         m.quit = true
@@ -5154,7 +5656,31 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             ch.usl = ch.target = ch.lsl = nothing
             m.last_event = "specs cleared"
             return
+        elseif c == '+' || c == 'A'
+            # Open add-chart wizard (dashboard only; library keeps a/A = blank add)
+            _open_add_chart_modal!(m)
+            return
+        elseif c == ';'
+            # Toggle PARAMS side focus (KD-DC-13); catalog non-empty only
+            if !isempty(m.params)
+                m.side_focus = m.side_focus === :params ? :none : :params
+                m.last_event = m.side_focus === :params ? "params focused" : "params unfocused"
+            end
+            return
+        elseif (c == 'j' || c == 'J') && m.side_focus === :params
+            # j next / J prev when PARAMS focused only (j/J no-op when unfocused)
+            delta = c == 'j' ? 1 : -1
+            select_param!(m, m.selected_param + delta)
+            return
+        elseif m.side_focus === :params && '1' <= c <= '9'
+            # Param jump 1-9 when focused (absorbs digit; no WECO toggle)
+            idx = Int(c - '0')
+            if 1 <= idx <= length(m.params)
+                select_param!(m, idx)
+            end
+            return
         elseif '1' <= c <= '8'
+            # WECO toggle when side_focus !== :params (KD-DC-5)
             rid = "WECO-$(parse(Int, string(c)))"
             m.enabled_rules[rid] = !get(m.enabled_rules, rid, false)
             ch.enabled_rules[rid] = m.enabled_rules[rid]
@@ -5171,6 +5697,7 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
             m.last_event = "help open"
             return
         elseif c == 'k' || c == 'K'
+            # Keymap always — even when side_focus === :params (KD-DC-13)
             _clear_weco_explain!(m)
             _clear_plot_click_memory!(m)
             m.view_mode = :keymap
@@ -5197,7 +5724,21 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
         _sync_active_back!(m)
     end
 
+    # ↑↓: param prev/next when PARAMS focused; else no-op (pan is ←→ only)
+    if evt.key == :up
+        if m.side_focus === :params
+            select_param!(m, m.selected_param - 1)
+        end
+        return
+    elseif evt.key == :down
+        if m.side_focus === :params
+            select_param!(m, m.selected_param + 1)
+        end
+        return
+    end
+
     if evt.key == :left
+        # Pan always available (even when params focused — KD-DC-13 lock)
         if n > 0
             m.viewport.x0 = max(1, m.viewport.x0 - 2)
             m.viewport.x1 = max(m.viewport.x0 + MIN_X_SPAN - 1, m.viewport.x1 - 2)
@@ -5541,7 +6082,7 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         _update_library_mouse!(m, evt)
         return
     end
-    # Modal / tools / table / config / prompt / pending_* / explorer: keyboard-only (KD16)
+    # Modal / tools / table / config / prompt / pending_* / explorer / add-chart: keyboard-only (KD16)
     if m.editing !== nothing ||
        m.view_mode == :help || m.view_mode == :keymap ||
        m.view_mode == :builder ||
@@ -5549,7 +6090,8 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
        m.view_mode == :table ||
        m.view_mode == :config ||
        m.prompt_kind !== nothing || m.pending_delete ||
-       m.pending_overwrite || m.file_browser_open
+       m.pending_overwrite || m.file_browser_open ||
+       m.add_chart_open
         m.last_event = string(evt.action, " ", evt.button, " (modal)")
         m.hover_x = nothing
         m.hovered = nothing
@@ -6070,12 +6612,18 @@ end
 """Dashboard Keys panel structure. Compact = most-used; expanded = full contextual list."""
 function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
     if !expanded
+        # Include `; params` / `+ add` when catalog non-empty (space trade vs h-help)
+        row2 = if !isempty(m.params)
+            [("+", "add"), (";", "params"), ("q", "quit"), ("?", "more")]
+        else
+            [("d", "table"), ("+", "add"), ("q", "quit"), ("?", "more")]
+        end
         return [
             (:binds, [("p", "pause"), ("g", "live"), ("m", "lib"), ("x", "tools")]),
-            (:binds, [("d", "table"), ("q", "quit"), ("?", "more"), ("h", "help")]),
+            (:binds, row2),
         ]
     end
-    return [
+    entries = Any[
         (:section, "PAGES"),
         (:binds, [("m", "library"), ("x", "tools"), ("d", "table"), ("b", "builder")]),
         (:binds, [("e", "saved cfg"), ("f", "filter"), ("F", "clear"), ("h", "help")]),
@@ -6087,10 +6635,20 @@ function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
         (:binds, [("u", "USL"), ("t", "Target"), ("l", "LSL"), ("s", "clear")]),
         (:binds, [("1-8", "WECO"), ("w", "explain"), ("c", "config"), ("v", "lines")]),
         (:binds, [("o", "visual")]),
-        (:section, "MOUSE"),
-        (:note, "hover · click select · drag pan · dblclick viol = explain"),
-        (:note, "WECO chip = explain · dash w=explain · lib w=save · config w=Save As"),
     ]
+    # Gate PARAMS binds on non-empty catalog (same policy as compact)
+    if !isempty(m.params)
+        push!(entries, (:section, "PARAMS / CHARTS"))
+        push!(entries, (:binds, [("+", "add chart"), (";", "params focus"), ("j/J", "next/prev"), ("↑↓", "select")]))
+        push!(entries, (:binds, [("1-9", "jump"), ("A", "add chart")]))
+    else
+        push!(entries, (:section, "CHARTS"))
+        push!(entries, (:binds, [("+", "add chart"), ("A", "add chart")]))
+    end
+    push!(entries, (:section, "MOUSE"))
+    push!(entries, (:note, "hover · click select · drag pan · dblclick viol = explain"))
+    push!(entries, (:note, "WECO chip = explain · dash w=explain · lib w=save · config w=Save As"))
+    return entries
 end
 
 """Per-mode Keys menu entries (library / tools / table / builder / help / keymap)."""
@@ -6538,7 +7096,8 @@ function view(m::SPCWorkbenchModel, f::Frame)
     side_rect = cols[2]
 
     # Dashboard: up to k panes from active + following visible neighbors (not charts[2]/[3] lock)
-    panes = dashboard_pane_charts(m; k = 3)
+    # k is seed-coupled via dashboard_max_panes (KD-DC-2); hard clamp 1..3
+    panes = dashboard_pane_charts(m; k = effective_dashboard_max_panes(m))
     npanes = length(panes)
     is_dashboard_multi = (m.view_mode == :dashboard && npanes >= 2)
     active_plot_rect = plot_rect
@@ -6579,7 +7138,8 @@ function view(m::SPCWorkbenchModel, f::Frame)
 
     # header — short title only; key bindings live in bottom Keys panel
     nch_hdr = length(m.charts)
-    hdr = "SPC Workbench [dashboard]  chart $(m.active)/$(max(1, nch_hdr))"
+    # Keep SPC Workbench [dashboard] + chart n/m; optional dim tool/param chips (PR5)
+    hdr = "SPC Workbench [dashboard]  chart $(m.active)/$(max(1, nch_hdr))$(_dashboard_title_chips(m))"
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
 
     # A6: empty filter match — plot message + side list (Charts: 0/N) + bottom panels
@@ -6600,9 +7160,11 @@ function view(m::SPCWorkbenchModel, f::Frame)
     end
 
     # Active primary (+ optional dual secondary canvas under it — KD-P2-15/16/17)
+    # Locked tokens: `Dashboard:` prefix + `[active/total]`; optional · tool/param chips (PR5)
     chname = isempty(m.charts) ? "Data" : current_chart(m).name
     empty_hint = (n == 0) ? " — No data — import CSV or clone a demo" : ""
-    pri_title = "Dashboard: $(chname) [$(m.active)/$(length(m.charts))] (│ hover  ┃ select  drag pan  wheel zoom)  [ ] switch$(empty_hint)"
+    chips = _dashboard_title_chips(m)
+    pri_title = "Dashboard: $(chname) [$(m.active)/$(length(m.charts))]$(chips) (│ hover  ┃ select  drag pan  wheel zoom)  [ ] switch$(empty_hint)"
     primary_outer = show_dual ? dual_split[1] : active_plot_rect
     secondary_outer = show_dual ? dual_split[2] : nothing
 
@@ -6897,6 +7459,11 @@ function view(m::SPCWorkbenchModel, f::Frame)
         _render_message_panel!(buf, gcols[1], m)
         _render_keys_panel!(buf, gcols[2], m)
     end
+
+    # Add-chart modal: above plot/side/WECO/Message (force-close WECO on open)
+    if m.add_chart_open && m.view_mode == :dashboard
+        _render_add_chart_modal!(buf, area, m)
+    end
 end
 
 # ── Side Stats section helpers (PR2 sectionize + height collapse) ─────────
@@ -6988,8 +7555,8 @@ function _side_sec_charts_empty!(buf, side_inner, m::SPCWorkbenchModel)
 end
 
 """
-Full non-empty Side Stats body — sectionized with D1–D18 collapse (PR2).
-Order: STATS → HOVER → LINES → WECO → CHARTS.
+Full non-empty Side Stats body — sectionized with D1–D18 collapse + PARAMS (dashboard design).
+Order: STATS → PARAMS → HOVER → LINES → WECO → CHARTS.
 """
 function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
     x = side_inner.x
@@ -7003,7 +7570,7 @@ function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
     multi_or_filter = length(m.charts) > 1 || _any_filter_active(m)
     # KD-SS-17 compact profile (headerless prefs + force-drop ±1/±2)
     compact_h11 = side_inner.height <= 11
-    # Always reserve bubbles + Viols: N so Lines cannot starve WECO at any height
+    # Always reserve bubbles + Viols: N so Lines/PARAMS cannot starve WECO at any height
     # (fixes side_h 12–13 cliff when reserve was 0 above height 11).
     reserve_tail = 2
     drop_sigma12 = compact_h11 && (hover_active || multi_or_filter)
@@ -7011,14 +7578,171 @@ function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
     y = _side_sec_summary!(buf, x, y, bot, maxw, m, act_ctx, n_primary;
                            compact_h11=compact_h11, reserve_tail=reserve_tail,
                            hover_active=hover_active)
+    # PARAMS reserves WECO floor + upcoming HOVER so hover cannot steal Viols: (KD-DC-18)
+    y = _side_sec_params!(buf, x, y, bot, maxw, m;
+                          reserve_tail=reserve_tail, compact_h11=compact_h11,
+                          hover_active=hover_active)
     y = _side_sec_hover!(buf, x, y, bot, maxw, m, act_ctx, act_ch, n_primary;
-                         compact_h11=compact_h11)
+                         compact_h11=compact_h11, reserve_tail=reserve_tail)
     y = _side_sec_lines!(buf, x, y, bot, maxw, m, act_ctx;
                          reserve_tail=reserve_tail, drop_sigma12=drop_sigma12,
                          compact_h11=compact_h11)
     y = _side_sec_weco!(buf, x, y, bot, maxw, m, act_ctx, act_ch, side_inner;
                         compact_h11=compact_h11)
     y = _side_sec_charts!(buf, x, y, bot, maxw, m)
+    return y
+end
+
+"""Tool id for PARAMS chip: selected param → any param tool_id → tools[1]."""
+function _params_tool_id(m::SPCWorkbenchModel)::String
+    if 1 <= m.selected_param <= length(m.params)
+        tid = m.params[m.selected_param].tool_id
+        !isempty(tid) && return tid
+    end
+    for p in m.params
+        !isempty(p.tool_id) && return p.tool_id
+    end
+    isempty(m.tools) || return m.tools[1].id
+    return ""
+end
+
+"""
+Dim suffix chips for dashboard titles (PR5 / KD-DC-10).
+
+Returns ` · tool` and optional ` · param` when the display name differs from the
+chart title. Empty when nothing known — callers keep the locked `Dashboard:` /
+`[active/total]` prefixes and only append this suffix.
+"""
+function _dashboard_title_chips(m::SPCWorkbenchModel)::String
+    bits = String[]
+    tid = ""
+    pname = ""
+    chname = ""
+    if !isempty(m.charts)
+        ch = current_chart(m)
+        chname = ch.name
+        if !isempty(ch.tools)
+            tid = String(ch.tools[1])
+        end
+        if !isempty(ch.param)
+            i = findfirst(p -> p.id == ch.param, m.params)
+            if i !== nothing
+                pe = m.params[i]
+                pname = pe.name
+                if isempty(tid) && !isempty(pe.tool_id)
+                    tid = pe.tool_id
+                end
+            end
+        end
+    end
+    if isempty(tid)
+        tid = _params_tool_id(m)
+    end
+    # Param display chip only when distinct from chart block title (avoid double name)
+    if !isempty(pname) && pname != chname
+        push!(bits, pname)
+    end
+    !isempty(tid) && push!(bits, tid)
+    isempty(bits) && return ""
+    return " · " * join(bits, " · ")
+end
+
+"""
+▸ PARAMS — tool chip + catalog rows with ▶ on selected (KD-DC-12 / KD-DC-18).
+
+Honors `reserve_tail` (WECO floor) **and** upcoming HOVER rows so hover cannot
+steal bubbles/`Viols:`. Drop order under pressure:
+D0a non-selected rows (bottom-up) → D0b tool chip → D0c header → D0d selected row.
+`compact_h11`: prefer headerless (same spirit as STATS/HOVER KD-SS-17).
+Empty catalog ⇒ omit section (no paint).
+"""
+function _side_sec_params!(buf, x::Int, y::Int, bot::Int, maxw::Int,
+                           m::SPCWorkbenchModel;
+                           reserve_tail::Int = 2, compact_h11::Bool = false,
+                           hover_active::Bool = false)::Int
+    isempty(m.params) && return y
+    # Leave room for HOVER after us (body only under compact; header+body when tall)
+    hover_reserve = hover_active ? (compact_h11 ? 1 : 2) : 0
+    effective_bot = bot - reserve_tail - hover_reserve
+    rem = effective_bot - y + 1
+    rem < 1 && return y
+
+    n = length(m.params)
+    sel = (1 <= m.selected_param <= n) ? m.selected_param : 0
+    show_idx = collect(1:n)
+    # Prefer headerless under compact profile (uses compact_h11; still drop under pressure)
+    show_hdr = !compact_h11
+    show_chip = !isempty(_params_tool_id(m))
+
+    cost() = (show_hdr ? 1 : 0) + (show_chip ? 1 : 0) + length(show_idx)
+
+    # D0a: drop non-selected rows bottom-up
+    while cost() > rem && length(show_idx) > (sel > 0 ? 1 : 0)
+        drop_at = 0
+        for i in length(show_idx):-1:1
+            if show_idx[i] != sel
+                drop_at = i
+                break
+            end
+        end
+        drop_at == 0 && break
+        deleteat!(show_idx, drop_at)
+    end
+    # D0b: tool chip
+    if cost() > rem
+        show_chip = false
+    end
+    # D0c: header
+    if cost() > rem
+        show_hdr = false
+    end
+    # D0d: selected / remaining rows last
+    while cost() > rem && !isempty(show_idx)
+        if sel > 0
+            # Prefer keep selected: drop any non-selected first, then selected
+            drop_at = findlast(i -> show_idx[i] != sel, eachindex(show_idx))
+            drop_at === nothing && (drop_at = length(show_idx))
+            deleteat!(show_idx, drop_at)
+        else
+            pop!(show_idx)
+        end
+    end
+    isempty(show_idx) && return y  # section omitted entirely under pressure
+
+    focused = m.side_focus === :params
+    if show_hdr
+        # Focused: `▸ PARAMS ●` still matches frozen locator `▸ PARAMS` (PR5)
+        hdr = focused ? "PARAMS ●" : "PARAMS"
+        y = _side_section_header!(buf, x, y, effective_bot, maxw, hdr)
+    end
+    if show_chip && y <= effective_bot
+        tid = _params_tool_id(m)
+        chip_sty = focused ? tstyle(:accent) : tstyle(:text_dim)
+        set_string!(buf, x, y, _side_trunc(string("◆ ", tid), maxw), chip_sty)
+        y += 1
+    end
+    for i in show_idx
+        y > effective_bot && break
+        p = m.params[i]
+        is_sel = (i == sel)
+        mark = is_sel ? "▶" : " "
+        units = isempty(p.units) ? "—" : p.units
+        # "▶ 1 Name  units" — truncate name to fit
+        prefix = string(mark, " ", i, " ")
+        suffix = string("  ", units)
+        name_budget = max(1, maxw - length(prefix) - length(suffix))
+        name_s = _side_trunc(p.name, name_budget)
+        line = _side_trunc(string(prefix, name_s, suffix), maxw)
+        sty = if is_sel
+            tstyle(:accent, bold = true)
+        elseif focused
+            tstyle(:text)  # readable list while params-focused
+        else
+            tstyle(:text_dim)
+        end
+        set_string!(buf, x, y, line, sty)
+        y += 1
+    end
     return y
 end
 
@@ -7094,19 +7818,23 @@ function _side_sec_summary!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     return y
 end
 
-"""▸ HOVER — only when hovered; headerless if rem < 2 or compact_h11 (KD-SS-17)."""
+"""▸ HOVER — only when hovered; headerless if rem < 2 or compact_h11 (KD-SS-17).
+
+Honors `reserve_tail` so hover never paints into the WECO floor (KD-DC-18 with PARAMS).
+"""
 function _side_sec_hover!(buf, x::Int, y::Int, bot::Int, maxw::Int,
                           m::SPCWorkbenchModel, act_ctx, act_ch, n_primary::Int;
-                          compact_h11::Bool = false)::Int
+                          compact_h11::Bool = false, reserve_tail::Int = 0)::Int
     hi = m.hovered
     (hi === nothing || hi < 1 || hi > n_primary) && return y
-    rem = bot - y + 1
+    effective_bot = bot - reserve_tail
+    rem = effective_bot - y + 1
     rem < 1 && return y
     # KD-SS-17 rule 3: headerless HOVER under compact profile
     if !compact_h11 && _side_want_header(rem, 1)
-        y = _side_section_header!(buf, x, y, bot, maxw, "HOVER")
+        y = _side_section_header!(buf, x, y, effective_bot, maxw, "HOVER")
     end
-    if y <= bot
+    if y <= effective_bot
         v = act_ctx.primary_values[hi]
         st = point_status(hi, act_ctx, act_ch)
         stat = st == :oos ? "OOS" : (st == :ooc ? "OOC" : "OK")
@@ -7432,20 +8160,30 @@ function _render_library_page!(buf, area, m)
     end
 end
 
-# ── Tools registry page (P2-PR4) — master list m.tools; assign via builder ─
+# ── Tools registry page (P2-PR4 / PR5 polish) — master list m.tools; assign via builder ─
 function _render_tools_page!(buf, area, m)
     content, chrome = _split_mode_chrome(area)
     m.tools_area = content
+    # Frozen locator: `▸ TOOLS` (also keeps legacy `TOOLS REGISTRY` substring)
     set_string!(buf, content.x + 1, content.y,
-        "TOOLS REGISTRY  ·  Esc/q → dashboard", tstyle(:title, bold=true))
+        "▸ TOOLS REGISTRY  ·  Esc/q → dashboard", tstyle(:title, bold=true))
     y = content.y + 2
     ntools = length(m.tools)
     if ntools >= 1
         m.tools_selected = clamp(m.tools_selected, 1, ntools)
     end
-    set_string!(buf, content.x + 2, y,
-        "Tools: $ntools   selected=$(m.tools_selected)   (registry ≠ chart tools list)",
-        tstyle(:text_dim))
+    # Summary: focus tool · N tools (design mockup) + registry note
+    if ntools == 0
+        set_string!(buf, content.x + 2, y,
+            "0 tools   (registry ≠ chart tools list)",
+            tstyle(:text_dim))
+    else
+        focus_id = m.tools[m.tools_selected].id
+        plural = ntools == 1 ? "tool" : "tools"
+        set_string!(buf, content.x + 2, y,
+            "$focus_id · $ntools $plural   selected=$(m.tools_selected)   (registry ≠ chart tools)",
+            tstyle(:text_dim))
+    end
     y += 2
     capacity = _tools_visible_capacity(m)
     _sync_tools_scroll!(m, ntools, capacity)
@@ -7716,6 +8454,108 @@ function _render_presets_list_body!(buf, content, m; y::Int)
     return y
 end
 
+"""Centered add-chart wizard modal (PR4/PR5). Locators: ▸ ADD CHART, [● Param]."""
+function _render_add_chart_modal!(buf, area, m::SPCWorkbenchModel)
+    aw = area.width
+    ah = area.height
+    (aw < 28 || ah < 10) && return nothing
+    box_w = min(aw - 4, 56)
+    box_h = min(ah - 2, 14)
+    box_x = area.x + max(0, (aw - box_w) ÷ 2)
+    box_y = area.y + max(0, (ah - box_h) ÷ 2)
+    rect = Rect(box_x, box_y, box_w, box_h)
+    _clear_rect!(buf, rect)
+    inner = render(
+        Block(
+            title = "▸ ADD CHART",
+            border_style = tstyle(:border),
+            title_style = tstyle(:accent, bold = true),
+        ),
+        rect,
+        buf,
+    )
+    inner.width < 4 && return nothing
+    bot = bottom(inner)
+    maxw = max(1, inner.width - 1)
+    y = inner.y
+    # Mode chips — active mode accent-bold; inactive dim (frozen [● Param]/[● Analysis])
+    if m.add_chart_mode === :param
+        chip = "[● Param]  [○ Analysis]     Tab switch mode"
+        chip_sty = tstyle(:accent, bold = true)
+    else
+        chip = "[○ Param]  [● Analysis]     Tab switch mode"
+        chip_sty = tstyle(:accent, bold = true)
+    end
+    set_string!(buf, inner.x, y, _side_trunc(chip, maxw), chip_sty)
+    y += 1
+    if y <= bot
+        set_string!(buf, inner.x, y, _side_trunc("─"^maxw, maxw), tstyle(:text_dim))
+        y += 1
+    end
+    _clamp_add_chart_selected!(m)
+    if m.add_chart_mode === :param
+        if y <= bot
+            # Tool context chip when catalog knows a tool (region-friendly, not plot ◆)
+            tid = _params_tool_id(m)
+            mode_lbl = isempty(tid) ? "Mode :param — pick parameter" : "Mode :param · $tid — pick parameter"
+            set_string!(
+                buf, inner.x, y,
+                _side_trunc(mode_lbl, maxw),
+                tstyle(:text_dim),
+            )
+            y += 1
+        end
+        n = length(m.params)
+        if n < 1
+            if y <= bot
+                set_string!(buf, inner.x, y, _side_trunc("(no params)", maxw), tstyle(:text_dim))
+                y += 1
+            end
+        else
+            for i in 1:n
+                y > bot - 1 && break
+                p = m.params[i]
+                has_ch = any(c -> c.param == p.id, m.charts)
+                mark = i == m.add_chart_selected ? "▶" : " "
+                radio = has_ch ? "●" : "○"
+                units = isempty(p.units) ? "—" : p.units
+                tid = isempty(p.tool_id) ? "" : p.tool_id
+                line = "$mark $i. $radio $(p.name)  $units  $tid"
+                sty = i == m.add_chart_selected ? tstyle(:accent, bold = true) : tstyle(:text)
+                set_string!(buf, inner.x, y, _side_trunc(line, maxw), sty)
+                y += 1
+            end
+        end
+    else
+        if y <= bot
+            src = isempty(m.charts) ? "—" : current_chart(m).name
+            set_string!(
+                buf, inner.x, y,
+                _side_trunc("Mode :analysis — from $src", maxw),
+                tstyle(:text_dim),
+            )
+            y += 1
+        end
+        for (i, ct) in enumerate(ADD_CHART_ANALYSIS_TYPES)
+            y > bot - 1 && break
+            mark = i == m.add_chart_selected ? "▶" : " "
+            radio = i == m.add_chart_selected ? "●" : "○"
+            line = "$mark $i. $radio $(chart_type_to_string(ct))"
+            sty = i == m.add_chart_selected ? tstyle(:accent, bold = true) : tstyle(:text)
+            set_string!(buf, inner.x, y, _side_trunc(line, maxw), sty)
+            y += 1
+        end
+    end
+    if y <= bot
+        set_string!(
+            buf, inner.x, y,
+            _side_trunc("Enter confirm · Esc/q cancel · ↑↓ select · Tab mode", maxw),
+            tstyle(:text_dim),
+        )
+    end
+    return nothing
+end
+
 """Centered file-explorer modal over Config (only while `file_browser_open`)."""
 function _render_file_browser!(buf, area, m::SPCWorkbenchModel)
     aw = area.width
@@ -7942,6 +8782,7 @@ function _live_may_advance(m::SPCWorkbenchModel)::Bool
     m.pending_delete && return false
     m.pending_overwrite && return false
     m.file_browser_open && return false
+    m.add_chart_open && return false
     m.view_mode in (:help, :keymap, :library, :builder, :tools, :table, :config) && return false
     ch = current_chart(m)
     (isempty(ch.data.values) || !ch.live_enabled) && return false

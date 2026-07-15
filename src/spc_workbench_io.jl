@@ -927,6 +927,8 @@ function _chart_to_dict(ch::ChartSpec)::Dict{String,Any}
         "col_tool" => ch.col_tool,
         "col_time" => ch.col_time,
         "col_lot" => ch.col_lot,  # always write (P2-PR3 / KD-P2-18)
+        "col_param" => ch.col_param,  # PR1b — always write (optional key; fail-soft load)
+        "param_filter" => ch.param_filter,
         "viewport" => Dict{String,Any}(
             "x0" => ch.viewport.x0,
             "x1" => ch.viewport.x1,
@@ -1016,6 +1018,9 @@ function _chart_from_dict(cd)::Union{ChartSpec,String}
     col_time = String(get(cd, "col_time", "Timestamp") === nothing ? "Timestamp" : get(cd, "col_time", "Timestamp"))
     # Optional col_lot (P2-PR3); omitted / null → ""
     col_lot = String(get(cd, "col_lot", "") === nothing ? "" : get(cd, "col_lot", ""))
+    # Optional col_param / param_filter (PR1b); omitted / null → "" (fail-soft)
+    col_param = String(get(cd, "col_param", "") === nothing ? "" : get(cd, "col_param", ""))
+    param_filter = String(get(cd, "param_filter", "") === nothing ? "" : get(cd, "param_filter", ""))
 
     vp = _viewport_from_json(get(cd, "viewport", nothing), data; usl = usl, lsl = lsl)
     vp isa String && return vp
@@ -1046,6 +1051,8 @@ function _chart_from_dict(cd)::Union{ChartSpec,String}
         col_tool = col_tool isa AbstractString ? String(col_tool) : "Tool",
         col_time = col_time isa AbstractString ? String(col_time) : "Timestamp",
         col_lot = col_lot isa AbstractString ? String(col_lot) : "",
+        col_param = col_param isa AbstractString ? String(col_param) : "",
+        param_filter = param_filter isa AbstractString ? String(param_filter) : "",
     )
 end
 
@@ -1124,6 +1131,11 @@ function _table_to_dict(table::SharedTable)::Dict{String,Any}
     )
 end
 
+"""KD-DC-6 absent-key heuristic: ≥2 charts → min(3, n); else 1."""
+function _dashboard_max_panes_from_chart_count(n::Int)::Int
+    n >= 2 ? min(3, n) : 1
+end
+
 """
 Fully validate + parse session dict into charts/active/session fields.
 Returns (charts, active, session_namedtuple) or error String.
@@ -1189,6 +1201,21 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
     table = _table_from_json(get(d, "table", nothing))
     table isa String && return table
 
+    # KD-DC-6: dashboard_max_panes optional; present → clamp 1..3; absent → chart-count heuristic
+    dashboard_max_panes = if haskey(d, "dashboard_max_panes") && d["dashboard_max_panes"] !== nothing
+        raw_panes = d["dashboard_max_panes"]
+        # Bool <: Integer — reject so true/false never silently become 1/0
+        raw_panes isa Bool && return "dashboard_max_panes must be integer"
+        panes_i = try
+            Int(raw_panes)
+        catch
+            return "dashboard_max_panes must be integer"
+        end
+        clamp(panes_i, 1, 3)
+    else
+        _dashboard_max_panes_from_chart_count(length(charts))
+    end
+
     return (
         charts = charts,
         active = active,
@@ -1200,6 +1227,7 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
         graph_presets = graph_presets,
         paused = paused,
         table = table,
+        dashboard_max_panes = dashboard_max_panes,
     )
 end
 
@@ -1251,11 +1279,13 @@ function _apply_parsed!(m::SPCWorkbenchModel, parsed::NamedTuple)
     m.graph_presets = parsed.graph_presets
     m.paused = parsed.paused
     m.table = parsed.table  # mirror HTML apply; do NOT auto-rematerialize (KD-P2-18)
+    m.dashboard_max_panes = parsed.dashboard_max_panes  # KD-DC-6 (already clamped 1..3)
     m.library_selected = clamp(parsed.active, 1, length(parsed.charts))
     _clear_load_ephemerals!(m)
     # After clear, clamp tools_selected into new registry (empty → stays 1)
     ntools = length(m.tools)
     m.tools_selected = ntools >= 1 ? clamp(m.tools_selected, 1, ntools) : 1
+    # Charts already non-empty → _ensure_charts! will NOT re-seed dashboard_max_panes
     _ensure_charts!(m)  # sync legacy mirrors from new active
     return nothing
 end
@@ -1267,6 +1297,7 @@ end
 
 Serialize workbench session to JSON-ready Dict (schema v1).
 Always writes per-chart `live_enabled` and `col_lot`. Never writes admins/passcodes.
+Always writes clamped `dashboard_max_panes` (1..3 via `effective_dashboard_max_panes`).
 
 Optional `table` (SharedTable as `{columns, rows}`) is written only when
 non-empty (`columns` or `rows` non-empty); omitted when empty to keep fixtures
@@ -1288,6 +1319,7 @@ function workbench_to_dict(m::SPCWorkbenchModel)::Dict
         "chart_line_styles" => Dict{String,Any}(k => v for (k, v) in m.chart_line_styles),
         "visual_prefs" => Dict{String,Any}(k => v for (k, v) in m.visual_prefs),
         "paused" => m.paused,
+        "dashboard_max_panes" => effective_dashboard_max_panes(m),
     )
     # Omit empty presets (keep fixtures small; same policy as table).
     # Session embeds optional host `path` so list identity survives restart (KD-SE-4).
@@ -1742,9 +1774,13 @@ function _apply_html_parsed!(m::SPCWorkbenchModel, parsed::NamedTuple)
     # Session defaults (KD-P2-21); per-chart rules stay on chart objects.
     m.default_rules = parsed.default_rules
     m.table = parsed.table
+    # HTML archives lack dashboard_max_panes — apply KD-DC-6 chart-count heuristic
+    # so multi-chart imports stay multi-pane (not stuck at prior session panes=1).
+    m.dashboard_max_panes = _dashboard_max_panes_from_chart_count(length(parsed.charts))
     m.library_selected = clamp(parsed.active, 1, length(parsed.charts))
     m.paused = true  # archive import pauses live (same spirit as CSV)
     _clear_load_ephemerals!(m)
+    # Charts non-empty → _ensure_charts! will NOT re-seed dashboard_max_panes
     _ensure_charts!(m)
     return nothing
 end

@@ -22,7 +22,8 @@ Large product work is still expected. This walkthrough describes **current** beh
 | Treat as relatively stable | Likely to change |
 |----------------------------|------------------|
 | Live = **`g`/`G` only** (`L` = LSL) | Dashboard layout / dual-pane height policy polish |
-| Default **`seed_demos = :triple`** | Help/keymap copy and secondary chrome |
+| Default **`seed_demos = :triple`** (keep; use `:fake_tool` opt-in) | Help/keymap copy and secondary chrome |
+| **`p`/`P` pause**, **`k`/`K` keymap** (not remapped for PARAMS) | PARAMS/add-chart polish strings |
 | JSON schema **v1** additive contracts | Builder/table UX details |
 | CSV series-first (`Value` / single col) | Attribute-chart operator workflows |
 | Explicit materialize (not auto on load) | Key bindings if new modes are added |
@@ -114,8 +115,11 @@ This is the primary application: a **multi-chart Statistical Process Control wor
 **Run:**
 
 ```bash
-# Seeded 3-chart dashboard (paused — best first look)
+# Seeded 3-chart dashboard (paused — best first look; default seed_demos=:triple)
 julia --project=. -e 'using TachikomaTUI; TachikomaTUI.spc_workbench_demo()'
+
+# Single-chart tool + parameter demo (Film-PTPECVD01; opt-in — do not flip default)
+julia --project=. -e 'using TachikomaTUI; TachikomaTUI.spc_workbench_demo(seed_demos=:fake_tool)'
 
 # Interactive (live ticks unless paused)
 julia --project=. -e 'using TachikomaTUI; TachikomaTUI.spc_workbench(paused=true)'
@@ -124,22 +128,34 @@ julia --project=. -e 'using TachikomaTUI; TachikomaTUI.spc_workbench(paused=true
 julia --project=. -e 'using TachikomaTUI; TachikomaTUI.spc_workbench(workbench="session.json")'
 ```
 
-By default it seeds **three demo charts** (Primary / Secondary / Tertiary). That default (`seed_demos = :triple`) is intentional product behavior — do not flip it without an explicit product decision.
+By default it seeds **three demo charts** (Primary / Secondary / Tertiary). That default (`seed_demos = :triple` on the model and both runners) is intentional — **keep it**. Use **`seed_demos = :fake_tool`** explicitly for the product single-chart + Side Stats PARAMS walkthrough. Do not flip the runner/model default without an explicit product decision and suite plan.
+
+| `seed_demos` | Charts | Tools / params | `dashboard_max_panes` (seed sets) |
+|--------------|--------|----------------|-----------------------------------|
+| **`:triple`** (default) | 3 demos (Primary / Secondary / Tertiary) | empty tools, empty params | **3** |
+| **`:fake_tool`** | 1 chart for first param | Film-PTPECVD01 + param catalog + long table | **1** |
+| `:single` | 1 chart | empty | **1** |
+| `:none` | 1 empty Primary (no random series) | empty | **1** |
+
+`dashboard_max_panes` is **seed-coupled** (field default 3 for triple compat; `_ensure_charts!` overwrites when bootstrapping empty charts). Wizard add-chart paths can auto-bump the budget up to 3.
 
 **Sources:** `src/spc_workbench.jl`, `src/spc_workbench_io.jl`  
-**Detailed contracts:** `docs/src/spc-workbench.md`
+**Detailed contracts:** `docs/src/spc-workbench.md` · **Operator guide:** `docs/user/workbench.md`
 
 ### Mental model
 
 ```text
 SPCWorkbenchModel
-├── charts[]          # ChartSpec list (name, type, values, limits, WECO, viewport…)
-├── active            # which chart is focused
-├── tools[]           # master tool registry (ids + descriptions)
-├── table             # SharedTable (in-memory rows/cols from CSV/session)
-├── filters           # owner / tool filters → which charts are visible
-├── view_mode         # dashboard | library | builder | tools | table | help…
-└── prefs             # chart lines, visual prefs, WECO defaults for new charts
+├── charts[]              # ChartSpec list (name, type, values, limits, WECO, viewport…)
+├── active                # which chart is focused
+├── tools[]               # master tool registry (ids + descriptions)
+├── params[]              # ParamEntry catalog (empty under :triple; filled by :fake_tool)
+├── selected_param        # 1-based index into params; 0 when empty
+├── dashboard_max_panes   # pane budget 1..3 (seed-coupled; JSON round-trips)
+├── table                 # SharedTable (in-memory rows/cols from CSV/session)
+├── filters               # owner / tool filters → which charts are visible
+├── view_mode             # dashboard | library | builder | tools | table | help…
+└── prefs                 # chart lines, visual prefs, WECO defaults for new charts
 ```
 
 Each **chart** can be:
@@ -163,9 +179,9 @@ Rendering goes through a **central render context**: control limits/zones, WECO 
 
 What you see:
 
-- **Multi-pane chart area** (visible charts after filters)
+- **Chart pane area** — up to `effective_dashboard_max_panes` (1…3) visible charts after filters
 - **Active chart** can show **dual canvas**: primary on top, MR/R/s secondary below
-- Side/footer stats: limits, capability, WECO, live state
+- **Side Stats**: STATS → **PARAMS** (when catalog non-empty) → HOVER → LINES → WECO → CHARTS
 - Status line / `last_event` feedback
 
 **Core keys:**
@@ -173,13 +189,13 @@ What you see:
 | Key | Action |
 |-----|--------|
 | `[` `]` | Switch active chart |
-| `←` `→` | Pan viewport |
+| `←` `→` | Pan viewport (still pan when PARAMS focused) |
 | `r` / `z` | Reset viewport + auto-fit Y |
-| `p` | Pause **session** live ticks |
+| `p` / `P` | Pause **session** live ticks (**unchanged**; not param nav) |
 | **`g` / `G`** | Toggle **active chart** live append (**not** `L`) |
 | `u` / `t` / `l` | Edit USL / Target / **LSL** |
 | `s` | Clear all spec limits |
-| `1`…`8` | Toggle WECO rule N |
+| `1`…`8` | Toggle WECO rule N (**when PARAMS unfocused**) |
 | `c` / `v` / `o` | Open **Config** → Rules / Lines / Visual |
 | **`e`** | Open **Config** → **Saved** (known disk configs + file explorer) |
 | `m` | Chart **library** |
@@ -187,11 +203,37 @@ What you see:
 | `x` | **Tools** registry |
 | `d` | **SharedTable** grid |
 | `f` | Filter prompt / clear filters |
-| `?` / `h` | Help |
-| `k` | Keymap |
-| `q` / Esc | Quit (**only** from dashboard) |
+| `?` / `h` | Help / keys chrome |
+| `k` / `K` | Keymap (**always**, even when PARAMS focused) |
+| **`+` / `A`** | Open **Add Chart** modal (param or analysis wizard) |
+| **`;`** | Toggle Side Stats **PARAMS** focus (catalog non-empty only) |
+| `q` / Esc | Quit (**only** from dashboard; Esc clears PARAMS focus / modals first) |
 
-**Important lock:** live is only `g`/`G`. **`L` is LSL edit.**
+**PARAMS focus keys** (only while `side_focus === :params`):
+
+| Key | Action |
+|-----|--------|
+| `j` / `J` | Next / previous parameter |
+| `↑` / `↓` | Previous / next parameter |
+| `1`…`9` | Jump to parameter index (absorbs digits; no WECO toggle) |
+| Esc | Unfocus PARAMS (not quit) |
+
+Selecting a param activates the chart with matching `ch.param == ParamEntry.id`, or Message `"no chart for param — press + to add"` — **never rematerializes** on select.
+
+**Add Chart modal** (`+`/`A` on dashboard; library `a` stays blank add):
+
+| Key | Action |
+|-----|--------|
+| Tab | Mode Param ↔ Analysis |
+| `↑` `↓` | List cursor |
+| Enter / Space | Confirm |
+| Esc / `q` | Cancel (never quit) |
+
+- **Param mode:** new chart for a catalog parameter (materialize from SharedTable when present).
+- **Analysis mode:** same param id as active chart, different type — v1: I-MR / X̄-R / X̄-S only.
+- Successful wizard add may auto-bump `dashboard_max_panes` to `min(3, visible count)`.
+
+**Important lock:** live is only `g`/`G`. **`L` is LSL edit.** **`p` stays pause; `k` stays keymap.**
 
 **Mouse on primary plot:** hover, pan, zoom, select — same spirit as classic SPC. Secondary canvas is display-only.
 
@@ -313,6 +355,14 @@ julia --project=. -e 'using TachikomaTUI; TachikomaTUI.spc_workbench_demo()'
 
 Switch charts with `[` `]`, pan, toggle WECO with `1`–`8`, open help with `?`.
 
+### 1b. Tool + parameters (fake_tool)
+
+```bash
+julia --project=. -e 'using TachikomaTUI; TachikomaTUI.spc_workbench_demo(seed_demos=:fake_tool)'
+```
+
+Single pane for Film-PTPECVD01 / first parameter. `;` focus PARAMS, `j`/`J` navigate, `+` add another param or analysis chart. Keep default `:triple` for general demos and CI.
+
 ### 2. Import your series
 
 1. `m` → library → `i` → path to CSV with a `Value` column
@@ -366,7 +416,8 @@ TachikomaTUI.jl       package entry + exports
 | Topic | Rule |
 |-------|------|
 | Live toggle | **`g` / `G` only** — never `L` (`L` is LSL edit) |
-| Seed demos | Default `seed_demos = :triple` |
+| Seed demos | Default **`seed_demos = :triple`** on model + runners — **keep**; use `:fake_tool` opt-in only |
+| Pause / keymap | **`p`/`P` pause**, **`k`/`K` keymap** — not remapped for PARAMS focus |
 | Excel | **Out of scope** — CSV + JSON only long-term |
 | I/O tests | `using TachikomaTUI` only — do not raw-include I/O modules |
 

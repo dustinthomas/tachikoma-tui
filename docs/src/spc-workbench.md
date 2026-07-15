@@ -10,16 +10,39 @@ locked contracts.
 ```julia
 using TachikomaTUI
 
-# Seeded triple-demo dashboard (static / gate-friendly)
+# Seeded triple-demo dashboard (static / gate-friendly) — default seed_demos=:triple
 spc_workbench_demo()
+
+# Opt-in single-chart tool + parameter demo (Film-PTPECVD01)
+spc_workbench_demo(; seed_demos = :fake_tool)
 
 # Interactive; optional pause and schema-v1 load
 spc_workbench(; paused = true)
+spc_workbench(; seed_demos = :fake_tool, paused = true)
 spc_workbench(workbench = "session.json")
 ```
 
-`seed_demos` defaults to `:triple` (Primary / Secondary / Tertiary). Do **not**
-change that default. Use `:single` or `:none` only in explicit constructs.
+`seed_demos` defaults to **`:triple`** (Primary / Secondary / Tertiary) on the
+model and both runners. Do **not** change that default. Use `:fake_tool`,
+`:single`, or `:none` only in explicit constructs / product walkthroughs.
+
+| `seed_demos` | Bootstrap | `dashboard_max_panes` set by `_ensure_charts!` |
+|--------------|-----------|-----------------------------------------------|
+| **`:triple`** (default) | 3 demo charts; empty tools; empty params | **3** |
+| **`:fake_tool`** | Film-PTPECVD01 tool, param catalog (≥3), long SharedTable, **1** chart for `params[1]` | **1** |
+| `:single` | 1 demo chart | **1** |
+| `:none` | 1 empty Primary (no random series); empty tools/params | **1** |
+
+**Seed-coupled pane budget:** model field default `dashboard_max_panes = 3`
+(triple-compat). When `_ensure_charts!` bootstraps an empty chart list it calls
+`_seed_dashboard_max_panes!` (`:triple` → 3, else 1). Non-empty charts (e.g.
+JSON load) do **not** re-seed the budget. Wizard `add_param_chart!` /
+`add_analysis_chart!` may auto-bump to `min(3, length(visible_charts))`.
+View uses `k = effective_dashboard_max_panes(m)` (clamped 1…3).
+
+`:fake_tool` data is **synthetic** (`default_fake_tools`,
+`default_fake_tool_params`, `build_fake_tool_table`) — not loaded from
+`test/fixtures/spc/templates/template_tool.csv`.
 
 ## Keys
 
@@ -27,8 +50,8 @@ change that default. Use `:single` or `:none` only in explicit constructs.
 
 | Key | Action |
 |-----|--------|
-| `q` / Esc | Quit (dashboard only) |
-| `p` / `P` | Pause / resume live tick |
+| `q` / Esc | Quit (dashboard only). Esc first clears PARAMS focus or open modals. |
+| `p` / `P` | Pause / resume live tick (**unchanged**; not param navigation) |
 | **`g` / `G`** | Toggle active chart `live_enabled` (**not `L`**) |
 | `r` / `z` | Reset viewport (full range + auto Y) |
 | `c` / `C` | Open **Config** → Rules (WECO) |
@@ -37,16 +60,56 @@ change that default. Use `:single` or `:none` only in explicit constructs.
 | **`e` / `E`** | Open **Config** → **Saved** (disk-first known configs + file explorer) |
 | `u` / `t` / `l` | Edit USL / Target / **LSL** (`L` is LSL, not live) |
 | `s` | Clear all **spec** limits (USL/Target/LSL) on active chart |
-| `1`…`8` | Toggle WECO rule N on active chart (no Config open required) |
+| `1`…`8` | Toggle WECO rule N on active chart when **PARAMS unfocused** |
 | `[` `]` | Switch active chart |
-| `←` `→` | Pan viewport |
+| `←` `→` | Pan viewport (still pan when PARAMS focused) |
 | `m` / `M` | Open chart library |
 | `x` / `X` | Open tools registry |
 | `f` / `F` | Cycle filter prompt / clear filters |
 | `b` / `B` | Open chart builder |
-| `?` / `h` | Help page |
-| `k` | Keymap page |
+| `?` / `h` | Help / keys chrome |
+| `k` / `K` | Keymap page (**always**, even when `side_focus === :params`) |
 | **`d` / `D`** | Open SharedTable grid (`view_mode=:table`) |
+| **`+` / `A`** | Open **Add Chart** modal (dashboard only; library keeps `a` = blank add) |
+| **`;`** | Toggle Side Stats **PARAMS** focus (`side_focus` `:none` ⇄ `:params`; no-op if catalog empty) |
+
+### Side Stats ▸ PARAMS (interactive when catalog non-empty)
+
+Paint order: **STATS → PARAMS → HOVER → LINES → WECO → CHARTS**. Only PARAMS is
+interactive; other sections remain read-only. Under height pressure PARAMS drops
+content before starving WECO bubbles (`reserve_tail`).
+
+| Key | When | Action |
+|-----|------|--------|
+| `;` | catalog non-empty | Toggle params focus |
+| `j` / `J` | focused | Next / previous parameter (`select_param!`) |
+| `↑` / `↓` | focused | Previous / next parameter |
+| `1`…`9` | focused | Jump to index (absorbs digit; **no** WECO toggle) |
+| Esc | focused | Clear focus (`params unfocused`); does not quit |
+
+`select_param!(m, idx)`: set `selected_param`; find chart with
+`c.param == params[idx].id` → `set_active_chart!`; else Message
+`"no chart for param — press + to add"`. **Never rematerialize** on select.
+Empty catalog ⇒ `selected_param = 0`.
+
+### Add Chart modal (`add_chart_open`)
+
+Full key absorb while open (KD-DC-17). Esc/`q` close modal only — **never quit**.
+
+| Key | Action |
+|-----|--------|
+| Tab | Toggle mode `:param` ⇄ `:analysis` |
+| `↑` / `↓` | Move list cursor |
+| Enter / Space | Confirm (`add_param_chart!` or `add_analysis_chart!`) |
+| Esc / `q` / `Q` | Cancel |
+
+| Mode | Behavior |
+|------|----------|
+| **Param** | Chart for selected catalog `ParamEntry`; materialize from SharedTable when rows exist; refuse duplicate `(param id, chart_type)` |
+| **Analysis** | Clone from **active** chart: same `param` id / tools / specs / column maps; type from v1 list **I-MR, X̄-R, X̄-S** only; refuse attributes / duplicates |
+
+Successful wizard adds auto-bump `dashboard_max_panes` when visible charts exceed
+the budget (wizard paths only — not blank library `add_chart!`).
 
 ### Config (`view_mode = :config`)
 
@@ -152,10 +215,13 @@ load fail.
 | `e` | Open Config → Saved | Jump → Saved | Export CSV |
 | `w` | — | **Save As** (alias of `s`) | Save workbench **session** |
 | `W` | — | **Load** graph config (explorer) | Load workbench **session** |
-| `p` / `P` | Pause (dashboard `p`) | Typed path save / load fallback | — |
+| `p` / `P` | Pause (always; not param nav) | Typed path save / load fallback | — |
+| `a` / `A` | **`A`** = Add Chart modal; **`a`** unbound | — | Blank `add_chart!` |
+| `+` | Add Chart modal | — | — |
+| `;` | PARAMS focus toggle | — | — |
 | `d` | SharedTable grid | Remove config from list (Saved; file kept) | Delete chart |
 | `l` | Edit LSL | Load selected config | — |
-| `1`–`8` | Toggle WECO on active chart | Jump+toggle in Rules (or Lines/Visual range) | — |
+| `1`–`8` | WECO when unfocused; param jump 1–9 when PARAMS focused | Jump+toggle in Rules (or Lines/Visual range) | — |
 
 Config is **not** full session save. Library `w`/`W` persist charts + series +
 tools + table + current graph fields; Config `s`/`w`/`S`/`W` write/read a
@@ -395,6 +461,7 @@ load_workbench!(m, "session.json")       # in-session replace (library W)
 | `charts` | **yes** | Non-empty array of chart objects |
 | `active` | **yes** | 1-based index (clamped on load) |
 | `tools` | no | Array of `{id, description}` |
+| `dashboard_max_panes` | no | Integer 1…3 (clamped). **Present** → honor; **absent** → heuristic from chart count (`n≥2` → multi). Always written on save. |
 | `default_rules` | no | Session WECO enable map for **new** charts (`add_chart!` seed). Distinct from per-chart `enabled_rules`. Omitted → module `DEFAULT_WECO_RULES`. |
 | `show_chart_lines` | no | CL / σ / specs visibility |
 | `chart_line_styles` | no | Per-line style ids (`solid` / `dotted` / `dashed` / `long_dash`); omitted → defaults |
@@ -402,6 +469,12 @@ load_workbench!(m, "session.json")       # in-session replace (library W)
 | `graph_presets` | no | Array of graph configs (whole graph set); may include optional `path` for disk-first list; wire key stays `graph_presets`; **omitted on save when empty** |
 | `paused` | no | Bool; default false if omitted |
 | `table` | no | SharedTable `{columns, rows}`; **omitted on save when empty**; missing/null → empty on load |
+
+**Note:** session JSON currently serializes tools, charts, table, and
+`dashboard_max_panes`. The in-memory **param catalog** (`m.params` /
+`selected_param`) is session/UI state seeded by `:fake_tool` (not a required
+schema root key). Chart linkage uses per-chart `param` / optional
+`col_param` + `param_filter` (stable **ParamEntry.id** strings).
 
 ### Graph config object (`graph_presets[]` + standalone files)
 
@@ -468,7 +541,7 @@ Helpers: `save_graph_preset(p, path)` / `load_graph_preset(path)`. TUI wires
 | `values` | **yes** | Array of numbers (may be empty) |
 | `usl` / `target` / `lsl` | no | Number or null |
 | `enabled_rules` | no | Per-chart WECO map (rule-id → bool). Not the session `default_rules`. |
-| `param` / `units` / `owner` | no | Strings |
+| `param` / `units` / `owner` | no | Strings; `param` stores **ParamEntry.id** when linked (not display name) |
 | `tools` | no | Array of tool id strings |
 | `limits_mode` | no | `"auto"` (default) or `"manual"` |
 | `manual_cl` / `manual_ucl` / `manual_lcl` | no | Number or null |
@@ -477,6 +550,8 @@ Helpers: `save_graph_preset(p, path)` / `load_graph_preset(path)`. TUI wires
 | `source` | no | `"series"` (default) or `"table"` provenance |
 | `col_value` / `col_n` / `col_tool` / `col_time` | no | Column maps for table materialize |
 | `col_lot` | no | Always written on save; **omitted → `""`** on load; X̄ group column |
+| `col_param` | no | Parameter column name for table filter (fake_tool seed: `"Parameter"`); **omitted → `""`** |
+| `param_filter` | no | When set with `col_param`, keep rows where cell equals this **stable id** (same string as `param`); **omitted → `""`** |
 | `viewport` | no | `{x0, x1, ylo, yhi}`; bootstrapped if missing |
 
 ### SharedTable object (`table`)
