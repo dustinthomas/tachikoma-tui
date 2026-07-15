@@ -7437,8 +7437,10 @@ function view(m::SPCWorkbenchModel, f::Frame)
 
     # header — short title only; key bindings live in bottom Keys panel
     nch_hdr = length(m.charts)
+    # KD-PD-14: empty shell must not advertise foreign active as the primary chart
+    hdr_act = paint_primary_empty ? "—" : string(m.active)
     # Keep SPC Workbench [dashboard] + chart n/m; optional dim tool/param chips (PR5)
-    hdr = "SPC Workbench [dashboard]  chart $(m.active)/$(max(1, nch_hdr))$(_dashboard_title_chips(m))"
+    hdr = "SPC Workbench [dashboard]  chart $(hdr_act)/$(max(1, nch_hdr))$(_dashboard_title_chips(m))"
     set_string!(buf, header.x + 1, header.y, hdr, tstyle(:title, bold=true))
 
     # A6: empty filter match — plot message + side list (Charts: 0/N) + bottom panels
@@ -7759,11 +7761,16 @@ function view(m::SPCWorkbenchModel, f::Frame)
         end
     end
 
-    # side
-    _render_side_stats!(buf, side_rect, m)
+    # side — KD-PD-14: empty display shell uses dim STATS + PARAMS only (no foreign Viols)
+    if paint_primary_empty
+        _render_side_stats!(buf, side_rect, m; variant = :empty_scope)
+    else
+        _render_side_stats!(buf, side_rect, m)
+    end
 
     # WECO explain popup: after plot + side, before Message|Keys chrome (KD-WB-2)
-    if m.weco_explain_open && m.view_mode == :dashboard
+    # Skip when empty shell — no foreign primary WECO overlay (KD-PD-14)
+    if m.weco_explain_open && m.view_mode == :dashboard && !paint_primary_empty
         _render_weco_explain_popup!(buf, m.plot_area, m)
     else
         m.weco_popup_rect = Rect(0, 0, 0, 0)
@@ -7825,7 +7832,9 @@ end
 Render dashboard Side Stats into `side_rect` (outer). Sets `m.side_area` to Block inner
 and `m.side_outer` to the layout outer rect. Clears `m.weco_bubble_geom` each paint
 (re-set when WECO bubbles draw).
-`variant`: `:full` | `:empty_filter`
+`variant`: `:full` | `:empty_filter` | `:empty_scope`
+  - `:empty_filter` — filter hides all charts (`Charts: 0/N` frozen token)
+  - `:empty_scope` — product scope display set empty (KD-PD-14: dim STATS, no foreign Viols)
 """
 function _render_side_stats!(buf, side_rect, m::SPCWorkbenchModel;
                              variant::Symbol = :full)
@@ -7841,6 +7850,10 @@ function _render_side_stats!(buf, side_rect, m::SPCWorkbenchModel;
     m.weco_bubble_geom = nothing  # paint-owned; set in _side_sec_weco! when bubbles draw
     if variant === :empty_filter
         _side_sec_charts_empty!(buf, side_inner, m)
+        return
+    end
+    if variant === :empty_scope
+        _side_sec_empty_scope!(buf, side_inner, m)
         return
     end
     x = side_inner.x
@@ -7885,6 +7898,41 @@ function _side_sec_charts_empty!(buf, side_inner, m::SPCWorkbenchModel)
         set_string!(buf, x, y, " (no match)", tstyle(:warning))
     end
     return
+end
+
+"""
+KD-PD-14 empty-scope Side Stats: dim STATS message + PARAMS catalog only.
+
+Must **not** paint foreign `current_chart` n/cl/σ/Viols/WECO/HOVER when the
+product display set is empty (chartless selected param / no pin charts).
+"""
+function _side_sec_empty_scope!(buf, side_inner, m::SPCWorkbenchModel)
+    x = side_inner.x
+    y = side_inner.y
+    bot = bottom(side_inner)
+    maxw = max(1, side_inner.width)
+    msg = if m.dashboard_scope === :compare
+        "compare: no pinned charts"
+    else
+        "no chart for param — press + to add"
+    end
+    # Dim STATS placeholder (no metrics from leftover active)
+    rem = bot - y + 1
+    if _side_want_header(rem, 1)
+        y = _side_section_header!(buf, x, y, bot, maxw, "STATS")
+    end
+    if y <= bot
+        set_string!(buf, x, y, _side_trunc(msg, maxw), tstyle(:text_dim))
+        y += 1
+    end
+    # PARAMS stays so the operator sees the chartless/unpinned selection
+    if y <= bot && !isempty(m.params)
+        compact = side_inner.height <= 11
+        y = _side_sec_params!(buf, x, y, bot, maxw, m;
+                              reserve_tail = 0, compact_h11 = compact, hover_active = false)
+    end
+    # Intentionally omit HOVER / LINES / WECO / CHARTS (foreign paint risk)
+    return nothing
 end
 
 """
@@ -7961,8 +8009,28 @@ end
 
 """
 Tool / param identity for titles. Returns `(tool_id, param_display_name)`.
+
+KD-PD-14: when product-scope display set is empty, label from **selected catalog
+param** (or Compare), never the leftover foreign `current_chart`.
 """
 function _chart_tool_param_labels(m::SPCWorkbenchModel)::Tuple{String,String}
+    # Empty shell under :param_active / :compare — selection owns the chrome
+    if (m.dashboard_scope === :param_active || m.dashboard_scope === :compare) &&
+       isempty(dashboard_display_set(m)) && !_any_filter_active(m)
+        tid = _params_tool_id(m)
+        pname = ""
+        if 1 <= m.selected_param <= length(m.params)
+            pe = m.params[m.selected_param]
+            pname = pe.name
+            if isempty(tid) && !isempty(pe.tool_id)
+                tid = pe.tool_id
+            end
+        elseif m.dashboard_scope === :compare
+            pname = "Compare"
+        end
+        return (tid, pname)
+    end
+
     tid = ""
     pname = ""
     if !isempty(m.charts)
@@ -8010,7 +8078,14 @@ Tool name first, then parameter — eye-catching via separate `title_style` on t
 function _primary_dashboard_title(m::SPCWorkbenchModel; empty_hint::AbstractString = "")::String
     tid, pname = _chart_tool_param_labels(m)
     nch = max(1, length(m.charts))
-    act = isempty(m.charts) ? 1 : clamp(m.active, 1, nch)
+    # KD-PD-14: empty shell has no primary chart index — show — not foreign active
+    empty_shell = (m.dashboard_scope === :param_active || m.dashboard_scope === :compare) &&
+                  isempty(dashboard_display_set(m)) && !_any_filter_active(m)
+    act_s = if empty_shell
+        "—"
+    else
+        string(isempty(m.charts) ? 1 : clamp(m.active, 1, nch))
+    end
     body = if !isempty(tid) && !isempty(pname)
         "$(tid) · $(pname)"
     elseif !isempty(pname)
@@ -8020,7 +8095,7 @@ function _primary_dashboard_title(m::SPCWorkbenchModel; empty_hint::AbstractStri
     else
         "Data"
     end
-    return "Dashboard: $(body) [$(act)/$(nch)]$(empty_hint)"
+    return "Dashboard: $(body) [$(act_s)/$(nch)]$(empty_hint)"
 end
 
 """

@@ -2134,6 +2134,7 @@ include("../src/spc_workbench_io.jl")
         @test dashboard_pane_charts(m; k = 3)[1].id == current_chart(m).id
 
         # Empty / chartless param: empty display set — do not paint foreign (KD-PD-14)
+        foreign_pname = m.params[1].name
         push!(m.params, ParamEntry(id = "ghost_pd", name = "GhostPD", tool_id = "Film-PTPECVD01"))
         select_param!(m, length(m.params))
         @test m.selected_param == length(m.params)
@@ -2142,6 +2143,14 @@ include("../src/spc_workbench_io.jl")
         @test isempty(dashboard_pane_charts(m; k = 3))
         # Active may remain foreign; reconcile must NOT invent a pane for it
         @test _reconcile_active_to_display!(m) === false
+        # Title/chrome labels selection, not foreign leftover chart (KD-PD-14)
+        tid_es, pname_es = _chart_tool_param_labels(m)
+        @test pname_es == "GhostPD"
+        @test pname_es != foreign_pname
+        title_es = _primary_dashboard_title(m; empty_hint = " — no chart for param — press + to add")
+        @test occursin("GhostPD", title_es)
+        @test !occursin(foreign_pname, title_es)
+        @test occursin("[—/", title_es)
 
         # Restore selection to param 1 for remaining checks
         select_param!(m, 1)
@@ -3360,6 +3369,34 @@ end
         @test !occursin("Chart 2:", full_fk)
         @test !occursin("Chart 2", full_fk)
         @test length(dashboard_pane_charts(m_ft; k = effective_dashboard_max_panes(m_ft))) == 1
+
+        # PD-V12 / KD-PD-14: chartless selected param → empty shell; no foreign STATS/Viols
+        # and title labels the selected (GhostPD) param — not leftover Thickness series.
+        foreign_param = m_ft.params[1].name  # e.g. Thickness — still listed in PARAMS catalog
+        push!(m_ft.params, ParamEntry(id = "ghost_pd_view", name = "GhostPD", tool_id = "Film-PTPECVD01"))
+        select_param!(m_ft, length(m_ft.params))
+        @test isempty(dashboard_display_set(m_ft))
+        @test isempty(dashboard_pane_charts(m_ft; k = 3))
+        m_ft.visual_prefs["secondary_canvas"] = false
+        tb_es = T.TestBackend(100, 28); T.reset!(tb_es.buf)
+        T.view(m_ft, T.Frame(tb_es.buf, T.Rect(1, 1, 100, 28), [], []))
+        rows_es = [T.row_text(tb_es, i) for i in 1:28]
+        full_es = join([string(r) for r in rows_es if r !== nothing], "\n")
+        # Empty hint present; no multi-pane neighbor
+        @test occursin("no chart for param", full_es)
+        @test !occursin("Chart 2:", full_es)
+        # Side must not paint foreign Viols / cl / n= metrics from leftover active (KD-PD-14)
+        @test !occursin("Viols:", full_es)
+        @test !occursin("cl=", full_es)
+        @test !occursin(r"n=\d+", full_es)
+        # Dim STATS empty-scope message + selected GhostPD in PARAMS / title
+        @test occursin("GhostPD", full_es)
+        title_es = _primary_dashboard_title(m_ft; empty_hint = " — no chart for param — press + to add")
+        @test occursin("GhostPD", title_es)
+        @test occursin("no chart for param", title_es)
+        @test occursin("[—/", title_es)  # no foreign active index as primary
+        # Title body must not use leftover foreign param as primary identity
+        @test !occursin(foreign_param, title_es)
 
         # Extra charts + panes=1 still single pane in view (no auto-bump in PR3)
         m_s = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
