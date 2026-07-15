@@ -1806,6 +1806,91 @@ include("../src/spc_workbench_io.jl")
         @test isempty(m.tools)
     end
 
+    @testset "ParamEntry + :fake_tool series seed (PR1a)" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+
+        # Empty catalog defaults (no ensure yet)
+        m0 = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        @test m0.params isa Vector{ParamEntry}
+        @test isempty(m0.params)
+        @test m0.selected_param == 0
+        @test m0.dashboard_max_panes == 3  # field default matches triple compat
+        @test m0.side_focus === :none
+        @test m0.add_chart_open === false
+        @test m0.add_chart_mode === :param
+        @test m0.add_chart_selected == 1
+        @test m0.add_chart_analysis === I_MR
+        @test m0.seed_demos === :none
+
+        # Catalog helpers (synthetic — not fixture CSV)
+        tools = default_fake_tools()
+        @test length(tools) == 1
+        @test tools[1].id == "Film-PTPECVD01"
+        params = default_fake_tool_params()
+        @test length(params) >= 3
+        @test params[1].id == "thk_1_3um"
+        @test params[2].id == "n_oxide"
+        @test params[3].id == "thk_hsq"
+
+        # :fake_tool seed path
+        m_ft = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        @test m_ft.seed_demos === :fake_tool
+        _ensure_charts!(m_ft)
+        @test !isempty(m_ft.tools)
+        @test m_ft.tools[1].id == "Film-PTPECVD01"
+        @test length(m_ft.params) >= 3
+        @test length(m_ft.charts) == 1
+        @test m_ft.selected_param == 1
+        @test m_ft.dashboard_max_panes == 1
+        ch = m_ft.charts[1]
+        @test ch.param == m_ft.params[1].id          # identity lock: id, not name
+        @test ch.param == "thk_1_3um"
+        @test ch.name == m_ft.params[1].name
+        @test ch.units == m_ft.params[1].units
+        @test ch.tools == ["Film-PTPECVD01"]
+        @test ch.usl == m_ft.params[1].usl
+        @test ch.target == m_ft.params[1].target
+        @test ch.lsl == m_ft.params[1].lsl
+        @test length(ch.data.values) > 0
+        @test m_ft.active == 1
+        # legacy mirror sync from active chart
+        @test length(m_ft.data.values) == length(ch.data.values)
+        @test m_ft.usl == ch.usl
+
+        # :triple still 3 charts + panes == 3 after ensure
+        m_t = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m_t)
+        @test length(m_t.charts) == 3
+        @test m_t.dashboard_max_panes == 3
+        @test m_t.selected_param == 0
+        @test isempty(m_t.params)
+        @test isempty(m_t.tools)
+
+        # :single / :none also set panes = 1 on bootstrap
+        m_s = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m_s)
+        @test length(m_s.charts) == 1
+        @test m_s.dashboard_max_panes == 1
+
+        m_n = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        _ensure_charts!(m_n)
+        @test length(m_n.charts) == 1
+        @test m_n.dashboard_max_panes == 1
+        @test m_n.selected_param == 0
+
+        # Re-ensure with non-empty charts must NOT reset dashboard_max_panes
+        m_ft.dashboard_max_panes = 2
+        _ensure_charts!(m_ft)
+        @test m_ft.dashboard_max_panes == 2
+        @test length(m_ft.charts) == 1
+
+        # seed_demos model default remains :triple
+        m_def = SPCWorkbenchModel(data = d, paused = true)
+        @test m_def.seed_demos === :triple
+        @test m_def.dashboard_max_panes == 3
+        @test m_def.selected_param == 0
+    end
+
     @testset "dashboard_pane_charts (active neighborhood, no charts[2]/[3] lock)" begin
         d = generate_spc_workbench_data(12; seed = 11)
         m = SPCWorkbenchModel(data = d, paused = true)

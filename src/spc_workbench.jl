@@ -2013,6 +2013,22 @@ end
     description::String = ""
 end
 
+"""Parameter catalog entry (tool parameter vocabulary). `id` is the stable wire key
+stored in `ChartSpec.param` (never the display `name`)."""
+@kwdef struct ParamEntry
+    id::String
+    name::String
+    units::String = ""
+    tool_id::String = ""
+    value_col::String = "Value"
+    default_chart_type::ChartType = I_MR
+    μ::Float64 = 0.0
+    σ::Float64 = 1.0
+    usl::Union{Float64,Nothing} = nothing
+    target::Union{Float64,Nothing} = nothing
+    lsl::Union{Float64,Nothing} = nothing
+end
+
 # ── Model (slice 2+) ────────────────────────────────────────────────────
 
 """WECO chip row geometry for hit-testing (PR3) and hover paint (PR2)."""
@@ -2113,8 +2129,19 @@ end
     # Prefill only for export prompts — never silent write to default path
     last_export_path::String = ""
     # Seed policy when charts empty — NEVER flip default from :triple
-    seed_demos::Symbol = :triple     # :triple | :single | :none
+    seed_demos::Symbol = :triple     # :triple | :single | :none | :fake_tool
     tools::Vector{ToolEntry} = ToolEntry[]
+    # Parameter catalog (dashboard single-chart design / PR1a); empty ⇒ selected_param = 0
+    params::Vector{ParamEntry} = ParamEntry[]
+    selected_param::Int = 0          # 1-based index; 0 = none / empty catalog
+    # Pane budget: field default 3 for :triple compat; seed policy overwrites on ensure bootstrap
+    dashboard_max_panes::Int = 3
+    side_focus::Symbol = :none       # :none | :params (forward compat; keys in later PR)
+    # Add-chart wizard modal (session flags; wiring in later PR)
+    add_chart_open::Bool = false
+    add_chart_mode::Symbol = :param  # :param | :analysis
+    add_chart_selected::Int = 1
+    add_chart_analysis::ChartType = I_MR
     # Tools registry UI (P2-PR4) — master list of ToolEntry; chart assign stays builder ch.tools
     tools_selected::Int = 1
     tools_scroll::Int = 0
@@ -2394,17 +2421,86 @@ function _boot_viewport(d::WorkbenchData; usl=nothing, lsl=nothing, show_lines=D
 end
 
 function _normalize_seed_demos(seed::Symbol)::Symbol
-    if seed === :triple || seed === :single || seed === :none
+    if seed === :triple || seed === :single || seed === :none || seed === :fake_tool
         return seed
     end
     @warn "unknown seed_demos=$(seed); treating as :triple"
     return :triple
 end
 
+"""Seed-coupled pane budget: `:triple` → 3, all other seeds → 1 (KD-DC-2)."""
+function _seed_dashboard_max_panes!(m::SPCWorkbenchModel, seed::Symbol)
+    m.dashboard_max_panes = seed === :triple ? 3 : 1
+    return nothing
+end
+
+"""Synthetic fake-tool registry (Film-PTPECVD01). Not loaded from fixture CSV."""
+function default_fake_tools()::Vector{ToolEntry}
+    return [
+        ToolEntry(id = "Film-PTPECVD01", description = "PECVD oxide film tool (demo)"),
+    ]
+end
+
+"""Synthetic parameter catalog for the demo PECVD tool (stable `id` keys)."""
+function default_fake_tool_params()::Vector{ParamEntry}
+    tid = "Film-PTPECVD01"
+    return [
+        ParamEntry(
+            id = "thk_1_3um", name = "Thickness 1.3µm", units = "nm", tool_id = tid,
+            μ = 1300.0, σ = 4.5, usl = 1320.0, target = 1300.0, lsl = 1280.0,
+        ),
+        ParamEntry(
+            id = "n_oxide", name = "Refractive Index", units = "", tool_id = tid,
+            μ = 1.46, σ = 0.008, usl = 1.48, target = 1.46, lsl = 1.44,
+        ),
+        ParamEntry(
+            id = "thk_hsq", name = "HSQ Thickness", units = "nm", tool_id = tid,
+            μ = 600.0, σ = 12.0, usl = 640.0, target = 600.0, lsl = 560.0,
+        ),
+    ]
+end
+
+"""
+Bootstrap tools + params + one series chart for `seed_demos = :fake_tool` (PR1a).
+
+Series path only — SharedTable long fill lands in PR1b. `ch.param` = ParamEntry.id.
+"""
+function _seed_fake_tool_charts!(m::SPCWorkbenchModel)
+    m.tools = default_fake_tools()
+    m.params = default_fake_tool_params()
+    m.selected_param = 1
+    p = m.params[1]
+    n = max(8, length(m.data.values))
+    d = generate_spc_workbench_data(n; seed = 42, μ = p.μ, σ = p.σ)
+    ch = ChartSpec(
+        name = p.name,
+        chart_type = p.default_chart_type,
+        data = d,
+        viewport = _boot_viewport(d; usl = p.usl, lsl = p.lsl, show_lines = m.show_chart_lines),
+        usl = p.usl,
+        target = p.target,
+        lsl = p.lsl,
+        enabled_rules = copy(m.enabled_rules),
+        param = p.id,  # identity lock: ParamEntry.id, not display name
+        units = p.units,
+        tools = isempty(p.tool_id) ? String[] : String[p.tool_id],
+    )
+    push!(m.charts, ch)
+    m.active = 1
+    m.library_selected = 1
+    m.last_event = "fake tool seed loaded"
+    return nothing
+end
+
 function _ensure_charts!(m::SPCWorkbenchModel)
     if isempty(m.charts)
         seed = _normalize_seed_demos(m.seed_demos)
-        if seed === :none
+        # Seed-coupled pane budget only when bootstrapping empty charts (do not
+        # reset if charts already non-empty — user/load may have changed panes).
+        _seed_dashboard_max_panes!(m, seed)
+        if seed === :fake_tool
+            _seed_fake_tool_charts!(m)
+        elseif seed === :none
             push!(m.charts, ChartSpec(
                 name = "Primary",
                 data = empty_workbench_data(),
@@ -4018,8 +4114,9 @@ function dashboard_pane_charts(m::SPCWorkbenchModel; k::Int = 3)::Vector{ChartSp
     return vis[i:j]
 end
 
-export ToolEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
+export ToolEntry, ParamEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
 export visible_charts, dashboard_pane_charts
+export default_fake_tools, default_fake_tool_params
 # set_filter_tool! / set_filter_type! / set_filter_owner! / clear_filters! stay package-private
 
 # Builder form field order (P2-PR5: col maps + subgroup + owner)
