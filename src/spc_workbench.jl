@@ -6329,7 +6329,7 @@ function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
             (:binds, row2),
         ]
     end
-    return [
+    entries = Any[
         (:section, "PAGES"),
         (:binds, [("m", "library"), ("x", "tools"), ("d", "table"), ("b", "builder")]),
         (:binds, [("e", "saved cfg"), ("f", "filter"), ("F", "clear"), ("h", "help")]),
@@ -6341,12 +6341,16 @@ function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
         (:binds, [("u", "USL"), ("t", "Target"), ("l", "LSL"), ("s", "clear")]),
         (:binds, [("1-8", "WECO"), ("w", "explain"), ("c", "config"), ("v", "lines")]),
         (:binds, [("o", "visual")]),
-        (:section, "PARAMS / CHARTS"),
-        (:binds, [(";", "params focus"), ("j/J", "next/prev"), ("↑↓", "select"), ("1-9", "jump")]),
-        (:section, "MOUSE"),
-        (:note, "hover · click select · drag pan · dblclick viol = explain"),
-        (:note, "WECO chip = explain · dash w=explain · lib w=save · config w=Save As"),
     ]
+    # Gate PARAMS binds on non-empty catalog (same policy as compact)
+    if !isempty(m.params)
+        push!(entries, (:section, "PARAMS / CHARTS"))
+        push!(entries, (:binds, [(";", "params focus"), ("j/J", "next/prev"), ("↑↓", "select"), ("1-9", "jump")]))
+    end
+    push!(entries, (:section, "MOUSE"))
+    push!(entries, (:note, "hover · click select · drag pan · dblclick viol = explain"))
+    push!(entries, (:note, "WECO chip = explain · dash w=explain · lib w=save · config w=Save As"))
+    return entries
 end
 
 """Per-mode Keys menu entries (library / tools / table / builder / help / keymap)."""
@@ -7267,10 +7271,12 @@ function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
     y = _side_sec_summary!(buf, x, y, bot, maxw, m, act_ctx, n_primary;
                            compact_h11=compact_h11, reserve_tail=reserve_tail,
                            hover_active=hover_active)
+    # PARAMS reserves WECO floor + upcoming HOVER so hover cannot steal Viols: (KD-DC-18)
     y = _side_sec_params!(buf, x, y, bot, maxw, m;
-                          reserve_tail=reserve_tail, compact_h11=compact_h11)
+                          reserve_tail=reserve_tail, compact_h11=compact_h11,
+                          hover_active=hover_active)
     y = _side_sec_hover!(buf, x, y, bot, maxw, m, act_ctx, act_ch, n_primary;
-                         compact_h11=compact_h11)
+                         compact_h11=compact_h11, reserve_tail=reserve_tail)
     y = _side_sec_lines!(buf, x, y, bot, maxw, m, act_ctx;
                          reserve_tail=reserve_tail, drop_sigma12=drop_sigma12,
                          compact_h11=compact_h11)
@@ -7296,22 +7302,28 @@ end
 """
 ▸ PARAMS — tool chip + catalog rows with ▶ on selected (KD-DC-12 / KD-DC-18).
 
-Honors `reserve_tail` (never paints into WECO floor). Drop order under pressure:
+Honors `reserve_tail` (WECO floor) **and** upcoming HOVER rows so hover cannot
+steal bubbles/`Viols:`. Drop order under pressure:
 D0a non-selected rows (bottom-up) → D0b tool chip → D0c header → D0d selected row.
+`compact_h11`: prefer headerless (same spirit as STATS/HOVER KD-SS-17).
 Empty catalog ⇒ omit section (no paint).
 """
 function _side_sec_params!(buf, x::Int, y::Int, bot::Int, maxw::Int,
                            m::SPCWorkbenchModel;
-                           reserve_tail::Int = 2, compact_h11::Bool = false)::Int
+                           reserve_tail::Int = 2, compact_h11::Bool = false,
+                           hover_active::Bool = false)::Int
     isempty(m.params) && return y
-    effective_bot = bot - reserve_tail
+    # Leave room for HOVER after us (body only under compact; header+body when tall)
+    hover_reserve = hover_active ? (compact_h11 ? 1 : 2) : 0
+    effective_bot = bot - reserve_tail - hover_reserve
     rem = effective_bot - y + 1
     rem < 1 && return y
 
     n = length(m.params)
     sel = (1 <= m.selected_param <= n) ? m.selected_param : 0
     show_idx = collect(1:n)
-    show_hdr = true
+    # Prefer headerless under compact profile (uses compact_h11; still drop under pressure)
+    show_hdr = !compact_h11
     show_chip = !isempty(_params_tool_id(m))
 
     cost() = (show_hdr ? 1 : 0) + (show_chip ? 1 : 0) + length(show_idx)
@@ -7448,19 +7460,23 @@ function _side_sec_summary!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     return y
 end
 
-"""▸ HOVER — only when hovered; headerless if rem < 2 or compact_h11 (KD-SS-17)."""
+"""▸ HOVER — only when hovered; headerless if rem < 2 or compact_h11 (KD-SS-17).
+
+Honors `reserve_tail` so hover never paints into the WECO floor (KD-DC-18 with PARAMS).
+"""
 function _side_sec_hover!(buf, x::Int, y::Int, bot::Int, maxw::Int,
                           m::SPCWorkbenchModel, act_ctx, act_ch, n_primary::Int;
-                          compact_h11::Bool = false)::Int
+                          compact_h11::Bool = false, reserve_tail::Int = 0)::Int
     hi = m.hovered
     (hi === nothing || hi < 1 || hi > n_primary) && return y
-    rem = bot - y + 1
+    effective_bot = bot - reserve_tail
+    rem = effective_bot - y + 1
     rem < 1 && return y
     # KD-SS-17 rule 3: headerless HOVER under compact profile
     if !compact_h11 && _side_want_header(rem, 1)
-        y = _side_section_header!(buf, x, y, bot, maxw, "HOVER")
+        y = _side_section_header!(buf, x, y, effective_bot, maxw, "HOVER")
     end
-    if y <= bot
+    if y <= effective_bot
         v = act_ctx.primary_values[hi]
         st = point_status(hi, act_ctx, act_ch)
         stat = st == :oos ? "OOS" : (st == :ooc ? "OOC" : "OK")

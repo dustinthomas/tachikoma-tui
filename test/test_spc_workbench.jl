@@ -4525,6 +4525,27 @@ end
         end
     end
 
+    @testset "side stats PARAMS: H=18/19/20 fake_tool+hover keeps WECO floor (KD-DC-18)" begin
+        # Regression: PARAMS×HOVER must not starve bubbles/Viols on product seed
+        d = generate_spc_workbench_data(12; seed=42)
+        for term_h in (18, 19, 20)
+            m = SPCWorkbenchModel(data=d, paused=true, seed_demos=:fake_tool)
+            _ensure_charts!(m)
+            @test length(m.params) >= 3
+            m.hovered = 1
+            tb = T.TestBackend(80, term_h); T.reset!(tb.buf)
+            T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 80, term_h), [], []))
+            side = _side_full(tb, m)
+            @test occursin("h[", side)  # hover body painted when room
+            found = _side_weco_bubbles(tb, m)
+            @test found !== nothing
+            if found !== nothing
+                @test found.bubbles == "●●●●●○○○"
+            end
+            @test occursin("Viols:", side)
+        end
+    end
+
     @testset "PARAMS keys: ; focus, j/J/↑↓, digits, Esc, p pause, k keymap" begin
         d = generate_spc_workbench_data(12; seed=42)
         m = SPCWorkbenchModel(data=d, paused=true, seed_demos=:fake_tool)
@@ -4567,11 +4588,15 @@ end
         # digit jump when focused
         T.update!(m, T.KeyEvent('3'))
         @test m.selected_param == 3
-        # digit 6 focused: jump if in range else absorb — NOT WECO toggle
+        # Out-of-range focused digit ('6' with 3 params): absorb — NOT WECO toggle
         weco6_before = m.enabled_rules["WECO-6"]
+        sel_before = m.selected_param
+        T.update!(m, T.KeyEvent('6'))
+        @test m.selected_param == sel_before  # not in range → no jump
+        @test m.enabled_rules["WECO-6"] == weco6_before  # absorbed, no WECO toggle
+        # In-range jump still works
         T.update!(m, T.KeyEvent('1'))
         @test m.selected_param == 1
-        @test m.enabled_rules["WECO-6"] == weco6_before  # untouched by focused digits
 
         # p still pauses when focused
         @test m.paused == true
