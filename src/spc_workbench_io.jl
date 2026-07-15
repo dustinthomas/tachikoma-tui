@@ -1137,6 +1137,46 @@ function _dashboard_max_panes_from_chart_count(n::Int)::Int
 end
 
 """
+KD-PD-12: parse optional `dashboard_scope` wire string.
+Returns `Symbol` when valid (`:param_active` / `:compare` / `:legacy_neighbors`);
+`nothing` when missing/null/unknown → caller applies load heuristic.
+"""
+function _dashboard_scope_from_json(v)::Union{Symbol,Nothing}
+    v === nothing && return nothing
+    s = if v isa AbstractString
+        String(v)
+    elseif v isa Symbol
+        String(v)
+    else
+        return nothing  # non-string → treat as unknown → heuristic
+    end
+    s == "param_active" && return :param_active
+    s == "compare" && return :compare
+    s == "legacy_neighbors" && return :legacy_neighbors
+    return nothing
+end
+
+"""
+KD-PD-12: parse optional `compare_param_ids` array.
+`nothing` (missing/null) → empty vector. Bad type / non-string elements → error String.
+Dedup, drop blanks, cap at 3 (pin budget).
+"""
+function _compare_param_ids_from_json(v)::Union{Vector{String},String}
+    v === nothing && return String[]
+    v isa AbstractVector || return "compare_param_ids must be an array"
+    out = String[]
+    for (i, x) in enumerate(v)
+        x isa AbstractString || return "compare_param_ids[$i] must be string"
+        id = strip(String(x))
+        isempty(id) && continue
+        id in out && continue
+        length(out) >= 3 && continue
+        push!(out, id)
+    end
+    return out
+end
+
+"""
 Fully validate + parse session dict into charts/active/session fields.
 Returns (charts, active, session_namedtuple) or error String.
 Does not mutate any model.
@@ -1216,6 +1256,12 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
         _dashboard_max_panes_from_chart_count(length(charts))
     end
 
+    # KD-PD-12: optional dashboard_scope / compare_param_ids (no schema version bump)
+    # scope: valid Symbol | nothing (missing/unknown → load heuristic in _apply_parsed!)
+    dashboard_scope = _dashboard_scope_from_json(get(d, "dashboard_scope", nothing))
+    pins = _compare_param_ids_from_json(get(d, "compare_param_ids", nothing))
+    pins isa String && return pins
+
     return (
         charts = charts,
         active = active,
@@ -1228,6 +1274,8 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
         paused = paused,
         table = table,
         dashboard_max_panes = dashboard_max_panes,
+        dashboard_scope = dashboard_scope,
+        compare_param_ids = pins,
     )
 end
 
@@ -1280,6 +1328,21 @@ function _apply_parsed!(m::SPCWorkbenchModel, parsed::NamedTuple)
     m.paused = parsed.paused
     m.table = parsed.table  # mirror HTML apply; do NOT auto-rematerialize (KD-P2-18)
     m.dashboard_max_panes = parsed.dashboard_max_panes  # KD-DC-6 (already clamped 1..3)
+    # KD-PD-12: compare pins always replace (missing key → empty); orphan ids ok at display
+    m.compare_param_ids = copy(parsed.compare_param_ids)
+    # KD-PD-12: honor valid scope; missing/unknown → load heuristic (params non-empty → param_active)
+    # Note: param catalog is not in session JSON — heuristic uses m.params already on the model
+    # (preserved for load_workbench!; empty for workbench_from_dict fresh construct).
+    if parsed.dashboard_scope !== nothing
+        m.dashboard_scope = parsed.dashboard_scope
+    else
+        m.dashboard_scope = !isempty(m.params) ? :param_active : :legacy_neighbors
+        # One-shot Message when heuristic chooses param-focused and file looks multi-pane
+        multi_intent = length(parsed.charts) >= 2 || parsed.dashboard_max_panes >= 2
+        if m.dashboard_scope === :param_active && multi_intent
+            m.last_event = "loaded · scope: param (use = Compare for multi-param)"
+        end
+    end
     m.library_selected = clamp(parsed.active, 1, length(parsed.charts))
     _clear_load_ephemerals!(m)
     # After clear, clamp tools_selected into new registry (empty → stays 1)
@@ -1298,6 +1361,7 @@ end
 Serialize workbench session to JSON-ready Dict (schema v1).
 Always writes per-chart `live_enabled` and `col_lot`. Never writes admins/passcodes.
 Always writes clamped `dashboard_max_panes` (1..3 via `effective_dashboard_max_panes`).
+Always writes `dashboard_scope` (wire string) and `compare_param_ids` (KD-PD-12).
 
 Optional `table` (SharedTable as `{columns, rows}`) is written only when
 non-empty (`columns` or `rows` non-empty); omitted when empty to keep fixtures
@@ -1309,6 +1373,13 @@ function workbench_to_dict(m::SPCWorkbenchModel)::Dict
     _sync_active_back!(m)
     charts = [_chart_to_dict(ch) for ch in m.charts]
     tools = [Dict{String,Any}("id" => t.id, "description" => t.description) for t in m.tools]
+    # Normalize scope wire string (unknown → legacy_neighbors for stable JSON)
+    scope_sym = m.dashboard_scope
+    scope_wire = if scope_sym === :param_active || scope_sym === :compare || scope_sym === :legacy_neighbors
+        String(scope_sym)
+    else
+        "legacy_neighbors"
+    end
     d = Dict{String,Any}(
         "version" => _WB_SCHEMA_VERSION,
         "active" => clamp(m.active, 1, max(1, length(m.charts))),
@@ -1320,6 +1391,8 @@ function workbench_to_dict(m::SPCWorkbenchModel)::Dict
         "visual_prefs" => Dict{String,Any}(k => v for (k, v) in m.visual_prefs),
         "paused" => m.paused,
         "dashboard_max_panes" => effective_dashboard_max_panes(m),
+        "dashboard_scope" => scope_wire,
+        "compare_param_ids" => String[String(p) for p in m.compare_param_ids if !isempty(strip(String(p)))],
     )
     # Omit empty presets (keep fixtures small; same policy as table).
     # Session embeds optional host `path` so list identity survives restart (KD-SE-4).
@@ -1426,7 +1499,10 @@ function load_workbench(path::AbstractString)::Union{SPCWorkbenchModel,String}
     m = workbench_from_dict(d)
     m isa String && return _normalize_load_err(m)
     m.last_workbench_path = String(path)
-    m.last_event = "loaded $(basename(String(path)))"
+    # Keep KD-PD-12 one-shot scope heuristic Message when set by _apply_parsed!
+    if !startswith(m.last_event, "loaded · scope:")
+        m.last_event = "loaded $(basename(String(path)))"
+    end
     return m
 end
 
@@ -1435,7 +1511,7 @@ end
 
 In-session reload into existing model (library W). Fail closed on chart mutate.
 Sets `m.last_event` to `"loaded …"` or `"load err: …"`; clears `prompt_kind`
-on err (keeps `prompt_buf`).
+on err (keeps `prompt_buf`). Preserves KD-PD-12 scope heuristic Message when set.
 """
 function load_workbench!(m::SPCWorkbenchModel, path::AbstractString)::Union{Nothing,String}
     local d
@@ -1455,7 +1531,10 @@ function load_workbench!(m::SPCWorkbenchModel, path::AbstractString)::Union{Noth
     catch
     end
     m.last_workbench_path = String(path)
-    m.last_event = "loaded $(basename(String(path)))"
+    # Keep KD-PD-12 one-shot scope heuristic Message when set by _apply_parsed!
+    if !startswith(m.last_event, "loaded · scope:")
+        m.last_event = "loaded $(basename(String(path)))"
+    end
     return nothing
 end
 

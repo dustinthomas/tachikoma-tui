@@ -8571,6 +8571,7 @@ end # module TestSPCWorkbenchLibraryIO
 module TestSPCWorkbenchJSON
 using Test
 using Random
+using JSON
 using TachikomaTUI
 # private bootstrap used by workbench itself (not exported)
 const _ensure_charts! = TachikomaTUI._ensure_charts!
@@ -8755,6 +8756,218 @@ const _sync_active_back! = TachikomaTUI._sync_active_back!
             ))
             @test bad_bool isa String
             @test occursin("dashboard_max_panes", bad_bool)
+        end
+    end
+
+    @testset "PR5 KD-PD-12: dashboard_scope / compare_param_ids JSON persist" begin
+        # Always written on serialize
+        m = _make_session()
+        m.dashboard_scope = :param_active
+        m.compare_param_ids = String["p_a", "p_b"]
+        d = workbench_to_dict(m)
+        @test haskey(d, "dashboard_scope")
+        @test haskey(d, "compare_param_ids")
+        @test d["dashboard_scope"] == "param_active"
+        @test d["compare_param_ids"] == ["p_a", "p_b"]
+
+        # All three wire strings serialize
+        for (sym, wire) in ((:legacy_neighbors, "legacy_neighbors"),
+                            (:param_active, "param_active"),
+                            (:compare, "compare"))
+            m.dashboard_scope = sym
+            @test workbench_to_dict(m)["dashboard_scope"] == wire
+        end
+
+        # Unknown runtime scope → stable wire "legacy_neighbors"
+        m.dashboard_scope = :bogus_scope
+        @test workbench_to_dict(m)["dashboard_scope"] == "legacy_neighbors"
+        m.dashboard_scope = :param_active
+
+        # Blank pin ids omitted on write; order preserved
+        m.compare_param_ids = String["x", "  ", "y", ""]
+        @test workbench_to_dict(m)["compare_param_ids"] == ["x", "y"]
+
+        # Tempfile round-trip honors present keys (construct path: empty catalog)
+        m.dashboard_scope = :compare
+        m.compare_param_ids = String["thk_1_3um", "thk_hsq"]
+        path = joinpath(tempdir(), "spc_wb_scope_$(rand(UInt32)).json")
+        try
+            @test save_workbench(m, path) === nothing
+            loaded = load_workbench(path)
+            @test loaded isa SPCWorkbenchModel
+            @test loaded.dashboard_scope === :compare
+            @test loaded.compare_param_ids == ["thk_1_3um", "thk_hsq"]
+        finally
+            isfile(path) && rm(path; force = true)
+        end
+
+        base_charts = Any[
+            Dict{String,Any}(
+                "id" => "CHT-a", "name" => "A", "chart_type" => "I-MR",
+                "values" => [1.0, 2.0, 3.0], "param" => "thk_1_3um",
+            ),
+            Dict{String,Any}(
+                "id" => "CHT-b", "name" => "B", "chart_type" => "I-MR",
+                "values" => [4.0, 5.0, 6.0], "param" => "n_oxide",
+            ),
+            Dict{String,Any}(
+                "id" => "CHT-c", "name" => "C", "chart_type" => "I-MR",
+                "values" => [7.0, 8.0, 9.0], "param" => "thk_hsq",
+            ),
+        ]
+
+        # Present keys honored (no catalog → still honor scope/pins)
+        m_cmp = workbench_from_dict(Dict{String,Any}(
+            "version" => 1, "active" => 1, "charts" => base_charts,
+            "dashboard_scope" => "compare",
+            "compare_param_ids" => ["thk_1_3um", "thk_hsq"],
+        ))
+        @test m_cmp isa SPCWorkbenchModel
+        @test m_cmp.dashboard_scope === :compare
+        @test m_cmp.compare_param_ids == ["thk_1_3um", "thk_hsq"]
+
+        m_pa = workbench_from_dict(Dict{String,Any}(
+            "version" => 1, "active" => 1, "charts" => base_charts,
+            "dashboard_scope" => "param_active",
+            "compare_param_ids" => Any[],
+        ))
+        @test m_pa isa SPCWorkbenchModel
+        @test m_pa.dashboard_scope === :param_active
+        @test isempty(m_pa.compare_param_ids)
+
+        m_leg = workbench_from_dict(Dict{String,Any}(
+            "version" => 1, "active" => 1, "charts" => base_charts,
+            "dashboard_scope" => "legacy_neighbors",
+        ))
+        @test m_leg isa SPCWorkbenchModel
+        @test m_leg.dashboard_scope === :legacy_neighbors
+        @test isempty(m_leg.compare_param_ids)
+
+        # Keys ABSENT + empty catalog (fresh construct) → :legacy_neighbors, empty pins
+        bare = Dict{String,Any}("version" => 1, "active" => 1, "charts" => base_charts)
+        @test !haskey(bare, "dashboard_scope")
+        @test !haskey(bare, "compare_param_ids")
+        m_bare = workbench_from_dict(bare)
+        @test m_bare isa SPCWorkbenchModel
+        @test m_bare.dashboard_scope === :legacy_neighbors
+        @test isempty(m_bare.compare_param_ids)
+        # No multi-pane Message when heuristic stays legacy (empty params)
+        @test !occursin("scope: param", m_bare.last_event)
+
+        # Unknown / null scope → same load heuristic as missing
+        for bad_scope in ("nope", nothing, 42)
+            m_u = workbench_from_dict(Dict{String,Any}(
+                "version" => 1, "active" => 1, "charts" => base_charts,
+                "dashboard_scope" => bad_scope,
+            ))
+            @test m_u isa SPCWorkbenchModel
+            @test m_u.dashboard_scope === :legacy_neighbors  # empty catalog
+        end
+
+        # Pins: dedup, drop blanks, cap 3; orphan ids kept
+        m_pins = workbench_from_dict(Dict{String,Any}(
+            "version" => 1, "active" => 1, "charts" => base_charts,
+            "dashboard_scope" => "compare",
+            "compare_param_ids" => ["a", "  ", "a", "b", "c", "d", ""],
+        ))
+        @test m_pins isa SPCWorkbenchModel
+        @test m_pins.compare_param_ids == ["a", "b", "c"]  # cap 3, dedup, no blanks
+
+        # Bad pin type → fail closed
+        bad_pins = workbench_from_dict(Dict{String,Any}(
+            "version" => 1, "active" => 1, "charts" => base_charts,
+            "compare_param_ids" => "not-array",
+        ))
+        @test bad_pins isa String
+        @test occursin("compare_param_ids", bad_pins)
+        bad_el = workbench_from_dict(Dict{String,Any}(
+            "version" => 1, "active" => 1, "charts" => base_charts,
+            "compare_param_ids" => ["ok", 99],
+        ))
+        @test bad_el isa String
+        @test occursin("compare_param_ids", bad_el)
+
+        # load_workbench! preserves catalog → missing keys heuristic :param_active + Message
+        m_ft = SPCWorkbenchModel(
+            data = generate_spc_workbench_data(12; seed = 7),
+            paused = true,
+            seed_demos = :fake_tool,
+        )
+        _ensure_charts!(m_ft)
+        @test !isempty(m_ft.params)
+        @test m_ft.dashboard_scope === :param_active
+        # Build a multi-chart bare session (no scope/pins keys)
+        bare_path = joinpath(tempdir(), "spc_wb_scope_heur_$(rand(UInt32)).json")
+        try
+            open(bare_path, "w") do io
+                JSON.print(io, bare)
+            end
+            # Stale pins must be replaced (missing key → empty)
+            m_ft.compare_param_ids = String["stale_pin"]
+            m_ft.dashboard_scope = :legacy_neighbors
+            err = load_workbench!(m_ft, bare_path)
+            @test err === nothing
+            @test !isempty(m_ft.params)  # catalog preserved
+            @test m_ft.dashboard_scope === :param_active
+            @test isempty(m_ft.compare_param_ids)
+            # One-shot Message: multi-chart/multi-pane neighbor intent under param heuristic
+            @test occursin("loaded · scope: param", m_ft.last_event)
+            @test occursin("Compare", m_ft.last_event)
+
+            # Present keys still honored with catalog present (no Message override)
+            d_hon = Dict{String,Any}(
+                "version" => 1, "active" => 1, "charts" => base_charts,
+                "dashboard_scope" => "compare",
+                "compare_param_ids" => [m_ft.params[1].id, m_ft.params[3].id],
+            )
+            hon_path = joinpath(tempdir(), "spc_wb_scope_hon_$(rand(UInt32)).json")
+            try
+                open(hon_path, "w") do io
+                    JSON.print(io, d_hon)
+                end
+                m_ft.last_event = ""
+                @test load_workbench!(m_ft, hon_path) === nothing
+                @test m_ft.dashboard_scope === :compare
+                @test m_ft.compare_param_ids == [m_ft.params[1].id, m_ft.params[3].id]
+                @test startswith(m_ft.last_event, "loaded ")
+                @test !occursin("scope: param", m_ft.last_event)
+            finally
+                isfile(hon_path) && rm(hon_path; force = true)
+            end
+        finally
+            isfile(bare_path) && rm(bare_path; force = true)
+        end
+
+        # Fake-tool full save/load! round-trip keeps scope + pins + display set
+        m_rt = SPCWorkbenchModel(
+            data = generate_spc_workbench_data(12; seed = 11),
+            paused = true,
+            seed_demos = :fake_tool,
+        )
+        _ensure_charts!(m_rt)
+        m_rt.dashboard_scope = :compare
+        m_rt.compare_param_ids = [m_rt.params[1].id, m_rt.params[3].id]
+        m_rt.dashboard_max_panes = 2
+        rt_path = joinpath(tempdir(), "spc_wb_scope_rt_$(rand(UInt32)).json")
+        try
+            @test save_workbench(m_rt, rt_path) === nothing
+            m_dst = SPCWorkbenchModel(
+                data = generate_spc_workbench_data(12; seed = 11),
+                paused = true,
+                seed_demos = :fake_tool,
+            )
+            _ensure_charts!(m_dst)
+            m_dst.dashboard_scope = :param_active
+            m_dst.compare_param_ids = String[]
+            @test load_workbench!(m_dst, rt_path) === nothing
+            @test m_dst.dashboard_scope === :compare
+            @test m_dst.compare_param_ids == [m_rt.params[1].id, m_rt.params[3].id]
+            @test m_dst.dashboard_max_panes == 2
+            ds = dashboard_display_set(m_dst)
+            @test !isempty(ds)
+            @test all(c -> c.param in m_dst.compare_param_ids, ds)
+        finally
+            isfile(rt_path) && rm(rt_path; force = true)
         end
     end
 
