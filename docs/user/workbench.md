@@ -88,6 +88,13 @@ Typical chrome under `:fake_tool`:
 
 Selecting a parameter activates the chart whose `param` id matches that catalog entry. If no chart exists yet, the list still highlights the row and status reports **`no chart for param — press + to add`** (series are never rewritten on select).
 
+**Multi-param side-by-side needs Compare:** pin params with **`,`** (prep while Param mode; max 3), then press **`=`** to enter **Compare** (title chip `[● Compare]`). Pinning alone does not open multi-param panes. Press **`=`** again to return to param-focused (`[● Param]`); pins stay sticky. **Hazard:** Shift+`,` is chart-cycle `<` — use unshifted comma to pin.
+
+| Key | Action |
+|-----|--------|
+| **`=`** | Toggle **Param** ↔ **Compare** scope (catalog non-empty) |
+| **`,`** | Pin / unpin the selected parameter for Compare (max 3) |
+
 While **unfocused**, `1`…`8` still toggle WECO rules on the active chart as before.
 
 ### Add Chart (`+` / `A`)
@@ -356,8 +363,8 @@ Suggested keys:
 
 1. **`;`** — focus PARAMS · **`j`/`J`** or **`↑`/`↓`** — move selection  
 2. Select a param without a chart → status suggests **`+`**  
-3. **`+`** → Param mode → pick another parameter → Enter → second pane (budget auto-bumps)  
-4. **`+`** → Tab to **Analysis** → pick X̄-R / X̄-S / I-MR → Enter  
+3. **`,`** pin a second param · **`=`** enter **Compare** for side-by-side (not Add Chart alone)  
+4. **`+`** → Tab to **Analysis** → pick X̄-R / X̄-S / I-MR → Enter (same-param stack)  
 5. **`p`** still pauses; **`k`** still opens the keymap
 
 ---

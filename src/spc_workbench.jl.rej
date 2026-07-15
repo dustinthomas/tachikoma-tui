@@ -1,0 +1,108 @@
+--- src/spc_workbench.jl
++++ src/spc_workbench.jl
+@@ -7554,7 +7554,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
+         ch2 = panes[2]
+         n2_raw = length(ch2.data.values)
+         if n2_raw > 0 && second_plot_rect.width > 4 && second_plot_rect.height > 3
+-            blk2 = Block(title = "Chart 2: $(ch2.name) (read-only view)", border_style = tstyle(:border), title_style = tstyle(:text_dim))
++            blk2 = Block(title = _extra_pane_title(m, ch2, 2), border_style = tstyle(:border), title_style = tstyle(:text_dim))
+             inn2 = render(blk2, second_plot_rect, buf)
+             cw2, ch2h = inn2.width, inn2.height
+             if cw2 > 0 && ch2h > 0
+@@ -8082,6 +8090,8 @@ end
+ Primary plot Block title: `Dashboard: TOOL · Param [a/n]` (no mouse chrome).
+ 
+ Tool name first, then parameter — eye-catching via separate `title_style` on the Block.
++Under `:compare` the mid segment is honest `Compare (n)` (KD-PD-9). Mode chips
++`[● Param]` / `[● Compare]` land in PR3 with width budget.
+ """
+ function _primary_dashboard_title(m::SPCWorkbenchModel; empty_hint::AbstractString = "")::String
+     tid, pname = _chart_tool_param_labels(m)
+@@ -8094,6 +8104,13 @@ function _primary_dashboard_title(m::SPCWorkbenchModel; empty_hint::AbstractStri
+     else
+         string(isempty(m.charts) ? 1 : clamp(m.active, 1, nch))
+     end
++    # Honest compare mid-label when display is non-empty (or empty-shell uses Compare)
++    if m.dashboard_scope === :compare && !empty_shell
++        n_pins = length(_effective_compare_pins(m))
++        pname = "Compare ($n_pins)"
++    elseif m.dashboard_scope === :compare && empty_shell && isempty(pname)
++        pname = "Compare"
++    end
+     body = if !isempty(tid) && !isempty(pname)
+         "$(tid) · $(pname)"
+     elseif !isempty(pname)
+@@ -8244,30 +8283,64 @@ function _side_sec_params!(buf, x::Int, y::Int, bot::Int, maxw::Int,
+         p = m.params[i]
+         is_sel = (i == sel)
+         mark = is_sel ? "▶" : " "
+-        units = isempty(p.units) ? "—" : p.units
+-        # "▶ 1 Name  units" — truncate name to fit
+-        prefix = string(mark, " ", i, " ")
+-        suffix = string("  ", units)
+-        name_budget = max(1, maxw - length(prefix) - length(suffix))
+-        name_s = _side_trunc(p.name, name_budget)
+-        # Colorized pieces: index accent, name success/text, units dim
++        # ★ from explicit pin list (compare_param_ids), not effective-pins fallback
++        pinned = any(pid -> pid == p.id, m.compare_param_ids)
++        line = _format_params_row(p, i, mark; maxw = maxw, pinned = pinned)
+         if is_sel
+-            line = _side_trunc(string(prefix, name_s, suffix), maxw)
+             set_string!(buf, x, y, line, tstyle(:success, bold = true))
++        elseif pinned && m.dashboard_scope === :compare
++            # Bold pin rows in Compare chrome
++            set_string!(buf, x, y, line, tstyle(:warning, bold = true))
++        elseif pinned
++            # Dim star while preparing pins outside Compare
++            set_string!(buf, x, y, line, tstyle(:text_dim))
+         else
++            # Colorized pieces: index accent, name text, units dim
+             idx_s = string(i, " ")
+             set_string!(buf, x, y, string(mark, " "), tstyle(:text_dim))
+             cx = x + 2
+             set_string!(buf, cx, y, idx_s, tstyle(:warning, bold = true))
+             cx += length(idx_s)
+             room = max(1, maxw - (cx - x))
+-            set_string!(buf, cx, y, _side_trunc(string(name_s, suffix), room), tstyle(:text))
++            rest = _format_params_row_rest(p; maxw = room, pinned = false)
++            set_string!(buf, cx, y, rest, tstyle(:text))
+         end
+         y += 1
+     end
+     return y
+ end
+ 
++"""
++Format one PARAMS catalog row with pin/truncation policy (KD-PD-9).
++
++Priority under maxw: (1) drop units (2) truncate name (3) keep mark+index
++and trailing `★` when pinned (never drop ★ before name is ≤1 glyph).
++"""
++function _format_params_row(p::ParamEntry, idx::Int, mark::AbstractString;
++                            maxw::Int, pinned::Bool)::String
++    prefix = string(mark, " ", idx, " ")
++    rest = _format_params_row_rest(p; maxw = max(1, maxw - length(prefix)), pinned = pinned)
++    return _side_trunc(string(prefix, rest), maxw)
++end
++
++function _format_params_row_rest(p::ParamEntry; maxw::Int, pinned::Bool)::String
++    maxw <= 0 && return ""
++    star_sfx = pinned ? " ★" : ""
++    star_w = length(star_sfx)
++    # Reserve star width first so pin mark survives truncation
++    body_w = max(1, maxw - star_w)
++    units = isempty(p.units) ? "—" : p.units
++    usuf = string("  ", units)
++    # (1) drop units under pressure — keep when ≥1 name glyph still fits
++    if length(usuf) + 1 <= body_w
++        name_s = _side_trunc(p.name, max(1, body_w - length(usuf)))
++        return _side_trunc(string(name_s, usuf, star_sfx), maxw)
++    end
++    # (2) name only + (3) trailing ★
++    name_s = _side_trunc(p.name, body_w)
++    return _side_trunc(string(name_s, star_sfx), maxw)
++end
++
+ """▸ STATS — n/limits, cl/σ, Cpk·band, optional T= (KD-SS-11 / D14)."""
+ function _side_sec_summary!(buf, x::Int, y::Int, bot::Int, maxw::Int,
+                             m::SPCWorkbenchModel, act_ctx, n_primary::Int;
