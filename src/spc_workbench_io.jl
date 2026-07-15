@@ -1196,6 +1196,20 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
     table = _table_from_json(get(d, "table", nothing))
     table isa String && return table
 
+    # KD-DC-6: dashboard_max_panes optional; present → clamp 1..3; absent → chart-count heuristic
+    dashboard_max_panes = if haskey(d, "dashboard_max_panes") && d["dashboard_max_panes"] !== nothing
+        raw_panes = d["dashboard_max_panes"]
+        panes_i = try
+            Int(raw_panes)
+        catch
+            return "dashboard_max_panes must be integer"
+        end
+        clamp(panes_i, 1, 3)
+    else
+        nch = length(charts)
+        nch >= 2 ? min(3, nch) : 1
+    end
+
     return (
         charts = charts,
         active = active,
@@ -1207,6 +1221,7 @@ function _parse_workbench_dict(d)::Union{NamedTuple,String}
         graph_presets = graph_presets,
         paused = paused,
         table = table,
+        dashboard_max_panes = dashboard_max_panes,
     )
 end
 
@@ -1258,11 +1273,13 @@ function _apply_parsed!(m::SPCWorkbenchModel, parsed::NamedTuple)
     m.graph_presets = parsed.graph_presets
     m.paused = parsed.paused
     m.table = parsed.table  # mirror HTML apply; do NOT auto-rematerialize (KD-P2-18)
+    m.dashboard_max_panes = parsed.dashboard_max_panes  # KD-DC-6 (already clamped 1..3)
     m.library_selected = clamp(parsed.active, 1, length(parsed.charts))
     _clear_load_ephemerals!(m)
     # After clear, clamp tools_selected into new registry (empty → stays 1)
     ntools = length(m.tools)
     m.tools_selected = ntools >= 1 ? clamp(m.tools_selected, 1, ntools) : 1
+    # Charts already non-empty → _ensure_charts! will NOT re-seed dashboard_max_panes
     _ensure_charts!(m)  # sync legacy mirrors from new active
     return nothing
 end
@@ -1295,6 +1312,7 @@ function workbench_to_dict(m::SPCWorkbenchModel)::Dict
         "chart_line_styles" => Dict{String,Any}(k => v for (k, v) in m.chart_line_styles),
         "visual_prefs" => Dict{String,Any}(k => v for (k, v) in m.visual_prefs),
         "paused" => m.paused,
+        "dashboard_max_panes" => effective_dashboard_max_panes(m),
     )
     # Omit empty presets (keep fixtures small; same policy as table).
     # Session embeds optional host `path` so list identity survives restart (KD-SE-4).

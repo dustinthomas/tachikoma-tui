@@ -2078,7 +2078,43 @@ include("../src/spc_workbench_io.jl")
         @test m.selected_param == 0
     end
 
+    @testset "PR3: effective_dashboard_max_panes pure clamp (KD-DC-2)" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        m.dashboard_max_panes = 3
+        @test effective_dashboard_max_panes(m) == 3
+        m.dashboard_max_panes = 1
+        @test effective_dashboard_max_panes(m) == 1
+        m.dashboard_max_panes = 0
+        @test effective_dashboard_max_panes(m) == 1
+        m.dashboard_max_panes = 99
+        @test effective_dashboard_max_panes(m) == 3
+        m.dashboard_max_panes = -5
+        @test effective_dashboard_max_panes(m) == 1
+        m.dashboard_max_panes = 2
+        @test effective_dashboard_max_panes(m) == 2
+
+        # Seed coupling: triple → 3, fake_tool/single/none → 1
+        m_t = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m_t)
+        @test effective_dashboard_max_panes(m_t) == 3
+        @test length(dashboard_pane_charts(m_t; k = effective_dashboard_max_panes(m_t))) == 3
+
+        m_ft = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m_ft)
+        @test effective_dashboard_max_panes(m_ft) == 1
+        @test length(dashboard_pane_charts(m_ft; k = effective_dashboard_max_panes(m_ft))) == 1
+
+        # No auto-bump on blank add_chart! (PR3: wizard auto-bump is PR4 only)
+        m_s = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m_s)
+        @test m_s.dashboard_max_panes == 1
+        add_chart!(m_s; name = "Extra", data = generate_spc_workbench_data(8; seed = 3))
+        @test length(m_s.charts) == 2
+        @test m_s.dashboard_max_panes == 1
+        @test length(dashboard_pane_charts(m_s; k = effective_dashboard_max_panes(m_s))) == 1
     end
+
 
     @testset "dashboard_pane_charts (active neighborhood, no charts[2]/[3] lock)" begin
         d = generate_spc_workbench_data(12; seed = 11)
@@ -2902,6 +2938,50 @@ end
         end
         # Require marker drawing from secondary (not just dashes from any panel)
         @test occursin("◆", full) || occursin("✕", full)  # at least one OOC/OOS marker must come from the forced secondary
+    end
+
+    @testset "PR3: seed-coupled view k — triple Chart 2; fake_tool no Chart 2" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+
+        # Default triple still multi-pane without test fixture hacks
+        m_t = SPCWorkbenchModel(data = d, paused = true, seed_demos = :triple)
+        _ensure_charts!(m_t)
+        @test m_t.dashboard_max_panes == 3
+        @test effective_dashboard_max_panes(m_t) == 3
+        m_t.visual_prefs["secondary_canvas"] = false
+        tb = T.TestBackend(90, 28); T.reset!(tb.buf)
+        T.view(m_t, T.Frame(tb.buf, T.Rect(1, 1, 90, 28), [], []))
+        rows = [T.row_text(tb, i) for i in 1:28]
+        full = join([string(r) for r in rows if r !== nothing], "\n")
+        @test occursin("Chart 2", full)
+        @test occursin("Secondary", full)
+
+        # :fake_tool — single pane; no Chart 2 label in TestBackend
+        m_ft = SPCWorkbenchModel(data = d, paused = true, seed_demos = :fake_tool)
+        _ensure_charts!(m_ft)
+        @test m_ft.dashboard_max_panes == 1
+        @test effective_dashboard_max_panes(m_ft) == 1
+        @test length(m_ft.charts) == 1
+        m_ft.visual_prefs["secondary_canvas"] = false
+        tb2 = T.TestBackend(90, 28); T.reset!(tb2.buf)
+        T.view(m_ft, T.Frame(tb2.buf, T.Rect(1, 1, 90, 28), [], []))
+        rows2 = [T.row_text(tb2, i) for i in 1:28]
+        full2 = join([string(r) for r in rows2 if r !== nothing], "\n")
+        @test !occursin("Chart 2:", full2)
+        @test !occursin("Chart 2", full2)
+        @test occursin("Dashboard", full2)
+
+        # Extra charts + panes=1 still single pane in view (no auto-bump in PR3)
+        m_s = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m_s)
+        add_chart!(m_s; name = "Extra", data = generate_spc_workbench_data(8; seed = 3))
+        @test m_s.dashboard_max_panes == 1
+        m_s.visual_prefs["secondary_canvas"] = false
+        tb3 = T.TestBackend(90, 28); T.reset!(tb3.buf)
+        T.view(m_s, T.Frame(tb3.buf, T.Rect(1, 1, 90, 28), [], []))
+        rows3 = [T.row_text(tb3, i) for i in 1:28]
+        full3 = join([string(r) for r in rows3 if r !== nothing], "\n")
+        @test !occursin("Chart 2:", full3)
     end
 
     @testset "dashboard_pane_charts view: active=2 secondary is next neighbor (not duplicate)" begin
@@ -7492,6 +7572,7 @@ const _sync_active_back! = TachikomaTUI._sync_active_back!
         @test !(:clear_filters! in names(TachikomaTUI))
         @test :visible_charts in names(TachikomaTUI)
         @test :dashboard_pane_charts in names(TachikomaTUI)
+        @test :effective_dashboard_max_panes in names(TachikomaTUI)
 
         path = joinpath(tempdir(), "spc_wb_filt_$(rand(UInt32)).json")
         try
@@ -7516,6 +7597,105 @@ const _sync_active_back! = TachikomaTUI._sync_active_back!
         finally
             isfile(path) && rm(path; force = true)
         end
+    end
+
+    @testset "PR3 KD-DC-6: dashboard_max_panes serialize + load heuristic" begin
+        # Serialize always writes clamped key
+        m = _make_session()
+        m.dashboard_max_panes = 2
+        d = workbench_to_dict(m)
+        @test haskey(d, "dashboard_max_panes")
+        @test d["dashboard_max_panes"] == 2
+        m.dashboard_max_panes = 99
+        d99 = workbench_to_dict(m)
+        @test d99["dashboard_max_panes"] == 3  # effective clamp on write
+        m.dashboard_max_panes = 0
+        d0 = workbench_to_dict(m)
+        @test d0["dashboard_max_panes"] == 1
+
+        # Round-trip honors present key
+        m.dashboard_max_panes = 1
+        path = joinpath(tempdir(), "spc_wb_panes_$(rand(UInt32)).json")
+        try
+            @test save_workbench(m, path) === nothing
+            loaded = load_workbench(path)
+            @test loaded isa SPCWorkbenchModel
+            @test loaded.dashboard_max_panes == 1
+            @test length(loaded.charts) >= 2  # multi chart session still panes=1 when key says so
+        finally
+            isfile(path) && rm(path; force = true)
+        end
+
+        # Key present out-of-range → clamp 1..3 (not error)
+        base_charts = Any[
+            Dict{String,Any}(
+                "id" => "CHT-a", "name" => "A", "chart_type" => "I-MR",
+                "values" => [1.0, 2.0, 3.0],
+            ),
+            Dict{String,Any}(
+                "id" => "CHT-b", "name" => "B", "chart_type" => "I-MR",
+                "values" => [4.0, 5.0, 6.0],
+            ),
+            Dict{String,Any}(
+                "id" => "CHT-c", "name" => "C", "chart_type" => "I-MR",
+                "values" => [7.0, 8.0, 9.0],
+            ),
+        ]
+        m_hi = workbench_from_dict(Dict{String,Any}(
+            "version" => 1, "active" => 1, "charts" => base_charts,
+            "dashboard_max_panes" => 99,
+        ))
+        @test m_hi isa SPCWorkbenchModel
+        @test m_hi.dashboard_max_panes == 3
+        m_lo = workbench_from_dict(Dict{String,Any}(
+            "version" => 1, "active" => 1, "charts" => base_charts,
+            "dashboard_max_panes" => 0,
+        ))
+        @test m_lo isa SPCWorkbenchModel
+        @test m_lo.dashboard_max_panes == 1
+        m_two = workbench_from_dict(Dict{String,Any}(
+            "version" => 1, "active" => 1, "charts" => base_charts,
+            "dashboard_max_panes" => 2,
+        ))
+        @test m_two isa SPCWorkbenchModel
+        @test m_two.dashboard_max_panes == 2
+
+        # Key ABSENT + length(charts) ≥ 2 → min(3, length)
+        bare_multi = Dict{String,Any}(
+            "version" => 1, "active" => 1, "charts" => base_charts,
+        )
+        @test !haskey(bare_multi, "dashboard_max_panes")
+        m_multi = workbench_from_dict(bare_multi)
+        @test m_multi isa SPCWorkbenchModel
+        @test length(m_multi.charts) == 3
+        @test m_multi.dashboard_max_panes == 3  # min(3, 3)
+
+        bare_two = Dict{String,Any}(
+            "version" => 1, "active" => 1,
+            "charts" => base_charts[1:2],
+        )
+        m_bt = workbench_from_dict(bare_two)
+        @test m_bt isa SPCWorkbenchModel
+        @test length(m_bt.charts) == 2
+        @test m_bt.dashboard_max_panes == 2  # min(3, 2)
+
+        # Key ABSENT + ≤1 chart → 1
+        bare_one = Dict{String,Any}(
+            "version" => 1, "active" => 1,
+            "charts" => Any[base_charts[1]],
+        )
+        m_one = workbench_from_dict(bare_one)
+        @test m_one isa SPCWorkbenchModel
+        @test length(m_one.charts) == 1
+        @test m_one.dashboard_max_panes == 1
+
+        # Bad type → fail closed
+        bad = workbench_from_dict(Dict{String,Any}(
+            "version" => 1, "active" => 1, "charts" => base_charts,
+            "dashboard_max_panes" => "two",
+        ))
+        @test bad isa String
+        @test occursin("dashboard_max_panes", bad)
     end
 
     @testset "tempfile round-trip: values, WECO, specs, active, chart_type wire" begin

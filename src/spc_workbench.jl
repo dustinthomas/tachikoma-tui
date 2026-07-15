@@ -2454,6 +2454,11 @@ function _seed_dashboard_max_panes!(m::SPCWorkbenchModel, seed::Symbol)
     return nothing
 end
 
+"""Hard-clamped pane budget for dashboard layout (KD-DC-2). Always 1..3."""
+function effective_dashboard_max_panes(m::SPCWorkbenchModel)::Int
+    return clamp(m.dashboard_max_panes, 1, 3)
+end
+
 """Synthetic fake-tool registry (Film-PTPECVD01). Not loaded from fixture CSV."""
 function default_fake_tools()::Vector{ToolEntry}
     return [
@@ -4224,7 +4229,7 @@ end
 
 export ToolEntry, ParamEntry, add_chart!, clone_chart!, delete_chart!, rename_chart!, set_active_chart!
 export select_param!
-export visible_charts, dashboard_pane_charts
+export visible_charts, dashboard_pane_charts, effective_dashboard_max_panes
 export default_fake_tools, default_fake_tool_params, build_fake_tool_table, materialize_param_chart!
 # set_filter_tool! / set_filter_type! / set_filter_owner! / clear_filters! stay package-private
 
@@ -6798,7 +6803,8 @@ function view(m::SPCWorkbenchModel, f::Frame)
     side_rect = cols[2]
 
     # Dashboard: up to k panes from active + following visible neighbors (not charts[2]/[3] lock)
-    panes = dashboard_pane_charts(m; k = 3)
+    # k is seed-coupled via dashboard_max_panes (KD-DC-2); hard clamp 1..3
+    panes = dashboard_pane_charts(m; k = effective_dashboard_max_panes(m))
     npanes = length(panes)
     is_dashboard_multi = (m.view_mode == :dashboard && npanes >= 2)
     active_plot_rect = plot_rect
