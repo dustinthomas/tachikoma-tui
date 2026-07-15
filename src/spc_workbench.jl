@@ -7554,7 +7554,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
         ch2 = panes[2]
         n2_raw = length(ch2.data.values)
         if n2_raw > 0 && second_plot_rect.width > 4 && second_plot_rect.height > 3
-            blk2 = Block(title = "Chart 2: $(ch2.name) (read-only view)", border_style = tstyle(:border), title_style = tstyle(:text_dim))
+            blk2 = Block(title = _extra_pane_title(m, ch2, 2), border_style = tstyle(:border), title_style = tstyle(:text_dim))
             inn2 = render(blk2, second_plot_rect, buf)
             cw2, ch2h = inn2.width, inn2.height
             if cw2 > 0 && ch2h > 0
@@ -7661,7 +7661,7 @@ function view(m::SPCWorkbenchModel, f::Frame)
         ch3 = panes[3]
         n3_raw = length(ch3.data.values)
         if n3_raw > 0 && third_plot_rect.width > 4 && third_plot_rect.height > 3
-            blk3 = Block(title = "Chart 3: $(ch3.name) (read-only)", border_style = tstyle(:border), title_style = tstyle(:text_dim))
+            blk3 = Block(title = _extra_pane_title(m, ch3, 3), border_style = tstyle(:border), title_style = tstyle(:text_dim))
             inn3 = render(blk3, third_plot_rect, buf)
             cw3, ch3h = inn3.width, inn3.height
             if cw3 > 0 && ch3h > 0
@@ -7937,7 +7937,7 @@ end
 
 """
 Full non-empty Side Stats body — sectionized with D1–D18 collapse + PARAMS (dashboard design).
-Order: STATS → PARAMS → HOVER → LINES → WECO → CHARTS.
+Order: STATS → PARAMS → HOVER → LINES → WECO → DISPLAY/CHARTS.
 """
 function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
     x = side_inner.x
@@ -7951,9 +7951,19 @@ function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
     multi_or_filter = length(m.charts) > 1 || _any_filter_active(m)
     # KD-SS-17 compact profile (headerless prefs + force-drop ±1/±2)
     compact_h11 = side_inner.height <= 11
-    # Always reserve bubbles + Viols: N so Lines/PARAMS cannot starve WECO at any height
-    # (fixes side_h 12–13 cliff when reserve was 0 above height 11).
-    reserve_tail = 2
+    # Gaps only when tall enough — short H=18 WECO geometry stays stable
+    allow_gap = side_inner.height >= 20
+    # DISPLAY reserve only when tall enough that WECO floor + DISPLAY can both fit.
+    # side_inner ≥ 16 ≈ terminal H≥24 with STATS/PARAMS/LINES still present.
+    # Compact H≤11: DISPLAY drops entirely — WECO bubbles+Viols stay green.
+    display_reserve = if _side_use_display_section(m) && !compact_h11 && side_inner.height >= 16
+        allow_gap ? 5 : 3  # 3: header+count+name (Library optional under pressure)
+    else
+        0
+    end
+    # Always reserve bubbles + Viols: N (2) so Lines/PARAMS cannot starve WECO;
+    # when DISPLAY can paint, also reserve its rows from earlier sections.
+    reserve_tail = 2 + display_reserve
     drop_sigma12 = compact_h11 && (hover_active || multi_or_filter)
 
     # Tool identity always visible at top of side body (accent chip)
@@ -7961,8 +7971,6 @@ function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
     if isempty(tid) && !isempty(act_ch.tools)
         tid = String(act_ch.tools[1])
     end
-    # Gaps only when tall enough — short H=18 WECO geometry stays stable
-    allow_gap = side_inner.height >= 20
 
     # Skip top tool chip under compact H — PARAMS section still paints ◆ tool
     if !isempty(tid) && y <= bot && !compact_h11
@@ -7975,7 +7983,7 @@ function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
                            compact_h11=compact_h11, reserve_tail=reserve_tail,
                            hover_active=hover_active)
     allow_gap && (y = _side_sec_gap!(buf, x, y, bot, maxw))
-    # PARAMS reserves WECO floor + upcoming HOVER so hover cannot steal Viols: (KD-DC-18)
+    # PARAMS reserves WECO floor (+ DISPLAY) + upcoming HOVER (KD-DC-18)
     y = _side_sec_params!(buf, x, y, bot, maxw, m;
                           reserve_tail=reserve_tail, compact_h11=compact_h11,
                           hover_active=hover_active)
@@ -7988,7 +7996,7 @@ function _render_side_stats_body!(buf, side_inner, m::SPCWorkbenchModel)
                          compact_h11=compact_h11)
     allow_gap && (y = _side_sec_gap!(buf, x, y, bot, maxw))
     y = _side_sec_weco!(buf, x, y, bot, maxw, m, act_ctx, act_ch, side_inner;
-                        compact_h11=compact_h11)
+                        compact_h11=compact_h11, reserve_tail=display_reserve)
     allow_gap && (y = _side_sec_gap!(buf, x, y, bot, maxw))
     y = _side_sec_charts!(buf, x, y, bot, maxw, m)
     return y
@@ -8074,6 +8082,8 @@ end
 Primary plot Block title: `Dashboard: TOOL · Param [a/n]` (no mouse chrome).
 
 Tool name first, then parameter — eye-catching via separate `title_style` on the Block.
+Under `:compare` the mid segment is honest `Compare (n)` (KD-PD-9). Mode chips
+`[● Param]` / `[● Compare]` land in PR3 with width budget.
 """
 function _primary_dashboard_title(m::SPCWorkbenchModel; empty_hint::AbstractString = "")::String
     tid, pname = _chart_tool_param_labels(m)
@@ -8086,6 +8096,13 @@ function _primary_dashboard_title(m::SPCWorkbenchModel; empty_hint::AbstractStri
     else
         string(isempty(m.charts) ? 1 : clamp(m.active, 1, nch))
     end
+    # Honest compare mid-label when display is non-empty (or empty-shell uses Compare)
+    if m.dashboard_scope === :compare && !empty_shell
+        n_pins = length(_effective_compare_pins(m))
+        pname = "Compare ($n_pins)"
+    elseif m.dashboard_scope === :compare && empty_shell && isempty(pname)
+        pname = "Compare"
+    end
     body = if !isempty(tid) && !isempty(pname)
         "$(tid) · $(pname)"
     elseif !isempty(pname)
@@ -8096,6 +8113,28 @@ function _primary_dashboard_title(m::SPCWorkbenchModel; empty_hint::AbstractStri
         "Data"
     end
     return "Dashboard: $(body) [$(act_s)/$(nch)]$(empty_hint)"
+end
+
+"""
+Extra pane Block title for panes[2]/[3] — honest with display scope (KD-PD-9).
+
+- `:param_active` same-param analysis → `Chart N: name · analysis (read-only view)`
+- `:compare` → `Chart N: param display name (read-only view)`
+- `:legacy_neighbors` → existing `Chart 2: name (read-only view)` / Chart 3 without \"view\"
+"""
+function _extra_pane_title(m::SPCWorkbenchModel, ch::ChartSpec, pane_n::Int)::String
+    prefix = pane_n == 3 ? "Chart 3:" : "Chart 2:"
+    if m.dashboard_scope === :compare
+        label = !isempty(ch.param) ? _param_display_name(m, ch.param) : ch.name
+        isempty(label) && (label = ch.name)
+        return "$prefix $label (read-only view)"
+    elseif m.dashboard_scope === :param_active
+        return "$prefix $(ch.name) · analysis (read-only view)"
+    else
+        # Legacy: Chart 3 historically omits \"view\" — keep frozen suite substring
+        return pane_n == 3 ? "$prefix $(ch.name) (read-only)" :
+                             "$prefix $(ch.name) (read-only view)"
+    end
 end
 
 """
@@ -8214,28 +8253,62 @@ function _side_sec_params!(buf, x::Int, y::Int, bot::Int, maxw::Int,
         p = m.params[i]
         is_sel = (i == sel)
         mark = is_sel ? "▶" : " "
-        units = isempty(p.units) ? "—" : p.units
-        # "▶ 1 Name  units" — truncate name to fit
-        prefix = string(mark, " ", i, " ")
-        suffix = string("  ", units)
-        name_budget = max(1, maxw - length(prefix) - length(suffix))
-        name_s = _side_trunc(p.name, name_budget)
-        # Colorized pieces: index accent, name success/text, units dim
+        # ★ from explicit pin list (compare_param_ids), not effective-pins fallback
+        pinned = any(pid -> pid == p.id, m.compare_param_ids)
+        line = _format_params_row(p, i, mark; maxw = maxw, pinned = pinned)
         if is_sel
-            line = _side_trunc(string(prefix, name_s, suffix), maxw)
             set_string!(buf, x, y, line, tstyle(:success, bold = true))
+        elseif pinned && m.dashboard_scope === :compare
+            # Bold pin rows in Compare chrome
+            set_string!(buf, x, y, line, tstyle(:warning, bold = true))
+        elseif pinned
+            # Dim star while preparing pins outside Compare
+            set_string!(buf, x, y, line, tstyle(:text_dim))
         else
+            # Colorized pieces: index accent, name text, units dim
             idx_s = string(i, " ")
             set_string!(buf, x, y, string(mark, " "), tstyle(:text_dim))
             cx = x + 2
             set_string!(buf, cx, y, idx_s, tstyle(:warning, bold = true))
             cx += length(idx_s)
             room = max(1, maxw - (cx - x))
-            set_string!(buf, cx, y, _side_trunc(string(name_s, suffix), room), tstyle(:text))
+            rest = _format_params_row_rest(p; maxw = room, pinned = false)
+            set_string!(buf, cx, y, rest, tstyle(:text))
         end
         y += 1
     end
     return y
+end
+
+"""
+Format one PARAMS catalog row with pin/truncation policy (KD-PD-9).
+
+Priority under maxw: (1) drop units (2) truncate name (3) keep mark+index
+and trailing `★` when pinned (never drop ★ before name is ≤1 glyph).
+"""
+function _format_params_row(p::ParamEntry, idx::Int, mark::AbstractString;
+                            maxw::Int, pinned::Bool)::String
+    prefix = string(mark, " ", idx, " ")
+    rest = _format_params_row_rest(p; maxw = max(1, maxw - length(prefix)), pinned = pinned)
+    return _side_trunc(string(prefix, rest), maxw)
+end
+
+function _format_params_row_rest(p::ParamEntry; maxw::Int, pinned::Bool)::String
+    maxw <= 0 && return ""
+    star_sfx = pinned ? " ★" : ""
+    star_w = length(star_sfx)
+    # Reserve star width first so pin mark survives truncation
+    body_w = max(1, maxw - star_w)
+    units = isempty(p.units) ? "—" : p.units
+    usuf = string("  ", units)
+    # (1) drop units under pressure — keep when ≥1 name glyph still fits
+    if length(usuf) + 1 <= body_w
+        name_s = _side_trunc(p.name, max(1, body_w - length(usuf)))
+        return _side_trunc(string(name_s, usuf, star_sfx), maxw)
+    end
+    # (2) name only + (3) trailing ★
+    name_s = _side_trunc(p.name, body_w)
+    return _side_trunc(string(name_s, star_sfx), maxw)
 end
 
 """▸ STATS — n/limits, cl/σ, Cpk·band, optional T= (KD-SS-11 / D14)."""
@@ -8411,8 +8484,11 @@ Records `m.weco_bubble_geom` for PR3 hit-testing.
 """
 function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
                          m::SPCWorkbenchModel, act_ctx, act_ch, side_inner;
-                         compact_h11::Bool)::Int
-    rem = bot - y + 1
+                         compact_h11::Bool, reserve_tail::Int = 0)::Int
+    # reserve_tail: leave rows for DISPLAY/CHARTS after WECO (product path honesty).
+    # Bubbles + Viols: still paint; viol *messages* and digits drop under pressure.
+    effective_bot = bot - max(0, reserve_tail)
+    rem = effective_bot - y + 1
     rem < 1 && return y
 
     # D5 blank gap only when bubbles + Viols (+ digits when not compact) still fit after gap.
@@ -8421,7 +8497,7 @@ function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     gap_need = compact_h11 ? 4 : 5
     if !compact_h11 && rem >= gap_need
         y += 1
-        rem = bot - y + 1
+        rem = effective_bot - y + 1
     end
     rem < 1 && return y
 
@@ -8430,8 +8506,8 @@ function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     use_header = !compact_h11 && _side_want_header(rem, 2)
     same_row_label = false
     if use_header
-        y = _side_section_header!(buf, x, y, bot, maxw, "WECO")
-        rem = bot - y + 1
+        y = _side_section_header!(buf, x, y, effective_bot, maxw, "WECO")
+        rem = effective_bot - y + 1
     elseif rem == 1 || (compact_h11 && rem <= 2)
         # Compact same-row "WECO " + bubbles when only 1–2 rows (H=18)
         same_row_label = true
@@ -8493,7 +8569,7 @@ function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     end
     m.weco_bubble_geom = WecoBubbleGeom(y=bubble_y, x0=bx0, step=step, n=8, boxed=boxed)
     y += 1
-    rem = bot - y + 1
+    rem = effective_bot - y + 1
 
     # 2) Digit row only if rem ≥ 2 after bubbles (need digits + Viols); else skip (D6).
     #    KD-SS-17 H≤11: always omit digits (D6 ≺ D17 Viols) — keep bubble + Viols tight.
@@ -8507,23 +8583,23 @@ function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
             end
         end
         y += 1
-        rem = bot - y + 1
+        rem = effective_bot - y + 1
     end
 
     # 3) Viols: N (D17) — prefer over digits when only one row left after bubbles
     show_viols = _side_viol_msgs_by_index(side_viols; n = SIDE_VIOL_MSG_MAX)
     nv = length(side_viols)
-    if y <= bot
+    if y <= effective_bot
         set_string!(buf, x, y, _side_trunc("Viols: $nv", maxw),
                     nv > 0 ? tstyle(:warning) : tstyle(:text_dim))
         y += 1
     end
 
-    # 4) Viol messages (D2) — lowest WECO text
+    # 4) Viol messages (D2) — lowest WECO text; yield to DISPLAY reserve_tail
     if !isempty(show_viols)
         viol_maxw = max(4, side_inner.width - 1)
         for v in show_viols
-            y > bot && break
+            y > effective_bot && break
             line = _side_trunc("$(v.rule) $(v.msg)", viol_maxw)
             set_string!(buf, x, y, line, tstyle(:warning))
             y += 1
@@ -8532,9 +8608,84 @@ function _side_sec_weco!(buf, x::Int, y::Int, bot::Int, maxw::Int,
     return y
 end
 
-"""▸ CHARTS — count line keeps `Charts:` prefix; names lowest priority (D1/D4)."""
+"""True when Side Stats should paint honest ▸ DISPLAY (catalog + product scope)."""
+function _side_use_display_section(m::SPCWorkbenchModel)::Bool
+    return !isempty(m.params) &&
+           (m.dashboard_scope === :param_active || m.dashboard_scope === :compare)
+end
+
+"""
+▸ DISPLAY (catalog product scopes) or ▸ CHARTS (legacy / empty catalog).
+
+KD-PD-9: when catalog non-empty under `:param_active` / `:compare`, list **only**
+`dashboard_display_set` (+ short type); optional dim `Library: N`. Empty-filter
+path keeps frozen `Charts: 0/N` via `_side_sec_charts_empty!` (not this helper).
+Names remain lowest priority after WECO (`reserve_tail` / paint order).
+"""
 function _side_sec_charts!(buf, x::Int, y::Int, bot::Int, maxw::Int,
                            m::SPCWorkbenchModel)::Int
+    if _side_use_display_section(m)
+        return _side_sec_display!(buf, x, y, bot, maxw, m)
+    end
+    return _side_sec_charts_legacy!(buf, x, y, bot, maxw, m)
+end
+
+"""▸ DISPLAY — display set only (KD-PD-9)."""
+function _side_sec_display!(buf, x::Int, y::Int, bot::Int, maxw::Int,
+                            m::SPCWorkbenchModel)::Int
+    ds = dashboard_display_set(m)
+    n_disp = length(ds)
+    n_lib = length(m.charts)
+    rem = bot - y + 1
+    rem < 1 && return y
+
+    # Always try section when catalog product path (honesty); drop under row pressure
+    if _side_want_header(rem, 1)
+        y = _side_section_header!(buf, x, y, bot, maxw, "DISPLAY")
+        rem = bot - y + 1
+    end
+    if y <= bot
+        cnt = if m.dashboard_scope === :compare
+            "Display: $n_disp · Compare"
+        else
+            "Display: $n_disp"
+        end
+        set_string!(buf, x, y, _side_trunc(cnt, maxw), tstyle(:text_dim))
+        y += 1
+    end
+    # Optional library total when library is larger than what is painted
+    if y <= bot && n_lib > n_disp
+        set_string!(buf, x, y, _side_trunc("Library: $n_lib", maxw), tstyle(:text_dim))
+        y += 1
+    end
+    if n_disp == 0
+        if y <= bot
+            msg = m.dashboard_scope === :compare ? " (no pinned charts)" : " (no chart for param)"
+            set_string!(buf, x, y, _side_trunc(msg, maxw), tstyle(:warning))
+            y += 1
+        end
+        return y
+    end
+    act_id = isempty(m.charts) ? "" : current_chart(m).id
+    for c in ds
+        y > bot && break
+        is_act = c.id == act_id
+        type_s = chart_type_to_string(c.chart_type)
+        mark = is_act ? "▶" : " "
+        # Prefer catalog param name when linked; else chart name; + short type
+        label = !isempty(c.param) ? _param_display_name(m, c.param) : c.name
+        isempty(label) && (label = c.name)
+        line = " $mark $label · $type_s"
+        set_string!(buf, x, y, _side_trunc(line, maxw),
+                    tstyle(is_act ? :accent : :text_dim))
+        y += 1
+    end
+    return y
+end
+
+"""▸ CHARTS — legacy neighbors / empty catalog; count keeps `Charts:` prefix (D1/D4)."""
+function _side_sec_charts_legacy!(buf, x::Int, y::Int, bot::Int, maxw::Int,
+                                  m::SPCWorkbenchModel)::Int
     side_vis = visible_charts(m)
     nch_all = length(m.charts)
     nvis_side = length(side_vis)
