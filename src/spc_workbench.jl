@@ -3668,9 +3668,12 @@ function _auto_bump_dashboard_panes!(m::SPCWorkbenchModel)
     return nothing
 end
 
-"""True when a chart already exists for this param id + chart type (duplicate policy)."""
+"""True when a chart already exists for this param id + chart type (duplicate policy).
+
+Empty `param` is still a shared identity (blank library charts) — second same-type
+analysis clone is refused (KD-DC-16).
+"""
 function _chart_exists_for_param_type(m::SPCWorkbenchModel, param_id::AbstractString, ct::ChartType)::Bool
-    isempty(param_id) && return false
     return any(c -> c.param == param_id && c.chart_type == ct, m.charts)
 end
 
@@ -6079,7 +6082,7 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
         _update_library_mouse!(m, evt)
         return
     end
-    # Modal / tools / table / config / prompt / pending_* / explorer: keyboard-only (KD16)
+    # Modal / tools / table / config / prompt / pending_* / explorer / add-chart: keyboard-only (KD16)
     if m.editing !== nothing ||
        m.view_mode == :help || m.view_mode == :keymap ||
        m.view_mode == :builder ||
@@ -6087,7 +6090,8 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
        m.view_mode == :table ||
        m.view_mode == :config ||
        m.prompt_kind !== nothing || m.pending_delete ||
-       m.pending_overwrite || m.file_browser_open
+       m.pending_overwrite || m.file_browser_open ||
+       m.add_chart_open
         m.last_event = string(evt.action, " ", evt.button, " (modal)")
         m.hover_x = nothing
         m.hovered = nothing
@@ -8708,6 +8712,7 @@ function _live_may_advance(m::SPCWorkbenchModel)::Bool
     m.pending_delete && return false
     m.pending_overwrite && return false
     m.file_browser_open && return false
+    m.add_chart_open && return false
     m.view_mode in (:help, :keymap, :library, :builder, :tools, :table, :config) && return false
     ch = current_chart(m)
     (isempty(ch.data.values) || !ch.live_enabled) && return false

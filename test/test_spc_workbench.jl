@@ -2247,6 +2247,76 @@ include("../src/spc_workbench_io.jl")
         @test m.charts[end].param == ""
         @test m.dashboard_max_panes == panes_lib  # blank library add does not auto-bump
         @test m.add_chart_open === false
+        m.view_mode = :dashboard
+
+        # p/P pause and k/K keymap when modal closed (regression)
+        paused0 = m.paused
+        update!(m, KeyEvent('p'))
+        @test m.paused === !paused0
+        @test m.view_mode === :dashboard
+        update!(m, KeyEvent('p'))  # restore
+        @test m.paused === paused0
+        update!(m, KeyEvent('k'))
+        @test m.view_mode === :keymap
+        update!(m, KeyEvent(:escape))
+        @test m.view_mode === :dashboard
+
+        # While modal open: p/k absorbed (pause + mode unchanged)
+        update!(m, KeyEvent('+'))
+        @test m.add_chart_open === true
+        paused1 = m.paused
+        update!(m, KeyEvent('p'))
+        @test m.add_chart_open === true
+        @test m.paused === paused1
+        @test m.view_mode === :dashboard
+        update!(m, KeyEvent('k'))
+        @test m.add_chart_open === true
+        @test m.view_mode === :dashboard
+        @test m.quit === false
+
+        # Mouse absorbed while add_chart open (same as file_browser)
+        m.hover_x = nothing
+        m.hovered = nothing
+        update!(m, MouseEvent(20, 10, mouse_left, mouse_move, false, false, false))
+        @test occursin("(modal)", m.last_event)
+        @test m.hover_x === nothing
+        @test m.add_chart_open === true
+
+        # Live gate blocked while modal open
+        m.paused = false
+        m.charts[m.active].live_enabled = true
+        @test _live_may_advance(m) === false
+        update!(m, KeyEvent(:escape))
+        @test m.add_chart_open === false
+        # With unpaused + live and charts with data, live may advance again
+        @test _live_may_advance(m) === true || isempty(m.charts[m.active].data.values)
+        m.paused = true
+    end
+
+    @testset "PR4: empty-param analysis duplicate refuse (KD-DC-16)" begin
+        d = generate_spc_workbench_data(12; seed = 7)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :single)
+        _ensure_charts!(m)
+        @test m.charts[1].param == ""
+        @test m.charts[1].chart_type === I_MR
+        # Source itself is already "" + I_MR → same-type refuse (empty id is identity)
+        @test add_analysis_chart!(m, 1, I_MR) === nothing
+        @test occursin("chart already exists", m.last_event)
+        @test length(m.charts) == 1
+        # Different type on blank source OK once
+        a1 = add_analysis_chart!(m, 1, Xbar_R)
+        @test a1 !== nothing
+        @test m.charts[a1].param == ""
+        @test m.charts[a1].chart_type === Xbar_R
+        # Second same type on empty param → refuse
+        n_before = length(m.charts)
+        @test add_analysis_chart!(m, 1, Xbar_R) === nothing
+        @test occursin("chart already exists", m.last_event)
+        @test length(m.charts) == n_before
+        # Xbar_S still OK
+        a2 = add_analysis_chart!(m, 1, Xbar_S)
+        @test a2 !== nothing
+        @test m.charts[a2].chart_type === Xbar_S
     end
 
 
