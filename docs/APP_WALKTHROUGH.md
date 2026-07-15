@@ -135,7 +135,7 @@ By default it seeds **three demo charts** (Primary / Secondary / Tertiary). That
 | **`:triple`** (default) | 3 demos (Primary / Secondary / Tertiary) | empty tools, empty params | **3** |
 | **`:fake_tool`** | 1 chart for first param | Film-PTPECVD01 + param catalog + long table | **1** |
 | `:single` | 1 chart | empty | **1** |
-| `:none` | empty until user/load adds | empty | **1** |
+| `:none` | 1 empty Primary (no random series) | empty | **1** |
 
 `dashboard_max_panes` is **seed-coupled** (field default 3 for triple compat; `_ensure_charts!` overwrites when bootstrapping empty charts). Wizard add-chart paths can auto-bump the budget up to 3.
 

@@ -31,7 +31,7 @@ model and both runners. Do **not** change that default. Use `:fake_tool`,
 | **`:triple`** (default) | 3 demo charts; empty tools; empty params | **3** |
 | **`:fake_tool`** | Film-PTPECVD01 tool, param catalog (≥3), long SharedTable, **1** chart for `params[1]` | **1** |
 | `:single` | 1 demo chart | **1** |
-| `:none` | no charts until user/load | **1** |
+| `:none` | 1 empty Primary (no random series); empty tools/params | **1** |
 
 **Seed-coupled pane budget:** model field default `dashboard_max_panes = 3`
 (triple-compat). When `_ensure_charts!` bootstraps an empty chart list it calls
