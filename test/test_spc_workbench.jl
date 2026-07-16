@@ -4127,6 +4127,53 @@ end
         @test m.viewport.x1 - m.viewport.x0 < n
     end
 
+    @testset "mouse: thick ┃ sticky after snap; thin │ only while LMB held" begin
+        # Contract:
+        #  - click-release → selected sticky (thick ┃); hover_x cleared
+        #  - free mouse_move → selected stays; hover_x stays nothing (no thin follow)
+        #  - left press/drag → hover_x follows (thin │); selected cleared on press
+        d = generate_spc_workbench_data(24; seed=42)
+        n = length(d.values)
+        m = SPCWorkbenchModel(data=d, paused=true, viewport=Viewport(x0=1, x1=n))
+        tb = T.TestBackend(70, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 70, 18), [], []))
+        pa = m.plot_area
+        @test pa.width > 8 && pa.height > 4
+        cx = pa.x + pa.width ÷ 2
+        cy = pa.y + pa.height ÷ 2
+        # Click-release → sticky select
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.hover_x == cx  # thin follow while button held
+        T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_release, false, false, false))
+        @test m.selected !== nothing
+        si = m.selected
+        @test m.hover_x === nothing
+        # Free move: sticky select remains; no thin follow line
+        cx2 = clamp(pa.x + pa.width ÷ 4, pa.x, T.right(pa))
+        T.update!(m, T.MouseEvent(cx2, cy, T.mouse_none, T.mouse_move, false, false, false))
+        @test m.selected == si
+        @test m.hover_x === nothing
+        # Re-render: sticky ┃ at select column; no thin │ at free-move x
+        tb = T.TestBackend(70, 18); T.reset!(tb.buf)
+        T.view(m, T.Frame(tb.buf, T.Rect(1, 1, 70, 18), [], []))
+        pa2 = m.plot_area
+        sx = data_index_to_cell(si, pa2, m.viewport)
+        found_sticky = any(y -> T.char_at(tb, sx, y) == '┃', (pa2.y + 1):(T.bottom(pa2) - 1))
+        @test found_sticky
+        hx = clamp(cx2, pa2.x, T.right(pa2))
+        if hx != sx
+            found_follow = any(y -> T.char_at(tb, hx, y) == '│', (pa2.y + 1):(T.bottom(pa2) - 1))
+            @test !found_follow
+        end
+        # LMB hold again: thin │ follows (hover_x); selected cleared on press
+        T.update!(m, T.MouseEvent(cx2, cy, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.selected === nothing
+        @test m.hover_x == cx2
+        cx3 = clamp(pa.x + (3 * pa.width) ÷ 4, pa.x, T.right(pa))
+        T.update!(m, T.MouseEvent(cx3, cy, T.mouse_left, T.mouse_drag, false, false, false))
+        @test m.hover_x == cx3
+    end
+
     @testset "Small terminal guard + full-page Config no-bleed" begin
         m = SPCWorkbenchModel(data=generate_spc_workbench_data(5;seed=2), paused=true)
         tb = T.TestBackend(18,5)

@@ -5,6 +5,7 @@ using Supposition, Supposition.Data
 const T = Tachikoma
 
 # Include component tests
+include("test_terminal_mouse.jl")
 include("test_hello.jl")
 # KD24 (PR0): classic SPC chart tests were orphaned; hard-wire into full suite.
 # Isolated module: test_spc.jl does `using TachikomaTUI` (imports Viewport / helpers),

@@ -129,7 +129,7 @@ end
         @test m.viewport.x0 >= 5   # directionally panned (may clamp)
     end
 
-    @testset "Selected persistent vertical line on click (PR1 visual)" begin
+    @testset "Selected ┃ sticky after snap; thin │ only while LMB held" begin
         d = generate_spc_data(25; seed = 42)
         n = length(d.values)
         m = SPCModel(data = d, viewport = Viewport(x0 = 1, x1 = n), paused = true)
@@ -139,53 +139,55 @@ end
         pa = m.plot_area
         @test pa.width > 5 && pa.height > 3
 
-        # Click: press then release at same spot -> commits selected via snap (uses release x for nearest point)
+        # Click: press then release at same spot -> commits selected via snap
         cx = pa.x + (pa.width ÷ 2)
         cy = pa.y + (pa.height ÷ 2)
         T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.hover_x == cx  # thin follow while LMB held
         T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_release, false, false, false))
         @test m.selected !== nothing
         si = m.selected
         @test si >= m.viewport.x0 && si <= m.viewport.x1
+        @test m.hover_x === nothing
 
-        # Move mouse (plain hover) to different point (changes hovered, selected persists)
-        # to verify full ┃ remains (drawn independently) without being cleared by hover move.
+        # After release only ┃ (sticky)
+        tb = render_spc_visual(m; w = 70, h = 18)
+        pa2 = m.plot_area
+        sx = data_index_to_cell(si, pa2, m.viewport)
+        topy = pa2.y + 1
+        @test T.char_at(tb, sx, topy) == '┃'
+
+        # Free mouse move: sticky select stays; no thin follow line
         cx2 = pa.x + (pa.width ÷ 3)
         cy2 = pa.y + (pa.height ÷ 3)
         T.update!(
             m,
             T.MouseEvent(cx2, cy2, T.mouse_none, T.mouse_move, false, false, false),
         )
-        @test m.hovered != si   # hover moved
-        @test m.selected == si  # selected unchanged (and ┃ will be drawn)
+        @test m.selected == si
+        @test m.hover_x === nothing
 
-        # Re-render after update (mandatory per tachikoma-ui-testing.md)
         tb = render_spc_visual(m; w = 70, h = 18)
-        pa2 = m.plot_area
-        sx = data_index_to_cell(si, pa2, m.viewport)
-
-        # Assert full-height ┃ vertical is present (incl. top row, since hover is elsewhere)
-        topy = pa2.y + 1
-        ch_top = T.char_at(tb, sx, topy)
-        @test ch_top == '┃'
-
-        # Also in middle rows (not overwritten by cross or data marker at hy)
-        hy = data_val_to_cell_row(d.values[si], pa2, m.viewport)
-        midy = pa2.y + (pa2.height ÷ 2)
-        if midy == hy
-            midy = hy > (pa2.y + 1) ? hy - 1 : hy + 1
-            midy = clamp(midy, pa2.y + 1, T.bottom(pa2) - 1)
+        pa3 = m.plot_area
+        sx3 = data_index_to_cell(si, pa3, m.viewport)
+        @test T.char_at(tb, sx3, pa3.y + 1) == '┃'
+        hx = clamp(cx2, pa3.x, T.right(pa3))
+        if hx != sx3
+            found_follow = any(y -> T.char_at(tb, hx, y) == '│', (pa3.y + 1):(T.bottom(pa3) - 1))
+            @test !found_follow
         end
-        ch = T.char_at(tb, sx, midy)
-        @test ch == '┃'
 
-        # Reset clears selected + vertical (key 'r')
+        # LMB held: thin │ follows via hover_x
+        T.update!(m, T.MouseEvent(cx2, cy2, T.mouse_left, T.mouse_press, false, false, false))
+        @test m.selected === nothing
+        @test m.hover_x == cx2
+        T.update!(m, T.MouseEvent(cx2 + 3, cy2, T.mouse_left, T.mouse_drag, false, false, false))
+        @test m.hover_x == cx2 + 3
+
+        # Reset still clears selection + hover chrome
         T.update!(m, T.KeyEvent('r'))
         @test m.selected === nothing
-        tb = render_spc_visual(m; w = 70, h = 18)
-        # No ┃ expected at that sx anymore (char_at + selected===nothing prove removal post-re-render)
-        ch_after = T.char_at(tb, sx, midy)
-        @test ch_after != '┃'
+        @test m.hover_x === nothing
     end
 
     @testset "Data point markers overlay (PR2 visual)" begin
@@ -277,7 +279,7 @@ end
         stat = d.violations[hi] ? "OOC" : "OK"
         @test T.find_text(tb, stat) !== nothing
 
-        # selected + hover case: click sets selected, move hover shows tooltip on new point
+        # click then free move: sticky select stays; tooltip may follow hover (no thin │)
         si = hi
         T.update!(m, T.MouseEvent(cx, cy, T.mouse_left, T.mouse_press, false, false, false))
         T.update!(
@@ -287,7 +289,8 @@ end
         @test m.selected == si
         cx2 = pa.x + (pa.width ÷ 3)
         T.update!(m, T.MouseEvent(cx2, cy, T.mouse_none, T.mouse_move, false, false, false))
-        @test m.hovered != si && m.selected == si
+        @test m.selected == si && m.hover_x === nothing
+        @test m.hovered != si  # free hover still updates tooltip target
         tb = render_spc_visual(m; w = 60, h = 18)
         @test T.find_text(tb, "val=") !== nothing  # tooltip follows hover
 

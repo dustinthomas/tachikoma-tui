@@ -6,6 +6,9 @@ using Tachikoma
 
 export Tachikoma
 
+# Cross-platform terminal mouse (1003 hover + Windows console prep) — before apps
+include("terminal_mouse.jl")
+
 # Include examples / apps
 include("hello.jl")
 include("spc.jl")
@@ -65,6 +68,12 @@ export record_blank_workbench_demo, record_pecvd_tutorial_demo, record_fake_tool
 export add_tool!, delete_tool!
 export package_root, local_docs_build_dir, resolve_local_docs_file, file_url
 export open_in_browser, open_local_docs, LOCAL_DOCS_PAGES
+
+# Terminal mouse helpers (Windows + Linux/macOS)
+export APP_MOUSE_ON, APP_MOUSE_OFF
+export enable_app_mouse!, disable_app_mouse!, ensure_app_mouse!
+export bind_app_mouse_terminal!, unbind_app_mouse_terminal!, maybe_reassert_app_mouse!
+export mouse_seq_is_full_tracking, mouse_seq_is_full_off
 
 # SPC Workbench I/O (PR3 CSV import)
 export CsvParseOk, CsvParseErr, parse_csv_table

@@ -55,6 +55,56 @@ end
 
 should_quit(m::SPCModel) = m.quit
 
+# Full mouse tracking (hover 1003 + Windows Quick Edit off) — see terminal_mouse.jl
+function init!(m::SPCModel, t::Terminal)
+    if isdefined(@__MODULE__, :enable_app_mouse!)
+        enable_app_mouse!(t)
+        isdefined(@__MODULE__, :bind_app_mouse_terminal!) && bind_app_mouse_terminal!(t)
+    elseif isdefined(Main, :enable_app_mouse!)
+        Main.enable_app_mouse!(t)
+        isdefined(Main, :bind_app_mouse_terminal!) && Main.bind_app_mouse_terminal!(t)
+    else
+        try
+            t.mouse_enabled = true
+            print(t.io, "\e[?1000h\e[?1002h\e[?1003h\e[?1006h")
+            flush(t.io)
+        catch
+        end
+    end
+    m.last_event = "mouse on"
+    return nothing
+end
+
+function cleanup!(::SPCModel)
+    if isdefined(@__MODULE__, :disable_app_mouse!)
+        if isdefined(@__MODULE__, :_ACTIVE_MOUSE_TERM) && _ACTIVE_MOUSE_TERM[] !== nothing
+            disable_app_mouse!(_ACTIVE_MOUSE_TERM[])
+        else
+            disable_app_mouse!()
+        end
+        isdefined(@__MODULE__, :unbind_app_mouse_terminal!) && unbind_app_mouse_terminal!()
+    elseif isdefined(Main, :disable_app_mouse!)
+        Main.disable_app_mouse!()
+        isdefined(Main, :unbind_app_mouse_terminal!) && Main.unbind_app_mouse_terminal!()
+    else
+        try
+            print(stdout, "\e[?1000l\e[?1002l\e[?1003l\e[?1006l")
+            flush(stdout)
+        catch
+        end
+    end
+    return nothing
+end
+
+function Tachikoma.pre_render!(m::SPCModel)
+    if isdefined(@__MODULE__, :maybe_reassert_app_mouse!)
+        maybe_reassert_app_mouse!(m.tick)
+    elseif isdefined(Main, :maybe_reassert_app_mouse!)
+        Main.maybe_reassert_app_mouse!(m.tick)
+    end
+    return nothing
+end
+
 # ── Seeded generator (PR1 static data) ─────────────────────────────────
 
 function generate_spc_data(
@@ -371,9 +421,11 @@ end
 function update!(m::SPCModel, evt::MouseEvent)
     m.last_event = string(evt.action, " ", evt.button)
 
-    # Track raw mouse position for the vertical line to follow the mouse exactly.
-    if evt.action == mouse_move || evt.action == mouse_press || evt.action == mouse_drag
+    # Thin │ follows only while LMB is held (press / drag). Free mouse_move does not.
+    if evt.action == mouse_press || evt.action == mouse_drag
         m.hover_x = evt.x
+    elseif evt.action == mouse_move && evt.button == mouse_left
+        m.hover_x = evt.x  # some hosts report held motion as move+left
     end
 
     pa = m.plot_area
@@ -417,16 +469,15 @@ function update!(m::SPCModel, evt::MouseEvent)
         if m.selected !== nothing
             m.hovered = m.selected  # keep tooltip/horiz in sync with just-snapped selection
         end
-        m.hover_x = nothing  # stop real-time follow; line will use selected (thick ┃)
+        m.hover_x = nothing  # stop thin follow; sticky thick ┃ remains on selected
         return
     end
 
     if evt.action == mouse_move
+        # Free move: keep sticky selected (thick ┃); no thin │ (hover_x not set above).
+        # Still update hovered for tooltip / side chrome.
         m.hovered = compute_hovered_index(evt.x, evt.y, pa, m.data, m.viewport)
-        # Do not clear selected here: allows the persistent ┃ to remain visible
-        # while plain hover moves update the tooltip / horiz tick for other points.
     end
-    # (press path clears selected explicitly to start a fresh gesture with raw follow)
 end
 
 # ── View (static render for PR1) ───────────────────────────────────────
@@ -481,7 +532,7 @@ function view(m::SPCModel, f::Frame)
 
     # Plot block + canvas
     plot_block = Block(
-        title = "Process Data (│ follows mouse exactly; ┃ snaps to nearest point on click release; hover updates tooltip+tick)",
+        title = "Process Data (│ while LMB held; ┃ snaps on release & stays; free move tooltip only)",
         border_style = tstyle(:border),
         title_style = tstyle(:title),
     )
@@ -530,21 +581,18 @@ function view(m::SPCModel, f::Frame)
         render_canvas(c, plot_inner, f)
 
         # Vertical line logic:
-        # - Plain hover/move + press/drag: hover_x makes thin '│' follow mouse exactly (raw cell x).
-        # - On left-click release: clears hover_x, sets selected to the *screen-nearest* point to that x.
-        # - Selected ┃ (thick) drawn independently so it persists while hovering elsewhere (updates only tooltip/horiz).
-        # Horizontal tick always snaps to the hovered point (for the info bubble alignment).
-        # Markers sit on top at the data row.
+        # - Thin '│' only while LMB held (hover_x set on press/drag).
+        # - On release: clear hover_x, snap selected → sticky thick '┃'.
+        # - Free mouse_move keeps selected; does not set hover_x (no dual │+┃).
+        # Horizontal tick snaps to the hovered point (tooltip alignment).
         if m.hover_x !== nothing
-            # Real-time follow (during mouse movement/hover): exact raw position. Good.
             hx = clamp(m.hover_x, plot_inner.x, right(plot_inner))
             for y in (plot_inner.y + 1):(bottom(plot_inner) - 1)
                 set_char!(buf, hx, y, '│', tstyle(:accent))
             end
         end
         if (si = m.selected) !== nothing && si >= m.viewport.x0 && si <= m.viewport.x1
-            # Snapped persistent ┃ after release. Drawn independently so it can
-            # coexist with hover follow (│ at different x) and remains while hovering.
+            # Sticky thick ┃ after snap (survives free mouse move)
             hx = data_index_to_cell(si, plot_inner, m.viewport)
             for y in (plot_inner.y + 1):(bottom(plot_inner) - 1)
                 set_char!(buf, hx, y, '┃', tstyle(:secondary, bold=true))
