@@ -54,4 +54,24 @@ const T = Tachikoma
         @test length(cells) >= 10
         @test length(ts) == length(cells)
     end
+
+    @testset "make_fake_tool_workbench" begin
+        m = make_fake_tool_workbench()
+        @test m.seed_demos === :fake_tool
+        @test m.paused
+        @test length(m.params) >= 3
+        @test length(m.charts) == length(m.params)
+        @test m.dashboard_scope === :param_active
+        @test any(t -> t.id == "Film-PTPECVD01", m.tools)
+    end
+
+    @testset "record_fake_tool_tutorial_demo writes .tach" begin
+        path = joinpath(mktempdir(), "fake_tool.tach")
+        out = record_fake_tool_tutorial_demo(path; width = 80, height = 24, fps = 10)
+        @test out == path
+        @test isfile(path)
+        w, h, cells, ts, px = T.load_tach(path)
+        @test length(cells) >= 10
+        @test length(ts) == length(cells)
+    end
 end

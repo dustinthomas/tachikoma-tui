@@ -24,6 +24,7 @@ Always use **`julia --project=.`** so the package and deps resolve correctly.
 |------|---------|
 | Try the **full workbench** (recommended) | `spc_workbench_demo()` |
 | **Tutorial:** blank → PECVD CSVs | `spc_workbench_demo(seed_demos=:none)` then [tutorial-blank-to-pecvd.md](tutorial-blank-to-pecvd.md) |
+| **Tutorial:** fake-tool PARAMS | `spc_workbench_demo(seed_demos=:fake_tool)` then [tutorial-fake-tool-params.md](tutorial-fake-tool-params.md) |
 | Workbench with live ticks | `spc_workbench()` or `spc_workbench(paused=true)` |
 | Load a saved session | `spc_workbench(workbench="path/to/session.json")` |
 | Simple single control chart | `static_spc_demo()` or `spc_demo()` |

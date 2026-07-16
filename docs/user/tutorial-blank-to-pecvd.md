@@ -110,5 +110,6 @@ Side Stats **PARAMS** appears for `:fake_tool` sessions, not for this pure CSV h
 
 ## Next
 
+- Product PARAMS / Compare (no CSV): [tutorial-fake-tool-params.md](tutorial-fake-tool-params.md)
 - Operator reference: [workbench.md](workbench.md), [data-import-export.md](data-import-export.md)
-- Recording plan: `docs/design/recording-docs-plan.md` (R5 = fake_tool product walkthrough)
+- Recording plan: `docs/design/recording-docs-plan.md`

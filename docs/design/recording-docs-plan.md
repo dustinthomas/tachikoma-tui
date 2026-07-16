@@ -1,6 +1,6 @@
 # Plan: documentation + terminal recordings
 
-**Status:** R0 Hello + **R3 blank + R4 PECVD tutorial path** shipped  
+**Status:** R0 + R3 + R4 + **R5 fake_tool PARAMS** shipped  
 **Goal:** grow operator- and developer-facing docs with deterministic screen captures, without blocking product work.
 
 ---
@@ -12,10 +12,12 @@
 | R0 Hello recorder | `record_hello_demo` · `scripts/record_hello_demo.jl` |
 | R3 blank workbench | `record_blank_workbench_demo` · `scripts/record_blank_workbench.jl` |
 | R4 PECVD hand path | `make_pecvd_tutorial_workbench` · `record_pecvd_tutorial_demo` · `scripts/record_pecvd_tutorial.jl` |
-| Tutorial operator guide | `docs/user/tutorial-blank-to-pecvd.md` |
+| R5 fake_tool PARAMS | `make_fake_tool_workbench` · `record_fake_tool_tutorial_demo` · `scripts/record_fake_tool_tutorial.jl` |
+| Tutorial operator guides | `docs/user/tutorial-blank-to-pecvd.md`, `tutorial-fake-tool-params.md` |
 | Documenter | `docs/src/tutorial.md`, `recording-demos.md` |
-| Both captures | `scripts/record_tutorial_path.jl` |
-| Tests | `test/test_hello.jl`, `test/test_recording_tutorial.jl` |
+| All tutorial captures | `scripts/record_tutorial_path.jl` |
+| Local browser docs | `open_local_docs` · help/keymap **O** · `scripts/open_docs.jl` |
+| Tests | `test/test_hello.jl`, `test/test_recording_tutorial.jl`, `test/test_local_docs.jl` |
 
 ---
 
@@ -42,9 +44,9 @@
    │
    ├─► [done] R4 Workbench PECVD hand path (API seed + nav recording)
    │
-   ├─► R5 Workbench :fake_tool PARAMS walkthrough (; j + compare)
+   ├─► [done] R5 Workbench :fake_tool PARAMS walkthrough (; j + compare)
    │
-   └─► [done] R6 Operator tutorial page (blank → PECVD; fake_tool still R5)
+   └─► [done] R6 Operator tutorial pages (blank/CSV + fake_tool)
 ```
 
 ### R1 — Assets pipeline (optional)

@@ -14,7 +14,7 @@ julia --project=. -e 'using TachikomaTUI; TachikomaTUI.hello_tachikoma()'
 # Headless screen capture of the Hello demo → .tach (Tachikoma recorder)
 julia --project=. scripts/record_hello_demo.jl
 
-# Tutorial path recordings: blank workbench + PECVD hand-path
+# Tutorial path recordings: blank + PECVD CSV + fake_tool PARAMS
 julia --project=. scripts/record_tutorial_path.jl
 
 # Local Documenter HTML in the browser (private app — not a public site)

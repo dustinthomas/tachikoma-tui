@@ -9966,3 +9966,45 @@ function record_pecvd_tutorial_demo(
     record_app(m, String(path); width = width, height = height, frames = 160, fps = fps, events = events)
     return String(path)
 end
+
+"""
+    make_fake_tool_workbench(; paused=true)
+
+Product demo session: `seed_demos = :fake_tool` (Film-PTPECVD01 + PARAMS catalog +
+synthetic SharedTable + one chart per param). Prefer this for the PARAMS /
+Compare walkthrough; use `make_pecvd_tutorial_workbench` for CSV hand-path.
+"""
+make_fake_tool_workbench(; paused::Bool = true) =
+    make_spc_workbench_model(; paused = paused, seed_demos = :fake_tool)
+
+"""
+    record_fake_tool_tutorial_demo(path="fake_tool_tutorial.tach"; width=100, height=32, fps=10) -> String
+
+Headless capture of the **:fake_tool** product path: focus PARAMS, cycle params,
+pin for Compare, toggle Compare scope, library glance. Returns path written.
+"""
+function record_fake_tool_tutorial_demo(
+    path::AbstractString = "fake_tool_tutorial.tach";
+    width::Int = 100,
+    height::Int = 32,
+    fps::Int = 10,
+)::String
+    m = make_fake_tool_workbench()
+    events = [
+        (8, KeyEvent(';')),        # PARAMS focus
+        (20, KeyEvent('j')),       # next param (RI)
+        (35, KeyEvent('j')),       # next (HSQ)
+        (50, KeyEvent('J')),       # prev (RI)
+        (65, KeyEvent(',')),       # pin RI for Compare
+        (80, KeyEvent('j')),       # HSQ
+        (95, KeyEvent(',')),       # pin HSQ
+        (110, KeyEvent('=')),      # enter Compare
+        (130, KeyEvent('=')),      # back to Param scope
+        (145, KeyEvent(';')),      # clear PARAMS focus
+        (155, KeyEvent('m')),      # library
+        (175, KeyEvent(:escape)),
+    ]
+    _mk_record_parent!(path)
+    record_app(m, String(path); width = width, height = height, frames = 190, fps = fps, events = events)
+    return String(path)
+end

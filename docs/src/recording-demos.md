@@ -114,10 +114,10 @@ Rules of thumb:
 
 ---
 
-## Tutorial path recordings (R3–R4)
+## Tutorial path recordings (R3–R5)
 
-Blank slate and PECVD hand-path are documented on [Tutorial path](@ref) and
-`docs/user/tutorial-blank-to-pecvd.md`.
+Blank slate, PECVD CSV hand-path, and `:fake_tool` PARAMS are documented on
+[Tutorial path](@ref) and under `docs/user/tutorial-*.md`.
 
 ```bash
 julia --project=. scripts/record_tutorial_path.jl
@@ -127,10 +127,10 @@ julia --project=. scripts/record_tutorial_path.jl
 |----------|--------|
 | `record_blank_workbench_demo` | `scripts/record_blank_workbench.jl` |
 | `record_pecvd_tutorial_demo` | `scripts/record_pecvd_tutorial.jl` |
+| `record_fake_tool_tutorial_demo` | `scripts/record_fake_tool_tutorial.jl` |
 
 ## What this page is *not* yet
 
-- Animated GIF assets checked into Documenter  
-- `:fake_tool` PARAMS product capture (R5)  
+- Animated GIF assets checked into Documenter (R1)  
 
 See repository `docs/design/recording-docs-plan.md`.

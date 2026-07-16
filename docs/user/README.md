@@ -13,6 +13,7 @@ Operator-facing guides for **TachikomaTUI**, especially the **SPC Workbench**.
 |-------|-----|
 | [Getting started](getting-started.md) | Install/run, first launch, which app to open |
 | [Tutorial: blank → PECVD](tutorial-blank-to-pecvd.md) | Hands-on path: empty workbench, then three PECVD CSVs |
+| [Tutorial: fake-tool PARAMS](tutorial-fake-tool-params.md) | Film-PTPECVD01 catalog, `;` / pins / Compare |
 | [SPC Workbench guide](workbench.md) | Day-to-day operator use of the multi-chart workbench |
 | [Data import & export](data-import-export.md) | CSV, JSON sessions, templates, common pitfalls |
 
