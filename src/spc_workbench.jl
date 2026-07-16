@@ -2436,6 +2436,60 @@ end
 
 should_quit(m::SPCWorkbenchModel) = m.quit
 
+# ── Terminal mouse (Windows + Linux/macOS) ─────────────────────────────
+# Tachikoma enables 1000/1002/1006 only; we re-assert + 1003 (hover) in init!
+# and clear Quick Edit on Windows so clicks reach the app. Helpers live in
+# terminal_mouse.jl when loaded via TachikomaTUI; raw test includes may not
+# have them — guard so pure/UI TestBackend suites still load.
+
+"""One-shot setup when `app(m)` starts: full SGR mouse + host console prep."""
+function init!(m::SPCWorkbenchModel, t::Terminal)
+    if isdefined(@__MODULE__, :enable_app_mouse!)
+        enable_app_mouse!(t)
+        isdefined(@__MODULE__, :bind_app_mouse_terminal!) && bind_app_mouse_terminal!(t)
+        m.last_event = Sys.iswindows() ?
+            "mouse on (win: VT+no-quick-edit, 1000/2/3/6)" :
+            "mouse on (1000/2/3/6 hover)"
+    else
+        # Fallback if terminal_mouse.jl not included (raw include path)
+        try
+            t.mouse_enabled = true
+            print(t.io, "\e[?1000h\e[?1002h\e[?1003h\e[?1006h")
+            flush(t.io)
+        catch
+        end
+    end
+    return nothing
+end
+
+"""Teardown after TUI exit: drop 1003 + restore Windows console mode."""
+function cleanup!(m::SPCWorkbenchModel)
+    if isdefined(@__MODULE__, :disable_app_mouse!)
+        # Prefer terminal IO if still bound
+        if isdefined(@__MODULE__, :_ACTIVE_MOUSE_TERM) && _ACTIVE_MOUSE_TERM[] !== nothing
+            disable_app_mouse!(_ACTIVE_MOUSE_TERM[])
+        else
+            disable_app_mouse!()
+        end
+        isdefined(@__MODULE__, :unbind_app_mouse_terminal!) && unbind_app_mouse_terminal!()
+    else
+        try
+            print(stdout, "\e[?1000l\e[?1002l\e[?1003l\e[?1006l")
+            flush(stdout)
+        catch
+        end
+    end
+    return nothing
+end
+
+# Periodic re-assert (stock Ctrl+G re-enable omits 1003). Dispatched by Tachikoma app loop.
+function Tachikoma.pre_render!(m::SPCWorkbenchModel)
+    if isdefined(@__MODULE__, :maybe_reassert_app_mouse!)
+        maybe_reassert_app_mouse!(m.tick)
+    end
+    return nothing
+end
+
 function _boot_viewport(d::WorkbenchData; usl=nothing, lsl=nothing, show_lines=DEFAULT_CHART_LINES)
     nn = length(d.values)
     nn <= 0 && return Viewport(x0 = 0, x1 = 0, ylo = 0.0, yhi = 1.0)
@@ -6492,8 +6546,11 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     end
 
     m.last_event = string(evt.action, " ", evt.button)
-    if evt.action == mouse_move || evt.action == mouse_press || evt.action == mouse_drag
+    # Thin │ follows only while LMB is held (press / drag). Free mouse_move does not.
+    if evt.action == mouse_press || evt.action == mouse_drag
         m.hover_x = evt.x
+    elseif evt.action == mouse_move && evt.button == mouse_left
+        m.hover_x = evt.x  # some hosts report held motion as move+left
     end
 
     pa = m.plot_area
@@ -6630,6 +6687,8 @@ function update!(m::SPCWorkbenchModel, evt::MouseEvent)
     end
 
     if evt.action == mouse_move
+        # Free move: keep sticky selected (thick ┃); no thin │ (hover_x only on LMB hold).
+        # Still update hovered for tooltip / side chrome.
         m.hovered = compute_hovered_index(evt.x, evt.y, pa, m.data, m.viewport)
     end
     _sync_active_back!(m)
@@ -6877,6 +6936,7 @@ function _render_series_canvas!(
     end
 
     # Hover / select overlays (primary only)
+    # Thin │ only while LMB held (hover_x); sticky ┃ from selected after snap.
     if draw_hover
         if m.hover_x !== nothing
             hx = clamp(m.hover_x, plot_inner.x, right(plot_inner))
@@ -7038,7 +7098,7 @@ function _contextual_key_entries(m::SPCWorkbenchModel; expanded::Bool)
         push!(entries, (:binds, [("+", "add chart"), ("A", "add chart")]))
     end
     push!(entries, (:section, "MOUSE"))
-    push!(entries, (:note, "hover · click select · drag pan · dblclick viol = explain"))
+    push!(entries, (:note, "LMB hold=│ · release=┃ sticky · drag pan · dblclick viol = explain"))
     push!(entries, (:note, "WECO chip = explain · dash w=explain · lib w=save · config w=Save As"))
     return entries
 end
@@ -8353,7 +8413,7 @@ function _render_plot_legend_box!(buf, plot_inner::Rect)
     inner = render(blk, leg_outer, buf)
     maxw = max(1, inner.width)
     # Single horizontal chrome line (eye-catching warning)
-    line = "│hover · ┃sel · drag · wheel · [ ]sw"
+    line = "│hold · ┃sel · drag · wheel · [ ]sw"
     y = inner.y
     if y <= bottom(inner)
         set_string!(buf, inner.x, y, _side_trunc(line, maxw), tstyle(:warning, bold = true))
