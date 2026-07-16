@@ -5537,6 +5537,14 @@ function update!(m::SPCWorkbenchModel, evt::KeyEvent)
     # view mode overlays (help/keymap) close on esc/q or re-toggle
     if m.view_mode == :help || m.view_mode == :keymap
         c = (evt.key == :char ? evt.char : '\0')
+        # Open local Documenter HTML in the system browser (private app; not public host).
+        # Available from help *and* keymap. Dashboard `o` remains Config → Visual.
+        if evt.key == :char && (c == 'o' || c == 'O')
+            # Prefer tutorial when opened from help; index from keymap (full map → home)
+            page = m.view_mode == :help ? "tutorial.html" : "index.html"
+            m.last_event = open_local_docs(; page = page)
+            return
+        end
         if evt.key == :escape || (evt.key == :char && (evt.char == 'q' || evt.char == 'h' || evt.char == 'k' || evt.char == '?'))
             m.view_mode = :dashboard
             m.last_event = "closed overlay"
@@ -7105,7 +7113,10 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:section, "PAGES"),
             (:binds, [("m", "library"), ("x", "tools"), ("d", "table"), ("b", "builder")]),
             (:binds, [("e", "saved cfg"), ("h", "this help"), ("k", "keymap"), ("Esc", "close")]),
-            (:binds, [("q", "close")]),
+            (:binds, [("q", "close"), ("O", "open HTML docs")]),
+            (:section, "LOCAL DOCS (browser)"),
+            (:note, "O — open Documenter HTML (tutorial) in your browser"),
+            (:note, "needs docs/build — once: julia --project=docs docs/make.jl"),
             (:section, "DASHBOARD"),
             (:binds, [("p", "pause"), ("g", "live"), ("[ ]", "chart"), ("←→", "pan")]),
             (:binds, [("r/z", "reset"), ("u/t/l", "specs"), ("1-8", "WECO"), ("w", "explain")]),
@@ -7130,6 +7141,8 @@ function _mode_key_entries(mode::Symbol; compact::Bool = true)
             (:binds, [("c", "config"), ("v", "lines"), ("o", "visual"), ("s", "clear specs")]),
             (:binds, [("u/t/l", "specs"), ("1-8", "WECO"), ("w", "explain"), ("h", "help")]),
             (:binds, [("[ ]", "chart"), ("←→", "pan"), ("r/z", "reset"), ("q/Esc", "quit/close")]),
+            (:section, "LOCAL DOCS"),
+            (:note, "from this page: O opens HTML docs (index) in browser · needs docs/build"),
             (:section, "CONFIG"),
             (:note, "full page: Tab · s/w Save As · S Save · W Load · p/P path · load → dash"),
             (:section, "MOUSE"),
@@ -9773,5 +9786,183 @@ end
 const advanced_spc = spc_workbench
 const run_advanced_spc = spc_workbench
 
-# Ensure TachikomaTUI can see the new symbols when included
-# (exports happen in TachikomaTUI.jl)
+# ── Tutorial / recording helpers (R3–R4) ───────────────────────────────
+
+"""
+    make_spc_workbench_model(; paused=true, seed_demos=:triple, load=nothing, value_col="Value")
+
+Construct an `SPCWorkbenchModel` the same way the public runners do, **without**
+calling `app`. Used for headless `record_app` demos and tests.
+"""
+function make_spc_workbench_model(;
+    paused::Bool = true,
+    seed_demos::Symbol = :triple,
+    load::Union{Nothing,AbstractString} = nothing,
+    value_col::String = "Value",
+)::SPCWorkbenchModel
+    seed = _normalize_seed_demos(seed_demos)
+    d = if seed === :none
+        empty_workbench_data()
+    else
+        generate_spc_workbench_data(40; seed = 42)
+    end
+    n = length(d.values)
+    vp = Viewport(x0 = n > 0 ? 1 : 0, x1 = n > 0 ? n : 0, ylo = 0.0, yhi = 1.0)
+    if n > 0
+        lz = compute_limits_and_zones(d.values; sigma_method = :mr)
+        auto_fit_viewport_y!(vp, d.values, lz)
+    end
+    m = SPCWorkbenchModel(data = d, viewport = vp, paused = paused, seed_demos = seed)
+    if n > 0
+        clamp_viewport!(m.viewport, n)
+    end
+    _ensure_charts!(m)
+    if load !== nothing
+        import_csv_new_chart!(m, load; value_col = value_col)
+        m.paused = true
+    end
+    return m
+end
+
+"""Blank-slate workbench: one empty Primary, no tools/params (`seed_demos=:none`)."""
+make_blank_workbench(; paused::Bool = true) =
+    make_spc_workbench_model(; paused = paused, seed_demos = :none)
+
+"""Default on-disk PECVD tutorial fixtures (repo `test/fixtures/spc/pecvd`)."""
+function default_pecvd_fixture_dir()::String
+    # Prefer package-relative path so scripts work from any cwd.
+    pkg = dirname(@__DIR__)  # src/ → package root
+    p = joinpath(pkg, "test", "fixtures", "spc", "pecvd")
+    isdir(p) && return p
+    # Fallback: cwd-relative (CI / repo root)
+    cwd_p = joinpath("test", "fixtures", "spc", "pecvd")
+    isdir(cwd_p) && return abspath(cwd_p)
+    return p
+end
+
+"""
+    make_pecvd_tutorial_workbench(; fixture_dir=default_pecvd_fixture_dir(), paused=true)
+
+Hand-path tutorial session: blank seed, then load the three PECVD CSVs via the
+import API (oxide thickness → Primary, RI + HSQ as new charts). Sets names,
+spec limits, tool assignment, and tools registry — same end state as the
+operator walkthrough, without typing paths in a path-prompt during `record_app`.
+"""
+function make_pecvd_tutorial_workbench(;
+    fixture_dir::AbstractString = default_pecvd_fixture_dir(),
+    paused::Bool = true,
+)::SPCWorkbenchModel
+    dir = String(fixture_dir)
+    oxide = joinpath(dir, "oxide_thickness_1_3um.csv")
+    ri = joinpath(dir, "refractive_index.csv")
+    hsq = joinpath(dir, "hsq_thickness.csv")
+    for f in (oxide, ri, hsq)
+        isfile(f) || error("PECVD fixture missing: $f")
+    end
+
+    m = make_blank_workbench(; paused = paused)
+    r1 = import_csv_into_model!(m, oxide; chart_idx = 1)
+    r1 isa CsvParseErr && error("import oxide: $(r1.message)")
+    r2 = import_csv_new_chart!(m, ri; name = "Refractive Index")
+    r2 isa CsvParseErr && error("import RI: $(r2.message)")
+    r3 = import_csv_new_chart!(m, hsq; name = "HSQ Thickness")
+    r3 isa CsvParseErr && error("import HSQ: $(r3.message)")
+
+    rename_chart!(m, 1, "Oxide Thickness 1.3um")
+    # import_csv_new_chart! names 2/3 from basename unless name= was set
+    rename_chart!(m, 2, "Refractive Index")
+    rename_chart!(m, 3, "HSQ Thickness")
+
+    add_tool!(m, "Film-PTPECVD01", "PECVD oxide film tool (tutorial)")
+    # Activate Primary *before* writing per-chart specs. set_active_chart! /
+    # _sync_active_back! can overwrite the previous active chart's usl/target/lsl
+    # from stale legacy mirrors (last import leaves active on chart 3).
+    set_active_chart!(m, 1)
+    m.dashboard_max_panes = 1
+
+    specs = (
+        (1320.0, 1300.0, 1280.0),  # oxide nm
+        (1.48, 1.46, 1.44),        # RI
+        (640.0, 600.0, 560.0),     # HSQ nm
+    )
+    for (i, (usl, tgt, lsl)) in enumerate(specs)
+        ch = m.charts[i]
+        ch.usl = usl
+        ch.target = tgt
+        ch.lsl = lsl
+        ch.tools = String["Film-PTPECVD01"]
+        ch.live_enabled = false
+    end
+    # Keep legacy mirrors in sync with active (chart 1) specs for view paths.
+    m.usl = m.charts[1].usl
+    m.target = m.charts[1].target
+    m.lsl = m.charts[1].lsl
+    m.paused = true
+    m.last_event = "PECVD tutorial session (3 charts, Film-PTPECVD01)"
+    return m
+end
+
+function _mk_record_parent!(path::AbstractString)
+    parent = dirname(path)
+    !isempty(parent) && mkpath(parent)
+    return nothing
+end
+
+"""
+    record_blank_workbench_demo(path="blank_workbench.tach"; width=100, height=30, fps=10) -> String
+
+Headless capture of a **blank** workbench (`seed_demos=:none`): help → keymap →
+library, then back to the empty Primary. Does **not** Esc on the dashboard
+(Esc there quits). Returns the path written.
+"""
+function record_blank_workbench_demo(
+    path::AbstractString = "blank_workbench.tach";
+    width::Int = 100,
+    height::Int = 30,
+    fps::Int = 10,
+)::String
+    m = make_blank_workbench()
+    # Avoid Esc on dashboard (quits). Close overlay pages with Esc only.
+    events = [
+        (8, KeyEvent('h')),        # help
+        (28, KeyEvent(:escape)),   # dashboard
+        (38, KeyEvent('k')),       # keymap
+        (58, KeyEvent(:escape)),
+        (68, KeyEvent('m')),       # library (empty Primary)
+        (88, KeyEvent(:escape)),
+        (98, KeyEvent('?')),       # footer keys expand (stays dashboard)
+    ]
+    _mk_record_parent!(path)
+    record_app(m, String(path); width = width, height = height, frames = 120, fps = fps, events = events)
+    return String(path)
+end
+
+"""
+    record_pecvd_tutorial_demo(path="pecvd_tutorial.tach"; fixture_dir=..., width=100, height=32, fps=10) -> String
+
+Headless capture of the **PECVD hand-path** session (three CSVs preloaded via
+API). Navigates library, chart cycle, tools registry, and builder. Returns path.
+"""
+function record_pecvd_tutorial_demo(
+    path::AbstractString = "pecvd_tutorial.tach";
+    fixture_dir::AbstractString = default_pecvd_fixture_dir(),
+    width::Int = 100,
+    height::Int = 32,
+    fps::Int = 10,
+)::String
+    m = make_pecvd_tutorial_workbench(; fixture_dir = fixture_dir)
+    events = [
+        (8, KeyEvent('m')),        # library — three charts
+        (30, KeyEvent(:escape)),
+        (40, KeyEvent(']')),       # next chart (RI)
+        (55, KeyEvent(']')),       # next (HSQ)
+        (70, KeyEvent('[')),       # back
+        (85, KeyEvent('x')),       # tools registry
+        (105, KeyEvent(:escape)),
+        (115, KeyEvent('b')),      # builder on active chart
+        (140, KeyEvent(:escape)),
+    ]
+    _mk_record_parent!(path)
+    record_app(m, String(path); width = width, height = height, frames = 160, fps = fps, events = events)
+    return String(path)
+end

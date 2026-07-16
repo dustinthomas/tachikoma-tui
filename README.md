@@ -10,7 +10,21 @@ julia --project=. test/runtests.jl
 
 # Launch the starter TUI
 julia --project=. -e 'using TachikomaTUI; TachikomaTUI.hello_tachikoma()'
+
+# Headless screen capture of the Hello demo → .tach (Tachikoma recorder)
+julia --project=. scripts/record_hello_demo.jl
+
+# Tutorial path recordings: blank workbench + PECVD hand-path
+julia --project=. scripts/record_tutorial_path.jl
+
+# Local Documenter HTML in the browser (private app — not a public site)
+julia --project=docs docs/make.jl          # once
+julia --project=. scripts/open_docs.jl      # or: open_local_docs()
+# In workbench: h then O (tutorial) · k then O (home)
 ```
+
+Operator tutorial (blank → three PECVD CSVs): `docs/user/tutorial-blank-to-pecvd.md`.
+
 
 In the TUI:
 - `space`, `+`, or `↑` → increment counter

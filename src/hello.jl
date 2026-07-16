@@ -82,3 +82,45 @@ function hello_tachikoma()
 end
 
 const run_hello = hello_tachikoma
+
+"""
+    record_hello_demo(path="hello_demo.tach"; width=60, height=12, fps=10) -> String
+
+Headless screen capture of the Hello counter using Tachikoma's `record_app`.
+
+Simulates a short scripted session (increment → reset → increment → quit) and
+writes a `.tach` recording to `path`. Returns the path written.
+
+This is the trivial documentation / CI recording seed — start here before
+workbench captures. Interactive live capture uses **Ctrl+R** in a running app.
+
+# Example
+
+```julia
+using TachikomaTUI
+record_hello_demo("docs/assets/hello_demo.tach")
+```
+"""
+function record_hello_demo(
+    path::AbstractString = "hello_demo.tach";
+    width::Int = 60,
+    height::Int = 12,
+    fps::Int = 10,
+)::String
+    m = HelloModel()
+    # Frame-indexed scripted keys (1-based capture frames after any warmup)
+    events = [
+        (5, KeyEvent(' ')),   # count → 1
+        (10, KeyEvent('+')),  # count → 2
+        (15, KeyEvent(:up)),  # count → 3
+        (22, KeyEvent('r')),  # reset → 0
+        (28, KeyEvent('+')),  # count → 1
+        (40, KeyEvent(:escape)),
+    ]
+    parent = dirname(path)
+    if !isempty(parent)
+        mkpath(parent)
+    end
+    record_app(m, String(path); width = width, height = height, frames = 45, fps = fps, events = events)
+    return String(path)
+end

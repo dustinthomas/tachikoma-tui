@@ -23,6 +23,7 @@ Always use **`julia --project=.`** so the package and deps resolve correctly.
 | Goal | Command |
 |------|---------|
 | Try the **full workbench** (recommended) | `spc_workbench_demo()` |
+| **Tutorial:** blank → PECVD CSVs | `spc_workbench_demo(seed_demos=:none)` then [tutorial-blank-to-pecvd.md](tutorial-blank-to-pecvd.md) |
 | Workbench with live ticks | `spc_workbench()` or `spc_workbench(paused=true)` |
 | Load a saved session | `spc_workbench(workbench="path/to/session.json")` |
 | Simple single control chart | `static_spc_demo()` or `spc_demo()` |
@@ -56,6 +57,42 @@ julia --project=. -e 'using TachikomaTUI; TachikomaTUI.hello_tachikoma()'
 ```
 
 Keys: `space` / `+` / `↑` increment, `r` reset, `q` quit.
+
+**Headless recording** (Tachikoma `.tach` capture of the same app):
+
+```bash
+julia --project=. scripts/record_hello_demo.jl
+```
+
+See Documenter page *Recording demos* and `docs/design/recording-docs-plan.md`.
+
+---
+
+## Local HTML docs in the browser
+
+This app is private/local. Full docs are **Documenter** HTML under `docs/build/`
+(not a public website).
+
+**Build once** (from repo root):
+
+```bash
+julia --project=docs -e 'using Pkg; Pkg.instantiate()'
+julia --project=docs docs/make.jl
+```
+
+**Open from the workbench:** press **`h`** (help) or **`k`** (keymap), then **`O`**.
+- Help → **O** opens the **tutorial** page  
+- Keymap → **O** opens the **docs home**  
+Status line reports success or “docs not built…”.
+
+**Open from the shell:**
+
+```bash
+julia --project=. scripts/open_docs.jl
+julia --project=. scripts/open_docs.jl tutorial
+```
+
+Or in Julia: `using TachikomaTUI; open_local_docs()` / `open_local_docs(page="tutorial")`.
 
 ---
 

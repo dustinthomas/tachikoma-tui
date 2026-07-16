@@ -17,6 +17,9 @@ include("test_spc.jl")
 end
 # SPC workbench (pure WECO via raw include + UI TestBackend)
 include("test_spc_workbench.jl")
+# Tutorial path recorders (R3–R4) — package load only
+include("test_recording_tutorial.jl")
+include("test_local_docs.jl")
 # include("test_my_feature.jl")
 
 # println guarded/removed per review (noise in test output)

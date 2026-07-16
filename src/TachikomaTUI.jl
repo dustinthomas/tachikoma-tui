@@ -11,9 +11,10 @@ include("hello.jl")
 include("spc.jl")
 include("spc_workbench.jl")
 include("spc_workbench_io.jl")  # PR3 CSV + PR4 JSON (after workbench types)
+include("local_docs.jl")        # open Documenter HTML in system browser
 
 # Public demo runners
-export HelloModel, hello_tachikoma, run_hello
+export HelloModel, hello_tachikoma, run_hello, record_hello_demo
 
 # SPC chart (visual tweaks: click vertical, markers, hover tooltip)
 export SPCData, SPCModel, Viewport, generate_spc_data
@@ -58,6 +59,12 @@ export extract_html_spc_state, extract_html_spc_state_file
 export html_state_to_workbench, html_state_to_workbench!
 export load_html_archive, load_html_archive!
 export spc_workbench_demo, run_spc_workbench, spc_workbench, advanced_spc, run_advanced_spc
+export make_spc_workbench_model, make_blank_workbench, make_pecvd_tutorial_workbench
+export default_pecvd_fixture_dir
+export record_blank_workbench_demo, record_pecvd_tutorial_demo
+export add_tool!, delete_tool!
+export package_root, local_docs_build_dir, resolve_local_docs_file, file_url
+export open_in_browser, open_local_docs, LOCAL_DOCS_PAGES
 
 # SPC Workbench I/O (PR3 CSV import)
 export CsvParseOk, CsvParseErr, parse_csv_table

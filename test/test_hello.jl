@@ -55,4 +55,18 @@ using TachikomaTUI: HelloModel
             true
         end
     end
+
+    @testset "record_hello_demo writes loadable .tach" begin
+        using TachikomaTUI: record_hello_demo
+        path = joinpath(mktempdir(), "hello_demo.tach")
+        out = record_hello_demo(path; width = 40, height = 10, fps = 10)
+        @test out == path
+        @test isfile(path)
+        @test filesize(path) > 0
+        w, h, cells, timestamps, pixels = T.load_tach(path)
+        @test w == 40
+        @test h == 10
+        @test length(cells) >= 1
+        @test length(timestamps) == length(cells)
+    end
 end

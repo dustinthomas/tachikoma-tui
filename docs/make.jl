@@ -22,6 +22,8 @@ makedocs(;
     pages = [
         "Home" => "index.md",
         "SPC Workbench" => "spc-workbench.md",
+        "Tutorial path" => "tutorial.md",
+        "Recording demos" => "recording-demos.md",
         "API" => "api.md",
     ],
     # Many public names are thin reexports without full docstrings yet.
