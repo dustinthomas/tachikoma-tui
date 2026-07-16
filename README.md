@@ -18,9 +18,10 @@ julia --project=. scripts/record_hello_demo.jl
 julia --project=. scripts/record_tutorial_path.jl
 
 # Local Documenter HTML in the browser (private app — not a public site)
-julia --project=docs docs/make.jl          # once
+# Prebuilt under docs/build/ (committed) — works after git pull with no build step
 julia --project=. scripts/open_docs.jl      # or: open_local_docs()
 # In workbench: h then O (tutorial) · k then O (home)
+# After editing docs/src: julia --project=docs docs/make.jl  then commit docs/build
 ```
 
 Operator tutorial (blank → three PECVD CSVs): `docs/user/tutorial-blank-to-pecvd.md`.
@@ -103,11 +104,14 @@ repo in a feature PR.
 | `docs/src/spc-workbench.md` | Authoritative keys + CSV + JSON schema v1 |
 | `README.md` (this file) | Quick start and verification gates |
 
-Documenter lives under `docs/` (separate env, not a runtime dep):
+Documenter lives under `docs/` (separate env, not a runtime dep). **Prebuilt HTML
+is committed in `docs/build/`** so workbench `O` / `scripts/open_docs.jl` work
+after `git pull` without installing Documenter. When you change `docs/src` or
+`docs/make.jl`, rebuild and commit the output:
 
 ```bash
 julia --project=docs -e 'using Pkg; Pkg.instantiate()'
-julia --project=docs docs/make.jl   # must exit 0
+julia --project=docs docs/make.jl   # must exit 0; then commit docs/build/
 ```
 
 Documenter pages today: `docs/src/index.md` (home), `docs/src/spc-workbench.md`

@@ -3847,9 +3847,10 @@ end
         @test !occursin("hover  ┃ select  drag pan", dl)
 
         # 2) Legend box top-right, horizontal strip, full box outline
-        @test occursin("hover", full)
-        @test occursin("select", full) || occursin("┃", full) || occursin("sel", full)
-        @test occursin("pan", full) || occursin("drag", full)
+        # Chrome: "│hold · ┃sel · drag · wheel · [ ]sw" (mouse PR — sticky select, hold for thin │)
+        @test occursin("hold", full) || occursin("Keys", full)
+        @test occursin("sel", full) || occursin("┃", full)
+        @test occursin("drag", full) || occursin("wheel", full)
         has_box = occursin("╭", full) || occursin("┌", full) || occursin("│", full)
         @test has_box
         pa = m.plot_area
@@ -3861,9 +3862,9 @@ end
             rstrip(String([T.char_at(tb, x, y) for x in x0:T.right(pa)]))
             for y in pa.y:y1
         ], "\n")
-        @test occursin("Keys", legend_blob) || occursin("hover", legend_blob)
+        @test occursin("Keys", legend_blob) || occursin("hold", legend_blob) || occursin("sel", legend_blob)
         # Horizontal: at least two chrome tokens share one row (not tall vertical stack)
-        horiz = any(r -> count(t -> occursin(t, r), ("hover", "sel", "drag", "pan", "wheel", "switch", "┃", "│")) >= 2,
+        horiz = any(r -> count(t -> occursin(t, r), ("hold", "sel", "drag", "wheel", "sw", "┃", "│")) >= 2,
                     split(legend_blob, "\n"))
         @test horiz
         # Not in bottom-left (old placement)

@@ -1,10 +1,11 @@
-# Documenter build entry — PR11 gate: this script must exit 0.
+# Documenter build entry — must exit 0 when docs change.
+# Prebuilt HTML under docs/build/ is committed so workbench O works after git pull.
 #
 # Instantiate (once per env):
 #   julia --project=docs -e 'using Pkg; Pkg.instantiate()'
 # Fallback if [sources] path dep is unavailable:
 #   julia --project=docs -e 'using Pkg; Pkg.develop(path=".."); Pkg.instantiate()'
-# Build:
+# Build (then commit docs/build/ with source changes):
 #   julia --project=docs docs/make.jl
 
 using Documenter

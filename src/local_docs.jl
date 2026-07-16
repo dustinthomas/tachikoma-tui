@@ -1,9 +1,10 @@
 # ═══════════════════════════════════════════════════════════════════════
 # Local Documenter HTML — open in system browser (private / offline app)
 #
-# Build once:
+# Prebuilt HTML is committed under docs/build/ so O works after git pull.
+# Rebuild after editing docs/src (then commit the new build):
 #   julia --project=docs docs/make.jl
-# Then from the workbench: h → o   or  open_local_docs()
+# Workbench: h → O   or  open_local_docs() / scripts/open_docs.jl
 # ═══════════════════════════════════════════════════════════════════════
 
 """Package root (directory containing `src/` and `docs/`)."""
@@ -173,7 +174,7 @@ open_local_docs(page = "tutorial")   # tutorial.html
 open_local_docs(dry_run = true)      # resolve only; no browser
 ```
 
-If HTML is missing, the message tells you to build:
+If HTML is missing (e.g. partial checkout), the message tells you to rebuild:
 
 ```bash
 julia --project=docs docs/make.jl
@@ -186,7 +187,7 @@ function open_local_docs(;
 )::String
     path = resolve_local_docs_file(page)
     if path === nothing
-        return "docs not built — run: julia --project=docs docs/make.jl"
+        return "docs not built — run: julia --project=docs docs/make.jl (or git pull for prebuilt docs/build)"
     end
     url = file_url(path)
     if dry_run

@@ -5,7 +5,7 @@
 #   julia --project=. scripts/open_docs.jl tutorial
 #   julia --project=. scripts/open_docs.jl spc-workbench
 #
-# Build first if needed:
+# Prebuilt docs/build is in git. Rebuild after docs/src edits:
 #   julia --project=docs docs/make.jl
 
 using TachikomaTUI

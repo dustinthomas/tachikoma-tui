@@ -57,7 +57,10 @@ Project config: `.JuliaFormatter.toml` (indent=4, margin=92).
 ## Documentation
 
 - Public API: `"""..."""` docstrings on exported functions/types.
-- Documenter lives in `docs/` (separate env). Scaffold only until PR11 green.
+- Documenter lives in `docs/` (separate env). Sources: `docs/src/`. **HTML output
+  `docs/build/` is committed** so operators get browser docs after `git pull`
+  without a Documenter install. After editing docs sources:
+  `julia --project=docs docs/make.jl`, then commit both sources and `docs/build/`.
 - README: quick start / runners / gates. Documenter: concepts, schema, API.
 
 ## Suite wiring note (KD22 / KD24)

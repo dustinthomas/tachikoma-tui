@@ -110,7 +110,7 @@ record_fake_tool_tutorial_demo("agent_logs/fake_tool_tutorial.tach")
 
 ## Open HTML docs from the app
 
-After `julia --project=docs docs/make.jl`: **`h` → `O`** (tutorial index) or  
+Prebuilt HTML is in `docs/build/` (after `git pull`): **`h` → `O`** (tutorial index) or  
 `julia --project=. scripts/open_docs.jl tutorial`.
 
 ---

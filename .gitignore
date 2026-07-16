@@ -22,8 +22,10 @@ Manifest.toml
 
 # Build artifacts (if any)
 dist/
-build/
-docs/build/
+/build/
+# docs/build/ is committed so `O` / open_local_docs works after git pull
+# without requiring Documenter on every machine. Rebuild + re-commit when
+# docs/src or docs/make.jl change: julia --project=docs docs/make.jl
 docs/Manifest.toml
 package-lock.json
 
