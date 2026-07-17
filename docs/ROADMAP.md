@@ -17,7 +17,7 @@ The **SPC Workbench** is the main app. On `master` you can already:
 | **Classic mouse** | Hover, pan, zoom, selection on **primary** plot |
 | **Library** | CRUD, activate chart, CSV import/export, JSON save/load, library mouse hit-test |
 | **Builder** | Chart type, column maps, tools CSV, owner, subgroup size, limits mode, materialize |
-| **Tools registry** | Master tool list (`x`); assign tools to charts in **builder** |
+| **Tools registry** | Master tool list (`x`); assign tools to charts in **builder**; public `replace_tools!` for external registries (FabTUI) |
 | **SharedTable grid** | Inspect/edit cells (`d` from dashboard); explicit rematerialize |
 | **Chart types** | I-MR, X̄-R, X̄-S, p, np, c, u (typed limits / series math) |
 | **I/O** | Series-first CSV, JSON session schema **v1** (charts + optional table/tools/prefs), HTML archive load |
@@ -86,10 +86,12 @@ Drawn from `design-spc-p2-polish-plan.md` and ongoing product direction. Many P2
 
 **Explicit non-goals (locked):**
 
+> **FabTUI boundary:** TachikomaTUI stays offline/demo-capable. No Fab HTTP or login here. External **FabTUI** will call `replace_tools!` (equipment) and `fill_shared_table!` / `shared_table_from_columns_rows` (series) after its own auth layer.
+
 | Item | Disposition |
 |------|-------------|
 | Excel / XLSX | Out |
-| Admin passwords / multi-user auth | Out |
+| Admin passwords / multi-user auth | **Out of TachikomaTUI scope** — production auth + equipment HTTP live in future **FabTUI** (depends on `replace_tools!` / public table loaders) |
 | Permanent `view_mode=:focused` as product mode | Out (temporary dual height compress only) |
 | Dual secondary canvas on **neighbor** panes | Out (height) |
 | Auto-rematerialize charts on JSON/HTML load | Out |
