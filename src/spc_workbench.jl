@@ -4135,6 +4135,26 @@ function delete_tool!(m::SPCWorkbenchModel, idx::Int)::Bool
     return true
 end
 
+"""
+    replace_tools!(m, entries) -> Nothing
+
+Bulk-replace the master tools registry (`m.tools`) with `entries`.
+Clamps `tools_selected` into the new length (empty → selected=1) and resets
+`tools_scroll` to 0, then runs `_sync_tools_scroll!` so selection stays
+visible. Does not modify per-chart `ch.tools` filters.
+
+Intended for external registries (e.g. FabTUI equipment sync). Prefer this
+over assigning `m.tools` directly so UI selection state stays consistent.
+"""
+function replace_tools!(m::SPCWorkbenchModel, entries::Vector{ToolEntry})
+    m.tools = entries
+    n = length(m.tools)
+    m.tools_selected = n >= 1 ? clamp(m.tools_selected, 1, n) : 1
+    m.tools_scroll = 0
+    _sync_tools_scroll!(m)
+    return nothing
+end
+
 """Rows available for the tools list (matches `_render_tools_page!` geometry).
 
 Chrome: title + summary ≈ 4 top. Bottom Message|Keys lives outside `tools_area`

@@ -3017,6 +3017,65 @@ include("../src/spc_workbench_io.jl")
         @test i == 1
         @test isempty(m.charts[1].tools)
     end
+
+    @testset "tools registry bulk replace (replace_tools!)" begin
+        d = generate_spc_workbench_data(8; seed = 11)
+        m = SPCWorkbenchModel(data = d, paused = true, seed_demos = :none)
+        @test isempty(m.tools)
+
+        # seed a few via add_tool!, then bulk-replace with a shorter list
+        add_tool!(m, "OLD-1", "old one")
+        add_tool!(m, "OLD-2", "old two")
+        add_tool!(m, "OLD-3", "old three")
+        @test length(m.tools) == 3
+        m.tools_selected = 3
+        m.tools_scroll = 2
+
+        entries = [
+            ToolEntry(id = "EQ-A", description = "etch chamber A"),
+            ToolEntry(id = "EQ-B", description = "cvd chamber B"),
+        ]
+        @test replace_tools!(m, entries) === nothing
+        @test length(m.tools) == 2
+        @test m.tools[1].id == "EQ-A"
+        @test m.tools[2].id == "EQ-B"
+        @test m.tools[1].description == "etch chamber A"
+        # selection clamped into new length; scroll reset then synced
+        @test m.tools_selected == 2  # was 3, clamped to n=2
+        @test m.tools_scroll == 0
+
+        # empty replace resets selection/scroll like delete_tool! on last entry
+        m.tools_selected = 2
+        m.tools_scroll = 1
+        @test replace_tools!(m, ToolEntry[]) === nothing
+        @test isempty(m.tools)
+        @test m.tools_selected == 1
+        @test m.tools_scroll == 0
+
+        # replace does not touch chart tool filters
+        add_chart!(m; name = "C-bulk")
+        m.charts[1].tools = ["EQ-A", "GHOST"]
+        replace_tools!(m, [ToolEntry(id = "EQ-Z", description = "z")])
+        @test m.charts[1].tools == ["EQ-A", "GHOST"]
+        @test length(m.tools) == 1
+        @test m.tools[1].id == "EQ-Z"
+        @test m.tools_selected == 1
+        @test m.tools_scroll == 0
+
+        # fill_shared_table! / shared_table_from_columns_rows remain public (export smoke)
+        @test isdefined(TachikomaTUI, :fill_shared_table!)
+        @test isdefined(TachikomaTUI, :shared_table_from_columns_rows)
+        @test isdefined(TachikomaTUI, :replace_tools!)
+        cols = ["Value"]
+        rows = [["1.0"], ["2.0"]]
+        tbl = shared_table_from_columns_rows(cols, rows)
+        @test length(tbl.columns) == 1
+        @test length(tbl.rows) == 2
+        fill_shared_table!(m, cols, rows)
+        @test length(m.table.columns) == 1
+        @test length(m.table.rows) == 2
+        @test m.table.columns == cols
+    end
 end
 
 # ═══════════════════════════════════════════════════════════════════════
